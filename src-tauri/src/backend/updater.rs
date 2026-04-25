@@ -347,7 +347,7 @@ fn github_client() -> Result<Client, DynError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("AeroForgeControlUpdater/0.1.0"),
+        HeaderValue::from_static("AeroForgeControlUpdater/0.11.0"),
     );
     headers.insert(
         ACCEPT,

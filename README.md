@@ -57,7 +57,7 @@ npm.cmd run portable:build
 This creates:
 
 - `portable\AeroForge Control Portable\`
-- `portable\AeroForge-Control-Portable-0.1.0.zip`
+- `portable\AeroForge-Control-Portable-0.11.0.zip`
 
 ## Notes for backend wiring later
 

@@ -887,7 +887,7 @@ function App() {
   const [customBootFilename, setCustomBootFilename] = useState<string>('custom-boot.png')
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
-  const [backendVersion, setBackendVersion] = useState('0.1.0')
+  const [backendVersion, setBackendVersion] = useState('0.11.0')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
