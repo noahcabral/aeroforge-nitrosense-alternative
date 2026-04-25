@@ -1,0 +1,51 @@
+:root {
+  font-family:
+    "Aptos",
+    "Segoe UI Variable Display",
+    "Trebuchet MS",
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #eef2f6;
+  background:
+    radial-gradient(circle at top, #223046 0%, rgba(34, 48, 70, 0) 38%),
+    linear-gradient(180deg, #06080c 0%, #0a0f16 45%, #05070b 100%);
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --accent: #eb8c5a;
+  --text-bright: #f4efe9;
+  --text-soft: rgba(231, 236, 241, 0.76);
+  --text-dim: rgba(231, 236, 241, 0.46);
+  --text-muted: rgba(231, 236, 241, 0.62);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  font-size: 15px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+img {
+  max-width: 100%;
+}
+
+#root {
+  min-height: 100vh;
+}

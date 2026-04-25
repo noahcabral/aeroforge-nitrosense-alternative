@@ -1,0 +1,45 @@
+[package]
+name = "aeroforge-control"
+version = "0.1.0"
+description = "Premium laptop fan control and power management desktop shell."
+authors = ["Noah"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "aeroforge-control"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "aeroforge_control_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "aeroforge-control"
+path = "src/main.rs"
+
+[[bin]]
+name = "pipe_probe"
+path = "src/bin/pipe_probe.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.3", features = [] }
+tauri-plugin-log = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1.0"
+sha2 = "0.10"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+] }
