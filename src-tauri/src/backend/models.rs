@@ -310,6 +310,24 @@ pub struct FanControlApplyResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BlueLightApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub gain_id: u8,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartChargeApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub battery_healthy: u8,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackendBootstrap {
     pub shell: ShellStatus,
     pub service: ServiceStatus,

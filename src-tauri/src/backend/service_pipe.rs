@@ -1,6 +1,8 @@
 use std::{
-    fs::OpenOptions,
+    env,
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
+    path::PathBuf,
     thread,
     time::Duration,
 };
@@ -10,10 +12,20 @@ use serde_json::Value;
 
 use super::models::{
     CapabilitySnapshot, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
-    PowerProfileId, ProcessorStateSettings, ServiceStatus, TelemetrySnapshot,
+    PowerProfileId, ProcessorStateSettings, ServiceStatus, ServiceWorkerStatus, TelemetrySnapshot,
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
+const SERVICE_NAME: &str = "AeroForgeService";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedSupervisorSnapshot {
+    service: String,
+    worker_count: usize,
+    updated_at_unix: Option<u64>,
+    workers: Vec<ServiceWorkerStatus>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -98,6 +110,48 @@ pub fn pipe_path() -> &'static str {
     PIPE_PATH
 }
 
+pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
+    let state_dir = service_state_dir();
+    let supervisor_file = supervisor_file_path();
+    let cached_snapshot = fs::read_to_string(&supervisor_file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<CachedSupervisorSnapshot>(&raw).ok());
+
+    let (service_name, worker_count, updated_at_unix, workers) =
+        if let Some(snapshot) = cached_snapshot {
+            (
+                snapshot.service,
+                snapshot.worker_count,
+                snapshot.updated_at_unix,
+                snapshot.workers,
+            )
+        } else {
+            (SERVICE_NAME.into(), 0, None, Vec::new())
+        };
+
+    let detail = if supervisor_file.exists() {
+        format!(
+            "Service unavailable: {pipe_error}. Loaded cached supervisor snapshot from {}.",
+            supervisor_file.display()
+        )
+    } else {
+        format!("Service unavailable: {pipe_error}")
+    };
+
+    ServiceStatus {
+        connected: false,
+        pipe_name: PIPE_PATH.into(),
+        service_name,
+        version: None,
+        state_dir: Some(state_dir.display().to_string()),
+        supervisor_file: Some(supervisor_file.display().to_string()),
+        worker_count,
+        updated_at_unix,
+        workers,
+        detail,
+    }
+}
+
 pub fn fetch_service_status() -> Result<ServiceStatus, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::GetServiceStatus)?;
     Ok(serde_json::from_value::<ServiceStatus>(payload)?)
@@ -112,6 +166,12 @@ pub fn fetch_capabilities() -> Result<CapabilitySnapshot, Box<dyn std::error::Er
 pub fn fetch_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::GetTelemetrySnapshot)?;
     Ok(serde_json::from_value::<TelemetrySnapshot>(payload)?)
+}
+
+pub fn fetch_cached_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>>
+{
+    let raw = fs::read_to_string(telemetry_file_path())?;
+    Ok(serde_json::from_str::<TelemetrySnapshot>(&raw)?)
 }
 
 pub fn fetch_live_controls() -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>>
@@ -199,4 +259,21 @@ fn open_pipe_with_retry() -> Result<std::fs::File, Box<dyn std::error::Error + S
     Err(last_error
         .unwrap_or_else(|| std::io::Error::other("Failed to open named pipe"))
         .into())
+}
+
+fn service_state_dir() -> PathBuf {
+    env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("AeroForge")
+        .join("Service")
+        .join("state")
+}
+
+fn telemetry_file_path() -> PathBuf {
+    service_state_dir().join("telemetry.json")
+}
+
+fn supervisor_file_path() -> PathBuf {
+    service_state_dir().join("supervisor.json")
 }

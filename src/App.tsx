@@ -8,14 +8,15 @@ import {
 } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
-import aeroforgeMark from './assets/aeroforge-mark.svg'
+import aeroforgeMark from './assets/aeroforge-mark.png'
 import {
+  applyBlueLightFilter,
   applyCustomFanCurves,
   applyFanProfile,
   applyGpuTuning,
   applyPowerProfile,
+  applySmartCharging,
   checkForUpdates,
-  clearUpdateToken,
   getBackendBootstrap,
   getLiveControlSnapshot,
   getPersistenceStatus,
@@ -24,7 +25,6 @@ import {
   getUpdateStatus,
   installStagedUpdate,
   saveControlSnapshot,
-  setUpdateToken,
   stageUpdateDownload,
   type ControlSnapshot,
   type LiveControlSnapshot,
@@ -341,7 +341,7 @@ const personalSections: {
   {
     id: 'updates',
     label: 'Updates',
-    description: 'Release channel, launch checks, and updater readiness.',
+    description: 'Release checks, staged installs, and updater status.',
   },
   {
     id: 'charge',
@@ -357,23 +357,6 @@ const personalSections: {
     id: 'boot',
     label: 'System Boot Effect',
     description: 'Boot image preview, selection, and upload staging.',
-  },
-]
-
-const updateChannels: {
-  id: UpdateChannel
-  label: string
-  description: string
-}[] = [
-  {
-    id: 'stable',
-    label: 'Stable',
-    description: 'Validated production release track.',
-  },
-  {
-    id: 'preview',
-    label: 'Preview',
-    description: 'Earlier builds before stable promotion.',
   },
 ]
 
@@ -589,6 +572,41 @@ function formatPowerSource(acPluggedIn: boolean | null | undefined) {
   }
 
   return acPluggedIn ? 'AC Plugged In' : 'Battery Power'
+}
+
+function hasUsableTelemetry(snapshot: TelemetrySnapshot | null | undefined) {
+  if (!snapshot) {
+    return false
+  }
+
+  return Boolean(
+    snapshot.cpuTempC > 0 ||
+      snapshot.cpuTempAverageC != null ||
+      snapshot.gpuTempC > 0 ||
+      snapshot.systemTempC > 0 ||
+      snapshot.cpuUsagePercent > 0 ||
+      snapshot.gpuUsagePercent > 0 ||
+      snapshot.gpuMemoryUsagePercent != null ||
+      snapshot.cpuClockMhz > 0 ||
+      snapshot.gpuClockMhz > 0 ||
+      snapshot.cpuFanRpm > 0 ||
+      snapshot.gpuFanRpm > 0 ||
+      snapshot.batteryPercent > 0 ||
+      snapshot.cpuName ||
+      snapshot.gpuName ||
+      snapshot.systemModel,
+  )
+}
+
+function describeTelemetrySource(
+  serviceConnected: boolean,
+  telemetry: TelemetrySnapshot | null | undefined,
+) {
+  if (serviceConnected) {
+    return 'Service pipe'
+  }
+
+  return hasUsableTelemetry(telemetry) ? 'Cached service state' : 'No telemetry'
 }
 
 function buildCpuThermalSummary(
@@ -818,7 +836,7 @@ function applyBackendControlSnapshot(
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
   setSelectedBootArt(controls.personalSettings.selectedBootArt)
   setCustomBootFilename(controls.personalSettings.customBootFilename)
-  setUpdateChannel(controls.personalSettings.updateChannel)
+  setUpdateChannel('stable')
   setCheckForUpdatesOnLaunch(controls.personalSettings.checkForUpdatesOnLaunch)
 }
 
@@ -860,8 +878,10 @@ function App() {
   const [fanSyncLockEnabled, setFanSyncLockEnabled] = useState(false)
   const [draggingPoint, setDraggingPoint] = useState<DragState | null>(null)
   const [smartChargingEnabled, setSmartChargingEnabled] = useState(true)
+  const smartChargingEnabledRef = useRef(true)
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
   const [blueLightFilterEnabled, setBlueLightFilterEnabled] = useState(false)
+  const blueLightFilterEnabledRef = useRef(false)
   const [selectedBootArt, setSelectedBootArt] = useState<string>('ember')
   const [customBootPreview, setCustomBootPreview] = useState<string | null>(null)
   const [customBootFilename, setCustomBootFilename] = useState<string>('custom-boot.png')
@@ -869,19 +889,20 @@ function App() {
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendVersion, setBackendVersion] = useState('0.1.0')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
-  const [updateTokenDraft, setUpdateTokenDraft] = useState('')
   const [updateActionPending, setUpdateActionPending] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
   const [statusMessage, setStatusMessage] = useState(
     'Frontend preview only. Hardware, EC, and firmware actions are not wired yet.',
   )
+  const [settingsActionPending, setSettingsActionPending] = useState<
+    null | 'smart-charge' | 'blue-light'
+  >(null)
   const [glowTarget, setGlowTarget] = useState<string>('balanced')
-  const [, setLiveControlSnapshot] = useState<LiveControlSnapshot | null>(null)
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
   const [serviceConnected, setServiceConnected] = useState(false)
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null)
   const [liveTelemetry, setLiveTelemetry] = useState<TelemetrySnapshot | null>(null)
-  const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('Preview fallback')
+  const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('No telemetry')
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
   const [debugEvents, setDebugEvents] = useState<string[]>([])
@@ -902,14 +923,18 @@ function App() {
   const [runtimeEstimateCountdownSec, setRuntimeEstimateCountdownSec] = useState(0)
   const initializedPersistenceRef = useRef(false)
   const activeTabRef = useRef(activeTab)
+  const debugEventsRef = useRef<string[]>([])
   const telemetrySnapshotRef = useRef<string | null>(null)
   const liveControlSnapshotStateRef = useRef<string | null>(null)
+  const liveControlSnapshotRef = useRef<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
 
   const activePreset =
     activeFanProfile === 'custom' ? customCurves : presetCurves[activeFanProfile]
   const fanTelemetryDescriptor = fanTelemetryByProfile[activeFanProfile]
   const smartChargeTarget = smartChargingEnabled ? '80%' : '100%'
+  const smartChargePending = settingsActionPending === 'smart-charge'
+  const blueLightPending = settingsActionPending === 'blue-light'
   const currentPowerProfile = powerProfiles.find(
     (profile) => profile.id === activePowerProfile,
   )!
@@ -925,7 +950,7 @@ function App() {
       : customOcSlot
   const ocProfileSlots = [...builtInOcProfileSlots, runtimeCustomOcSlot]
   const currentOcSlot = ocProfileSlots.find((slot) => slot.id === activeOcSlot)!
-  const activeTelemetry = serviceConnected ? liveTelemetry : null
+  const activeTelemetry = hasUsableTelemetry(liveTelemetry) ? liveTelemetry : null
   const displayedAcPluggedIn = activeTelemetry?.acPluggedIn ?? null
   const displayedCpuTemp = presentPositive(
     activeTelemetry?.cpuTempAverageC ?? activeTelemetry?.cpuTempC ?? null,
@@ -999,10 +1024,6 @@ function App() {
         : activePowerProfile === 'turbo'
           ? 'Direct Acer turbo mode apply with processor state pinned to 100% minimum and maximum.'
           : currentPowerProfile.summary
-  const currentUpdateChannel = updateChannels.find((channel) => channel.id === updateChannel)
-  const updateChannelLabel = currentUpdateChannel?.label ?? 'Stable'
-  const updateChannelDescription =
-    currentUpdateChannel?.description ?? 'Validated production release track.'
   const updateLastCheckedLabel = updateStatus?.lastCheckedAtUnix
     ? formatUnixClock(updateStatus.lastCheckedAtUnix)
     : 'Never'
@@ -1016,11 +1037,12 @@ function App() {
       ? 'Staged update ready'
       : updateStatus?.feedKind === 'none'
         ? 'No release yet'
-      : updateStatus?.tokenConfigured
-        ? 'Up to date'
-        : 'Key required'
+        : 'Up to date'
   useEffect(() => {
     activeTabRef.current = activeTab
+    if (activeTab === 'debug') {
+      setDebugEvents([...debugEventsRef.current])
+    }
   }, [activeTab])
 
   function commitCustomCurves(next: CurveSet | ((current: CurveSet) => CurveSet)) {
@@ -1031,6 +1053,16 @@ function App() {
       customCurvesRef.current = normalized
       return normalized
     })
+  }
+
+  function commitSmartChargingEnabled(enabled: boolean) {
+    smartChargingEnabledRef.current = enabled
+    setSmartChargingEnabled(enabled)
+  }
+
+  function commitBlueLightFilterEnabled(enabled: boolean) {
+    blueLightFilterEnabledRef.current = enabled
+    setBlueLightFilterEnabled(enabled)
   }
 
   function updateSerializedState<T>(
@@ -1057,6 +1089,8 @@ function App() {
     customProcessorState?: { min: number; max: number }
     customCurves?: CurveSet
     fanSyncLockEnabled?: boolean
+    smartChargingEnabled?: boolean
+    blueLightFilterEnabled?: boolean
     updateChannel?: UpdateChannel
     checkForUpdatesOnLaunch?: boolean
   }) {
@@ -1066,6 +1100,10 @@ function App() {
       overrides?.customProcessorState ?? customProcessorStateRef.current
     const nextCustomCurves = overrides?.customCurves ?? customCurvesRef.current
     const nextFanSyncLockEnabled = overrides?.fanSyncLockEnabled ?? fanSyncLockEnabled
+    const nextSmartChargingEnabled =
+      overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
+    const nextBlueLightFilterEnabled =
+      overrides?.blueLightFilterEnabled ?? blueLightFilterEnabledRef.current
     const nextUpdateChannel = overrides?.updateChannel ?? updateChannel
     const nextCheckForUpdatesOnLaunch =
       overrides?.checkForUpdatesOnLaunch ?? checkForUpdatesOnLaunch
@@ -1083,9 +1121,9 @@ function App() {
           ocTuningLocked,
           customCurves: nextCustomCurves,
           fanSyncLockEnabled: nextFanSyncLockEnabled,
-          smartChargingEnabled,
+          smartChargingEnabled: nextSmartChargingEnabled,
           usbPowerEnabled,
-          blueLightFilterEnabled,
+          blueLightFilterEnabled: nextBlueLightFilterEnabled,
           selectedBootArt,
           customBootFilename,
           updateChannel: nextUpdateChannel,
@@ -1247,7 +1285,12 @@ function App() {
 
     console.debug(`[AeroForge debug] ${entry}`)
 
-    setDebugEvents((current) => [entry, ...current].slice(0, 8))
+    const next = [entry, ...debugEventsRef.current].slice(0, 8)
+    debugEventsRef.current = next
+
+    if (activeTabRef.current === 'debug') {
+      setDebugEvents(next)
+    }
   }
 
   function pushTransportDebugEvent(message: string) {
@@ -1499,7 +1542,7 @@ function App() {
         const updater = await getUpdateStatus()
         const runtime = bootstrap.shell
         const service = bootstrap.service
-        const telemetry = service.connected ? bootstrap.telemetry : null
+        const telemetry = bootstrap.telemetry
         const liveControls = service.connected
           ? await getLiveControlSnapshot().catch((error) => {
               pushTransportDebugEvent(`bootstrap live-controls fallback: ${describeError(error)}`)
@@ -1520,9 +1563,9 @@ function App() {
             setActiveFanProfile,
             commitCustomCurves,
             setFanSyncLockEnabled,
-            setSmartChargingEnabled,
+            commitSmartChargingEnabled,
             setUsbPowerEnabled,
-            setBlueLightFilterEnabled,
+            commitBlueLightFilterEnabled,
             setSelectedBootArt,
             setCustomBootFilename,
             setUpdateChannel,
@@ -1532,13 +1575,15 @@ function App() {
           setUpdateStatus(updater)
           setShellStatus(`${runtime.shell} v${runtime.backendVersion}`)
           setServiceConnected(service.connected)
-          setTelemetrySourceLabel(service.connected ? 'Service pipe' : 'Local fallback')
+          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
           setLastBackendError(service.connected ? null : service.detail)
           updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
           updateSerializedState(
             liveControlSnapshotStateRef,
             liveControls,
-            setLiveControlSnapshot,
+            (next) => {
+              liveControlSnapshotRef.current = next
+            },
           )
           if (activeTabRef.current === 'debug') {
             updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
@@ -1550,7 +1595,9 @@ function App() {
             }. Service ${
               service.connected
                 ? `connected over named pipe with ${service.workerCount} workers online`
-                : 'not connected, using local fallback snapshots'
+                : hasUsableTelemetry(telemetry)
+                  ? 'not connected, showing cached service telemetry'
+                  : 'not connected, no cached service telemetry available'
             }.`,
           )
         }
@@ -1565,10 +1612,12 @@ function App() {
 
         if (!cancelled) {
           setServiceConnected(false)
-          setTelemetrySourceLabel('Local fallback')
+          setTelemetrySourceLabel('No telemetry')
           setLastBackendError(message)
           updateSerializedState(debugServiceStatusRef, null, setServiceStatus)
-          updateSerializedState(liveControlSnapshotStateRef, null, setLiveControlSnapshot)
+          updateSerializedState(liveControlSnapshotStateRef, null, (next) => {
+            liveControlSnapshotRef.current = next
+          })
           updateSerializedState(telemetrySnapshotRef, null, setLiveTelemetry)
           if (activeTabRef.current === 'debug') {
             setLastBackendPollAt(formatDebugClock(new Date()))
@@ -1592,7 +1641,7 @@ function App() {
 
       try {
         const service = await getServiceStatus()
-        const telemetry = service.connected ? await getTelemetrySnapshot() : null
+        const telemetry = await getTelemetrySnapshot()
         const liveControls = service.connected
           ? await getLiveControlSnapshot().catch((error) => {
               pushTransportDebugEvent(`poll live-controls fallback: ${describeError(error)}`)
@@ -1602,13 +1651,15 @@ function App() {
 
         if (!cancelled) {
           setServiceConnected(service.connected)
-          setTelemetrySourceLabel(service.connected ? 'Service pipe' : 'Local fallback')
+          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
           setLastBackendError(service.connected ? null : service.detail)
           updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
           updateSerializedState(
             liveControlSnapshotStateRef,
             liveControls,
-            setLiveControlSnapshot,
+            (next) => {
+              liveControlSnapshotRef.current = next
+            },
           )
           if (activeTabRef.current === 'debug') {
             updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
@@ -1622,6 +1673,12 @@ function App() {
               telemetry?.cpuTempAverageC ?? telemetry?.cpuTempC ?? null,
             ) ?? '?'}C / GPU ${presentPositive(telemetry?.gpuTempC ?? null) ?? '?'}C`,
           )
+        } else if (hasUsableTelemetry(telemetry)) {
+          pushPollHeartbeat(
+            `poll cached: CPU ${presentPositive(
+              telemetry?.cpuTempAverageC ?? telemetry?.cpuTempC ?? null,
+            ) ?? '?'}C / GPU ${presentPositive(telemetry?.gpuTempC ?? null) ?? '?'}C`,
+          )
         } else {
           pushTransportDebugEvent(`poll fallback: ${service.detail}`)
         }
@@ -1630,10 +1687,12 @@ function App() {
 
         if (!cancelled) {
           setServiceConnected(false)
-          setTelemetrySourceLabel('Local fallback')
+          setTelemetrySourceLabel('No telemetry')
           setLastBackendError(message)
           updateSerializedState(debugServiceStatusRef, null, setServiceStatus)
-          updateSerializedState(liveControlSnapshotStateRef, null, setLiveControlSnapshot)
+          updateSerializedState(liveControlSnapshotStateRef, null, (next) => {
+            liveControlSnapshotRef.current = next
+          })
           updateSerializedState(telemetrySnapshotRef, null, setLiveTelemetry)
           if (activeTabRef.current === 'debug') {
             setLastBackendPollAt(formatDebugClock(pollStartedAt))
@@ -1662,13 +1721,13 @@ function App() {
       return
     }
 
-    if (!checkForUpdatesOnLaunch || !updateStatus?.tokenConfigured) {
+    if (!checkForUpdatesOnLaunch) {
       return
     }
 
     autoUpdateCheckTriggeredRef.current = true
     void runUpdateCheck(false)
-  }, [checkForUpdatesOnLaunch, updateStatus?.tokenConfigured])
+  }, [checkForUpdatesOnLaunch])
 
   function pulseControl(target: string) {
     setGlowTarget(target)
@@ -1727,15 +1786,15 @@ function App() {
         setActiveFanProfile,
         commitCustomCurves,
         setFanSyncLockEnabled,
-        setSmartChargingEnabled,
+        commitSmartChargingEnabled,
         setUsbPowerEnabled,
-        setBlueLightFilterEnabled,
+        commitBlueLightFilterEnabled,
         setSelectedBootArt,
         setCustomBootFilename,
         setUpdateChannel,
         setCheckForUpdatesOnLaunch,
       )
-      setLiveControlSnapshot(liveControls)
+      liveControlSnapshotRef.current = liveControls
 
       setStatusMessage(
         `${powerProfiles.find((profile) => profile.id === profileId)?.name} profile applied through the AeroForge service${
@@ -1789,15 +1848,15 @@ function App() {
         setActiveFanProfile,
         commitCustomCurves,
         setFanSyncLockEnabled,
-        setSmartChargingEnabled,
+        commitSmartChargingEnabled,
         setUsbPowerEnabled,
-        setBlueLightFilterEnabled,
+        commitBlueLightFilterEnabled,
         setSelectedBootArt,
         setCustomBootFilename,
         setUpdateChannel,
         setCheckForUpdatesOnLaunch,
       )
-      setLiveControlSnapshot(liveControls)
+      liveControlSnapshotRef.current = liveControls
       setStatusMessage(result.detail)
     } catch (error) {
       setStatusMessage(`Fan profile apply failed: ${describeError(error)}`)
@@ -1820,15 +1879,15 @@ function App() {
       setActiveFanProfile,
       commitCustomCurves,
       setFanSyncLockEnabled,
-      setSmartChargingEnabled,
+      commitSmartChargingEnabled,
       setUsbPowerEnabled,
-      setBlueLightFilterEnabled,
+      commitBlueLightFilterEnabled,
       setSelectedBootArt,
       setCustomBootFilename,
       setUpdateChannel,
       setCheckForUpdatesOnLaunch,
     )
-    setLiveControlSnapshot(liveControls)
+    liveControlSnapshotRef.current = liveControls
     return result.detail
   }
 
@@ -1967,51 +2026,6 @@ function App() {
     }
   }
 
-  async function handleSaveUpdateToken() {
-    const trimmed = updateTokenDraft.trim()
-    if (!trimmed) {
-      setStatusMessage('Enter a GitHub token before saving it.')
-      return
-    }
-
-    setUpdateActionPending('token')
-
-    try {
-      const status = await setUpdateToken(trimmed)
-      setUpdateStatus(status)
-      setUpdateTokenDraft('')
-      setStatusMessage(status.detail)
-
-      if (checkForUpdatesOnLaunch) {
-        autoUpdateCheckTriggeredRef.current = true
-        try {
-          await runUpdateCheck(false)
-        } catch {
-          // Keep the saved-token success state even if the first live check fails.
-        }
-      }
-    } catch (error) {
-      setStatusMessage(`Token setup failed: ${describeError(error)}`)
-    } finally {
-      setUpdateActionPending(null)
-    }
-  }
-
-  async function handleClearStoredUpdateToken() {
-    setUpdateActionPending('token-clear')
-
-    try {
-      const status = await clearUpdateToken()
-      setUpdateStatus(status)
-      autoUpdateCheckTriggeredRef.current = false
-      setStatusMessage(status.detail)
-    } catch (error) {
-      setStatusMessage(`Token clear failed: ${describeError(error)}`)
-    } finally {
-      setUpdateActionPending(null)
-    }
-  }
-
   async function handleStageLatestUpdate() {
     setUpdateActionPending('stage')
 
@@ -2041,21 +2055,6 @@ function App() {
     }
   }
 
-  function handleUpdateChannel(nextChannel: UpdateChannel) {
-    if (nextChannel === updateChannel) {
-      return
-    }
-
-    setUpdateChannel(nextChannel)
-    setStatusMessage(
-      `${updateChannels.find((channel) => channel.id === nextChannel)?.label ?? 'Selected'} release channel staged.`,
-    )
-
-    if (updateStatus?.tokenConfigured) {
-      void runUpdateCheck(false, nextChannel)
-    }
-  }
-
   function handleToggleUpdateChecksOnLaunch() {
     setCheckForUpdatesOnLaunch((current) => {
       const next = !current
@@ -2066,6 +2065,62 @@ function App() {
       )
       return next
     })
+  }
+
+  async function handleBlueLightFilterToggle() {
+    if (settingsActionPending) {
+      return
+    }
+
+    const previousEnabled = blueLightFilterEnabled
+    const nextEnabled = !previousEnabled
+
+    setSettingsActionPending('blue-light')
+    commitBlueLightFilterEnabled(nextEnabled)
+    setStatusMessage(
+      nextEnabled
+        ? 'Applying the Acer eye-care gamma ramp...'
+        : 'Restoring the neutral display gamma ramp...',
+    )
+
+    try {
+      const result = await applyBlueLightFilter(nextEnabled)
+      await persistStagedControls({ blueLightFilterEnabled: nextEnabled })
+      setStatusMessage(result.detail)
+    } catch (error) {
+      commitBlueLightFilterEnabled(previousEnabled)
+      setStatusMessage(`Blue light filter apply failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'blue-light' ? null : current))
+    }
+  }
+
+  async function handleSmartChargingMode(nextEnabled: boolean) {
+    if (settingsActionPending || nextEnabled === smartChargingEnabled) {
+      return
+    }
+
+    const previousEnabled = smartChargingEnabled
+
+    setSettingsActionPending('smart-charge')
+    commitSmartChargingEnabled(nextEnabled)
+    setStatusMessage(
+      nextEnabled
+        ? 'Applying optimized battery charging through Acer Care Center...'
+        : 'Clearing the battery-health cap for full charging...',
+    )
+
+    try {
+      const result = await applySmartCharging(nextEnabled)
+      await persistStagedControls({ smartChargingEnabled: nextEnabled })
+      setStatusMessage(result.detail)
+      pulseControl('charge-toggle')
+    } catch (error) {
+      commitSmartChargingEnabled(previousEnabled)
+      setStatusMessage(`Smart charge apply failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'smart-charge' ? null : current))
+    }
   }
 
   function updateCustomProcessorState(
@@ -2157,9 +2212,9 @@ function App() {
         setActiveFanProfile,
         commitCustomCurves,
         setFanSyncLockEnabled,
-        setSmartChargingEnabled,
+        commitSmartChargingEnabled,
         setUsbPowerEnabled,
-        setBlueLightFilterEnabled,
+        commitBlueLightFilterEnabled,
         setSelectedBootArt,
         setCustomBootFilename,
         setUpdateChannel,
@@ -2197,9 +2252,9 @@ function App() {
           ocTuningLocked,
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
-          smartChargingEnabled,
+          smartChargingEnabled: smartChargingEnabledRef.current,
           usbPowerEnabled,
-          blueLightFilterEnabled,
+          blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
           customBootFilename,
           updateChannel,
@@ -2238,9 +2293,9 @@ function App() {
           ocTuningLocked: nextLocked,
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
-          smartChargingEnabled,
+          smartChargingEnabled: smartChargingEnabledRef.current,
           usbPowerEnabled,
-          blueLightFilterEnabled,
+          blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
           customBootFilename,
           updateChannel,
@@ -2269,12 +2324,12 @@ function App() {
       <main className="dashboard" ref={dashboardRef}>
         <header className="topbar" ref={topbarRef}>
           <div className="topbar__brand">
-            <div className="brand-mark">
-              <img src={aeroforgeMark} alt="AeroForge logo" />
+            <div className="topbar__brand-mark">
+              <img src={aeroforgeMark} alt="" aria-hidden="true" />
             </div>
-            <div className="brand-copy">
+            <div className="topbar__brand-copy">
               <strong>AeroForge</strong>
-              <span>Control Center</span>
+              <span className="brand-subtitle">Control Center</span>
             </div>
           </div>
 
@@ -2895,18 +2950,9 @@ function App() {
                           </div>
 
                           <div className="settings-summary-card">
-                            <span className="eyebrow">Release Channel</span>
-                            <strong>{updateChannelLabel}</strong>
-                            <small>{updateChannelDescription}</small>
-                          </div>
-
-                          <div className="settings-summary-card">
                             <span className="eyebrow">Latest Available</span>
                             <strong>{updateLatestLabel}</strong>
-                            <small>
-                              {updateStatus?.latestTitle ??
-                                'Checks use the configured GitHub feed once a token is stored.'}
-                            </small>
+                            <small>{updateStatus?.latestTitle ?? 'Checks use the published GitHub release feed.'}</small>
                           </div>
 
                           <div className="settings-summary-card">
@@ -2920,8 +2966,7 @@ function App() {
                           <div>
                             <strong>Check for Updates on Launch</strong>
                             <p>
-                              When enabled, AeroForge runs one GitHub check after launch whenever a
-                              token is already stored.
+                              When enabled, AeroForge runs one published-release check after launch.
                             </p>
                           </div>
 
@@ -2934,118 +2979,27 @@ function App() {
                           </button>
                         </div>
 
-                        <div className="settings-channel-block">
-                          <div>
-                            <strong>Release Channel</strong>
-                            <p>
-                              Choose which Git release track AeroForge should follow once secure
-                              credentials are configured.
-                            </p>
-                          </div>
-
-                          <div className="segmented settings-segmented" role="tablist" aria-label="Update channel">
-                            {updateChannels.map((channel) => (
-                              <button
-                                key={channel.id}
-                                className={channel.id === updateChannel ? 'is-active' : ''}
-                                onClick={() => handleUpdateChannel(channel.id)}
-                                type="button"
-                              >
-                                {channel.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="settings-channel-block settings-channel-block--token">
-                          <div>
-                            <strong>GitHub Token</strong>
-                            <p>
-                              Stored outside the control snapshot and protected with Windows DPAPI.
-                              AeroForge never writes it to control-state.json.
-                            </p>
-                          </div>
-
-                          <div className="settings-token-row">
-                            <input
-                              className="settings-token-input"
-                              type="password"
-                              value={updateTokenDraft}
-                              onChange={(event) => setUpdateTokenDraft(event.target.value)}
-                              placeholder={
-                                updateStatus?.tokenConfigured
-                                  ? 'Replace stored token'
-                                  : 'Paste GitHub token'
-                              }
-                              autoComplete="off"
-                              spellCheck={false}
-                            />
-
-                            <div className="settings-token-actions">
-                              <button
-                                className="button"
-                                onClick={() => void handleSaveUpdateToken()}
-                                disabled={updateActionPending !== null}
-                                type="button"
-                              >
-                                Save Token
-                              </button>
-                              <button
-                                className="button button--ghost"
-                                onClick={() => void handleClearStoredUpdateToken()}
-                                disabled={
-                                  !updateStatus?.tokenConfigured || updateActionPending !== null
-                                }
-                                type="button"
-                              >
-                                Clear Token
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
                         <div className="settings-note">
                           <div>
-                            <span className="eyebrow">Release Access</span>
-                            <strong>
-                              {updateStatus?.tokenConfigured ? 'Key installed' : 'Awaiting key'}
-                            </strong>
-                            <p>
-                              {updateStatus?.detail ??
-                                'The updater is idle until a GitHub token is configured.'}
-                            </p>
-                            {updateStatus?.lastError && <small>Last error: {updateStatus.lastError}</small>}
-                          </div>
-
-                          <div className="settings-note__meta">
-                            <span>Repo</span>
-                            <strong>{updateStatus?.repoSlug ?? 'no repo configured'}</strong>
-                            <small>
-                              {updateStatus?.latestAssetName
-                                ? `Portable asset ${updateStatus.latestAssetName}`
-                                : updateStatus?.feedKind === 'commit'
-                                  ? `Preview head ${updateStatus.latestCommitSha ?? 'unknown'}`
-                                  : 'Portable-friendly staged rollout with channel-aware checks.'}
-                            </small>
-
+                            <span className="eyebrow">Release Status</span>
+                            <strong>{updateAvailabilityLabel}</strong>
+                            <p>{updateStatus?.detail ?? 'Updater not checked yet.'}</p>
                             {updateStatus?.stagedAssetName && (
-                              <>
-                                <span>Staged</span>
-                                <strong>{updateStatus.stagedAssetName}</strong>
-                                <small>
-                                  {updateStatus.stagedSha256
-                                    ? `SHA256 ${updateStatus.stagedSha256.slice(0, 16)}...`
-                                    : 'Downloaded and ready for install.'}
-                                </small>
-                              </>
+                              <small>
+                                Staged package {updateStatus.stagedAssetName}
+                                {updateStatus.stagedSha256
+                                  ? ` • SHA256 ${updateStatus.stagedSha256.slice(0, 16)}...`
+                                  : ' • ready for install.'}
+                              </small>
                             )}
+                            {updateStatus?.lastError && <small>Last error: {updateStatus.lastError}</small>}
                           </div>
                         </div>
 
                         <div className="settings-action-row">
                           <button
                             className="button"
-                            disabled={!updateStatus?.tokenConfigured || updateActionPending !== null}
+                            disabled={updateActionPending !== null}
                             onClick={() => void runUpdateCheck(true)}
                             type="button"
                           >
@@ -3082,18 +3036,18 @@ function App() {
                             className={`charge-mode-card ${
                               smartChargingEnabled ? 'is-selected' : ''
                             }`}
-                            onClick={() => {
-                              setSmartChargingEnabled(true)
-                              setStatusMessage(
-                                'Optimized battery charging enabled with an 80% target in the preview.',
-                              )
-                              pulseControl('charge-toggle')
-                            }}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleSmartChargingMode(true)}
+                            type="button"
                           >
                             <div className="charge-mode-card__badge">80</div>
                             <div>
                               <strong>Optimized Battery Charging</strong>
-                              <p>Recommended for battery longevity. Charging is capped at 80%.</p>
+                              <p>
+                                {smartChargePending && smartChargingEnabled
+                                  ? 'Applying the 80% battery-health ceiling now.'
+                                  : 'Recommended for battery longevity. Charging is capped at 80%.'}
+                              </p>
                             </div>
                           </button>
 
@@ -3101,20 +3055,20 @@ function App() {
                             className={`charge-mode-card ${
                               !smartChargingEnabled ? 'is-selected' : ''
                             }`}
-                            onClick={() => {
-                              setSmartChargingEnabled(false)
-                              setStatusMessage(
-                                'Full battery charging enabled with a 100% target in the preview.',
-                              )
-                              pulseControl('charge-toggle')
-                            }}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleSmartChargingMode(false)}
+                            type="button"
                           >
                             <div className="charge-mode-card__badge charge-mode-card__badge--full">
                               100
                             </div>
                             <div>
                               <strong>Full Battery Charging</strong>
-                              <p>Allows maximum unplugged runtime by charging to full capacity.</p>
+                              <p>
+                                {smartChargePending && !smartChargingEnabled
+                                  ? 'Removing the Acer battery-health cap now.'
+                                  : 'Allows maximum unplugged runtime by charging to full capacity.'}
+                              </p>
                             </div>
                           </button>
                         </div>
@@ -3139,6 +3093,7 @@ function App() {
                               )
                             }}
                             aria-pressed={usbPowerEnabled}
+                            type="button"
                           >
                             <span />
                           </button>
@@ -3148,8 +3103,9 @@ function App() {
                           <div>
                             <strong>Charge Limit While Plugged In</strong>
                             <p>
-                              This preview exposes the active charge target without wiring the
-                              controller backend yet.
+                              Uses Acer Care Center&apos;s battery-health path directly. Optimized
+                              mode keeps the 80% ceiling, while full mode clears the cap and allows
+                              charging to 100%.
                             </p>
                           </div>
 
@@ -3180,22 +3136,17 @@ function App() {
                           <div>
                             <strong>Blue Light Filter</strong>
                             <p>
-                              Applies a warmer display profile in this preview to reduce eye strain
-                              during long sessions.
+                              Applies the Acer-style eye-care gamma ramp directly to the display for
+                              lower blue output during long sessions.
                             </p>
                           </div>
 
                           <button
                             className={`toggle ${blueLightFilterEnabled ? 'is-on' : ''}`}
-                            onClick={() => {
-                              setBlueLightFilterEnabled((current) => !current)
-                              setStatusMessage(
-                                blueLightFilterEnabled
-                                  ? 'Blue light filter disabled in the preview.'
-                                  : 'Blue light filter enabled in the preview.',
-                              )
-                            }}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleBlueLightFilterToggle()}
                             aria-pressed={blueLightFilterEnabled}
+                            type="button"
                           >
                             <span />
                           </button>
@@ -3207,13 +3158,17 @@ function App() {
                           }`}
                         >
                           <div className="screen-preview__panel">
-                            <span className="eyebrow">Display Preview</span>
+                            <span className="eyebrow">Panel Profile</span>
                             <strong>
-                              {blueLightFilterEnabled ? 'Warm eye-care profile' : 'Neutral panel profile'}
+                              {blueLightFilterEnabled
+                                ? blueLightPending
+                                  ? 'Applying warm Acer eye-care profile'
+                                  : 'Warm Acer eye-care profile'
+                                : 'Neutral panel profile'}
                             </strong>
                             <p>
                               {blueLightFilterEnabled
-                                ? 'Warmer whites and reduced blue emphasis for evening use.'
+                                ? 'Gamma ramp shifted toward Acer GainID 3 warmth for lower blue output.'
                                 : 'Standard color balance with no comfort filter applied.'}
                             </p>
                           </div>

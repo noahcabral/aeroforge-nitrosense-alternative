@@ -179,6 +179,20 @@ export type FanControlApplyResult = {
   detail: string
 }
 
+export type BlueLightApplyResult = {
+  controls: ControlSnapshot
+  appliedAtUnix: number
+  gainId: number
+  detail: string
+}
+
+export type SmartChargeApplyResult = {
+  controls: ControlSnapshot
+  appliedAtUnix: number
+  batteryHealthy: number
+  detail: string
+}
+
 export type BackendBootstrap = {
   shell: ShellStatus
   service: ServiceStatus
@@ -243,14 +257,6 @@ export async function getUpdateStatus() {
   return invoke<UpdateStatus>('get_update_status')
 }
 
-export async function setUpdateToken(token: string) {
-  return invoke<UpdateStatus>('set_update_token', { token })
-}
-
-export async function clearUpdateToken() {
-  return invoke<UpdateStatus>('clear_update_token')
-}
-
 export async function checkForUpdates(channel?: PersonalSettings['updateChannel']) {
   return invoke<UpdateStatus>('check_for_updates', { channel: channel ?? null })
 }
@@ -261,6 +267,14 @@ export async function stageUpdateDownload(channel?: PersonalSettings['updateChan
 
 export async function installStagedUpdate() {
   return invoke<UpdateStatus>('install_staged_update')
+}
+
+export async function applyBlueLightFilter(enabled: boolean) {
+  return invoke<BlueLightApplyResult>('apply_blue_light_filter', { enabled })
+}
+
+export async function applySmartCharging(enabled: boolean) {
+  return invoke<SmartChargeApplyResult>('apply_smart_charging', { enabled })
 }
 
 export async function saveControlSnapshot(snapshot: ControlSnapshot) {

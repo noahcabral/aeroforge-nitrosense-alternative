@@ -1,6 +1,6 @@
 mod backend;
 
-use backend::{commands, nitro_guard, state::BackendState};
+use backend::{blue_light, commands, nitro_guard, smart_charge, state::BackendState};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,11 +17,11 @@ pub fn run() {
             commands::get_backend_bootstrap,
             commands::get_persistence_status,
             commands::get_update_status,
-            commands::set_update_token,
-            commands::clear_update_token,
             commands::check_for_updates,
             commands::stage_update_download,
             commands::install_staged_update,
+            commands::apply_blue_light_filter,
+            commands::apply_smart_charging,
             commands::save_control_snapshot,
             commands::reset_control_snapshot,
             commands::apply_power_profile,
@@ -33,8 +33,21 @@ pub fn run() {
             let config_root = app.path().app_config_dir()?;
             let backend_state = BackendState::load(config_root)
                 .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+            let saved_blue_light_state =
+                backend_state.controls().personal_settings.blue_light_filter_enabled;
+            let saved_smart_charge_state =
+                backend_state.controls().personal_settings.smart_charging_enabled;
             app.manage(backend_state);
             nitro_guard::start();
+
+            if let Err(error) = blue_light::sync_saved_state(saved_blue_light_state) {
+                eprintln!("AeroForge blue-light sync failed during startup: {error}");
+            }
+            if let Err(error) =
+                tauri::async_runtime::block_on(smart_charge::sync_saved_state(saved_smart_charge_state))
+            {
+                eprintln!("AeroForge smart-charge sync failed during startup: {error}");
+            }
 
             if cfg!(debug_assertions) {
                 if let Some(window) = app.get_webview_window("main") {

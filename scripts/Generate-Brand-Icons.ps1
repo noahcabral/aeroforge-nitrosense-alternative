@@ -4,165 +4,51 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $iconDir = Join-Path $repoRoot 'src-tauri\icons'
+$publicDir = Join-Path $repoRoot 'public'
+$sourcePath = Join-Path $repoRoot 'src\assets\aeroforge-mark.png'
 
-function New-RoundedRectPath {
-  param(
-    [float]$X,
-    [float]$Y,
-    [float]$Width,
-    [float]$Height,
-    [float]$Radius
-  )
-
-  $diameter = $Radius * 2
-  $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $path.AddArc($X, $Y, $diameter, $diameter, 180, 90)
-  $path.AddArc($X + $Width - $diameter, $Y, $diameter, $diameter, 270, 90)
-  $path.AddArc($X + $Width - $diameter, $Y + $Height - $diameter, $diameter, $diameter, 0, 90)
-  $path.AddArc($X, $Y + $Height - $diameter, $diameter, $diameter, 90, 90)
-  $path.CloseFigure()
-  return $path
+if (-not (Test-Path -LiteralPath $sourcePath)) {
+  throw "Brand source image not found: $sourcePath"
 }
 
-function New-PointF {
+function Write-ResizedPng {
   param(
-    [float]$X,
-    [float]$Y
-  )
-
-  return [System.Drawing.PointF]::new($X, $Y)
-}
-
-function Fill-Polygon {
-  param(
-    [System.Drawing.Graphics]$Graphics,
-    [System.Drawing.Brush]$Brush,
-    [System.Drawing.PointF[]]$Points
-  )
-
-  $Graphics.FillPolygon($Brush, $Points)
-}
-
-function Draw-AeroForgeIcon {
-  param(
+    [System.Drawing.Image]$SourceImage,
     [int]$Size,
     [string]$OutputPath
   )
 
   $bitmap = [System.Drawing.Bitmap]::new($Size, $Size)
   $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-  $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-  $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-  $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-  $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-  $graphics.Clear([System.Drawing.Color]::Transparent)
 
-  $radius = $Size * 0.22
-  $canvas = New-RoundedRectPath 0 0 $Size $Size $radius
-  $bg = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-    [System.Drawing.PointF]::new($Size * 0.08, $Size * 0.06),
-    [System.Drawing.PointF]::new($Size * 0.92, $Size * 0.94),
-    [System.Drawing.Color]::FromArgb(255, 27, 18, 14),
-    [System.Drawing.Color]::FromArgb(255, 14, 10, 9)
-  )
-  $bg.Blend = [System.Drawing.Drawing2D.Blend]::new()
-  $bg.Blend.Positions = @(0.0, 0.55, 1.0)
-  $bg.Blend.Factors = @(0.0, 0.65, 1.0)
-  $graphics.FillPath($bg, $canvas)
+  try {
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+    $graphics.Clear([System.Drawing.Color]::Transparent)
 
-  $topGlowBrush = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-    [System.Drawing.PointF]::new($Size * 0.18, $Size * 0.10),
-    [System.Drawing.PointF]::new($Size * 0.82, $Size * 0.22),
-    [System.Drawing.Color]::FromArgb(230, 255, 139, 67),
-    [System.Drawing.Color]::FromArgb(225, 255, 204, 122)
-  )
-  Fill-Polygon $graphics $topGlowBrush @(
-    (New-PointF ($Size * 0.17) ($Size * 0.16)),
-    (New-PointF ($Size * 0.35) ($Size * 0.10)),
-    (New-PointF ($Size * 0.66) ($Size * 0.10)),
-    (New-PointF ($Size * 0.83) ($Size * 0.16)),
-    (New-PointF ($Size * 0.76) ($Size * 0.22)),
-    (New-PointF ($Size * 0.24) ($Size * 0.22))
-  )
+    $scale = [Math]::Min($Size / $SourceImage.Width, $Size / $SourceImage.Height)
+    $drawWidth = [int][Math]::Round($SourceImage.Width * $scale)
+    $drawHeight = [int][Math]::Round($SourceImage.Height * $scale)
+    $offsetX = [int][Math]::Round(($Size - $drawWidth) / 2)
+    $offsetY = [int][Math]::Round(($Size - $drawHeight) / 2)
 
-  $leftBlade = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-    [System.Drawing.PointF]::new($Size * 0.24, $Size * 0.20),
-    [System.Drawing.PointF]::new($Size * 0.48, $Size * 0.82),
-    [System.Drawing.Color]::FromArgb(255, 255, 126, 54),
-    [System.Drawing.Color]::FromArgb(255, 183, 68, 24)
-  )
-  Fill-Polygon $graphics $leftBlade @(
-    (New-PointF ($Size * 0.23) ($Size * 0.73)),
-    (New-PointF ($Size * 0.39) ($Size * 0.22)),
-    (New-PointF ($Size * 0.50) ($Size * 0.22)),
-    (New-PointF ($Size * 0.35) ($Size * 0.73))
-  )
+    $graphics.DrawImage(
+      $SourceImage,
+      [System.Drawing.Rectangle]::new($offsetX, $offsetY, $drawWidth, $drawHeight)
+    )
 
-  $rightBlade = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-    [System.Drawing.PointF]::new($Size * 0.70, $Size * 0.20),
-    [System.Drawing.PointF]::new($Size * 0.50, $Size * 0.82),
-    [System.Drawing.Color]::FromArgb(255, 255, 208, 116),
-    [System.Drawing.Color]::FromArgb(255, 240, 106, 36)
-  )
-  Fill-Polygon $graphics $rightBlade @(
-    (New-PointF ($Size * 0.52) ($Size * 0.22)),
-    (New-PointF ($Size * 0.63) ($Size * 0.22)),
-    (New-PointF ($Size * 0.78) ($Size * 0.73)),
-    (New-PointF ($Size * 0.67) ($Size * 0.73))
-  )
+    if (Test-Path -LiteralPath $OutputPath) {
+      Remove-Item -LiteralPath $OutputPath -Force
+    }
 
-  $centerBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 255, 242, 233))
-  Fill-Polygon $graphics $centerBrush @(
-    (New-PointF ($Size * 0.37) ($Size * 0.56)),
-    (New-PointF ($Size * 0.45) ($Size * 0.34)),
-    (New-PointF ($Size * 0.56) ($Size * 0.34)),
-    (New-PointF ($Size * 0.63) ($Size * 0.56)),
-    (New-PointF ($Size * 0.52) ($Size * 0.56)),
-    (New-PointF ($Size * 0.50) ($Size * 0.48)),
-    (New-PointF ($Size * 0.48) ($Size * 0.56))
-  )
-
-  $innerGlow = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(198, 255, 179, 108))
-  Fill-Polygon $graphics $innerGlow @(
-    (New-PointF ($Size * 0.29) ($Size * 0.65)),
-    (New-PointF ($Size * 0.50) ($Size * 0.27)),
-    (New-PointF ($Size * 0.71) ($Size * 0.65)),
-    (New-PointF ($Size * 0.64) ($Size * 0.69)),
-    (New-PointF ($Size * 0.50) ($Size * 0.45)),
-    (New-PointF ($Size * 0.36) ($Size * 0.69))
-  )
-
-  $baseGlow = [System.Drawing.Drawing2D.LinearGradientBrush]::new(
-    [System.Drawing.PointF]::new($Size * 0.20, $Size * 0.78),
-    [System.Drawing.PointF]::new($Size * 0.80, $Size * 0.84),
-    [System.Drawing.Color]::FromArgb(255, 255, 123, 45),
-    [System.Drawing.Color]::FromArgb(255, 255, 190, 115)
-  )
-  Fill-Polygon $graphics $baseGlow @(
-    (New-PointF ($Size * 0.20) ($Size * 0.79)),
-    (New-PointF ($Size * 0.29) ($Size * 0.70)),
-    (New-PointF ($Size * 0.71) ($Size * 0.70)),
-    (New-PointF ($Size * 0.80) ($Size * 0.79)),
-    (New-PointF ($Size * 0.80) ($Size * 0.84)),
-    (New-PointF ($Size * 0.20) ($Size * 0.84))
-  )
-
-  $framePen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(38, 255, 255, 255), [Math]::Max(1, $Size * 0.01))
-  $graphics.DrawPath($framePen, $canvas)
-
-  $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
-
-  $framePen.Dispose()
-  $baseGlow.Dispose()
-  $innerGlow.Dispose()
-  $centerBrush.Dispose()
-  $rightBlade.Dispose()
-  $leftBlade.Dispose()
-  $topGlowBrush.Dispose()
-  $bg.Dispose()
-  $canvas.Dispose()
-  $graphics.Dispose()
-  $bitmap.Dispose()
+    $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+  }
+  finally {
+    $graphics.Dispose()
+    $bitmap.Dispose()
+  }
 }
 
 function Write-IcoFromPngs {
@@ -184,21 +70,25 @@ function Write-IcoFromPngs {
     foreach ($path in $PngPaths) {
       $bytes = [System.IO.File]::ReadAllBytes($path)
       $img = [System.Drawing.Image]::FromFile($path)
-      $width = if ($img.Width -ge 256) { 0 } else { [byte]$img.Width }
-      $height = if ($img.Height -ge 256) { 0 } else { [byte]$img.Height }
+      try {
+        $width = if ($img.Width -ge 256) { 0 } else { [byte]$img.Width }
+        $height = if ($img.Height -ge 256) { 0 } else { [byte]$img.Height }
 
-      $writer.Write([byte]$width)
-      $writer.Write([byte]$height)
-      $writer.Write([byte]0)
-      $writer.Write([byte]0)
-      $writer.Write([UInt16]1)
-      $writer.Write([UInt16]32)
-      $writer.Write([UInt32]$bytes.Length)
-      $writer.Write([UInt32]$offset)
+        $writer.Write([byte]$width)
+        $writer.Write([byte]$height)
+        $writer.Write([byte]0)
+        $writer.Write([byte]0)
+        $writer.Write([UInt16]1)
+        $writer.Write([UInt16]32)
+        $writer.Write([UInt32]$bytes.Length)
+        $writer.Write([UInt32]$offset)
 
-      $offset += $bytes.Length
-      $imageBlobs += ,$bytes
-      $img.Dispose()
+        $offset += $bytes.Length
+        $imageBlobs += ,$bytes
+      }
+      finally {
+        $img.Dispose()
+      }
     }
 
     foreach ($blob in $imageBlobs) {
@@ -227,8 +117,16 @@ $pngTargets = @(
   @{ Name = 'StoreLogo.png'; Size = 50 }
 )
 
-foreach ($target in $pngTargets) {
-  Draw-AeroForgeIcon -Size $target.Size -OutputPath (Join-Path $iconDir $target.Name)
+$sourceImage = [System.Drawing.Image]::FromFile($sourcePath)
+try {
+  foreach ($target in $pngTargets) {
+    Write-ResizedPng -SourceImage $sourceImage -Size $target.Size -OutputPath (Join-Path $iconDir $target.Name)
+  }
+
+  Write-ResizedPng -SourceImage $sourceImage -Size 64 -OutputPath (Join-Path $publicDir 'favicon.png')
+}
+finally {
+  $sourceImage.Dispose()
 }
 
 $icoPngs = @('32x32.png', '128x128.png', '128x128@2x.png') |
@@ -236,4 +134,4 @@ $icoPngs = @('32x32.png', '128x128.png', '128x128@2x.png') |
 
 Write-IcoFromPngs -PngPaths $icoPngs -OutputPath (Join-Path $iconDir 'icon.ico')
 
-Write-Host 'AeroForge icon assets regenerated.'
+Write-Host 'AeroForge icon assets regenerated from src\\assets\\aeroforge-mark.png.'

@@ -3,24 +3,17 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Command,
-    ptr::{null, null_mut},
     sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{
     blocking::Client,
-    header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
+    header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
 };
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::{
-    Foundation::LocalFree,
-    Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-    },
-};
 use zip::ZipArchive;
 
 use super::models::{UpdateChannelId, UpdateStatus};
@@ -29,30 +22,26 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const UPDATE_REPO_SLUG: &str = "noahcabral/aeroforge-nitrosense-alternative";
 const UPDATE_STATE_FILE: &str = "update-state.json";
-const UPDATE_TOKEN_FILE: &str = "update-token.bin";
 const UPDATES_DIR_NAME: &str = "updates";
 const PORTABLE_ASSET_PREFIX: &str = "AeroForge-Control-Portable-";
 
 pub struct UpdaterStore {
     status: RwLock<UpdateStatus>,
     status_file: PathBuf,
-    token_file: PathBuf,
     updates_dir: PathBuf,
 }
 
 impl UpdaterStore {
     pub fn load(config_root: &Path) -> Result<Self, DynError> {
         let status_file = config_root.join(UPDATE_STATE_FILE);
-        let token_file = config_root.join(UPDATE_TOKEN_FILE);
         let updates_dir = config_root.join(UPDATES_DIR_NAME);
         fs::create_dir_all(&updates_dir)?;
 
         let status = load_status(&status_file)?.unwrap_or_else(default_status);
 
         Ok(Self {
-            status: RwLock::new(apply_runtime_fields(status, token_file.exists())),
+            status: RwLock::new(apply_runtime_fields(status)),
             status_file,
-            token_file,
             updates_dir,
         })
     }
@@ -63,11 +52,11 @@ impl UpdaterStore {
             .read()
             .expect("updater status lock poisoned")
             .clone();
-        apply_runtime_fields(current, self.token_file.exists())
+        apply_runtime_fields(current)
     }
 
     pub fn save_status(&self, status: UpdateStatus) -> Result<UpdateStatus, DynError> {
-        let runtime_status = apply_runtime_fields(status, self.token_file.exists());
+        let runtime_status = apply_runtime_fields(status);
         fs::write(&self.status_file, serde_json::to_string_pretty(&runtime_status)?)?;
 
         {
@@ -78,74 +67,13 @@ impl UpdaterStore {
         Ok(runtime_status)
     }
 
-    pub fn read_token(&self) -> Result<Option<String>, DynError> {
-        if !self.token_file.exists() {
-            return Ok(None);
-        }
-
-        let encrypted = fs::read(&self.token_file)?;
-        if encrypted.is_empty() {
-            return Ok(None);
-        }
-
-        let decrypted = dpapi_unprotect(&encrypted)?;
-        let token = String::from_utf8(decrypted)?.trim().to_string();
-        if token.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(token))
-    }
-
-    pub fn store_token(&self, token: &str) -> Result<(), DynError> {
-        let normalized = token.trim();
-        if normalized.is_empty() {
-            return Err(io::Error::other("Token was empty.").into());
-        }
-
-        let protected = dpapi_protect(normalized.as_bytes())?;
-        fs::write(&self.token_file, protected)?;
-        Ok(())
-    }
-
-    pub fn clear_token(&self) -> Result<(), DynError> {
-        if self.token_file.exists() {
-            fs::remove_file(&self.token_file)?;
-        }
-
-        let mut status = self.status();
-        status.token_configured = false;
-        status.detail = "GitHub token cleared. Update checks are disabled until a new token is configured.".into();
-        status.last_error = None;
-        self.save_status(status)?;
-        Ok(())
-    }
-
     pub fn updates_dir(&self) -> &Path {
         &self.updates_dir
     }
 }
 
-pub fn configure_token(store: &UpdaterStore, token: &str) -> Result<UpdateStatus, DynError> {
-    let viewer = fetch_viewer(token.trim())?;
-    store.store_token(token)?;
-
-    let mut status = store.status();
-    status.token_configured = true;
-    status.last_error = None;
-    status.detail = format!(
-        "GitHub token stored securely for {}. Update checks are ready.",
-        viewer.login
-    );
-
-    store.save_status(status)
-}
-
 pub fn refresh_status(store: &UpdaterStore, channel: UpdateChannelId) -> Result<UpdateStatus, DynError> {
-    let token = store
-        .read_token()?
-        .ok_or_else(|| io::Error::other("No GitHub token configured yet."))?;
-    let resolved = resolve_update_candidate(&token, channel, store.status())?;
+    let resolved = resolve_update_candidate(channel, store.status())?;
     store.save_status(resolved.status)
 }
 
@@ -153,10 +81,7 @@ pub fn stage_latest_update(
     store: &UpdaterStore,
     channel: UpdateChannelId,
 ) -> Result<UpdateStatus, DynError> {
-    let token = store
-        .read_token()?
-        .ok_or_else(|| io::Error::other("No GitHub token configured yet."))?;
-    let resolved = resolve_update_candidate(&token, channel, store.status())?;
+    let resolved = resolve_update_candidate(channel, store.status())?;
     let candidate = resolved
         .asset
         .ok_or_else(|| io::Error::other("No portable update asset is available for the selected channel."))?;
@@ -172,7 +97,7 @@ pub fn stage_latest_update(
     fs::create_dir_all(&stage_root)?;
     let staged_file = stage_root.join(&candidate.name);
 
-    let mut response = github_client(&token)?
+    let mut response = github_client()?
         .get(&candidate.browser_download_url)
         .send()?
         .error_for_status()?;
@@ -282,11 +207,10 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
 }
 
 fn resolve_update_candidate(
-    token: &str,
     channel: UpdateChannelId,
     existing: UpdateStatus,
 ) -> Result<ResolvedUpdateCandidate, DynError> {
-    let client = github_client(token)?;
+    let client = github_client()?;
     let repo = fetch_repo(&client)?;
     let releases = fetch_releases(&client)?;
 
@@ -294,7 +218,7 @@ fn resolve_update_candidate(
     status.repo_slug = UPDATE_REPO_SLUG.into();
     status.last_checked_at_unix = Some(now_unix());
     status.last_error = None;
-    status.token_configured = true;
+    status.token_configured = false;
 
     if let Some(release) = select_release(&releases, &channel) {
         let latest_version = normalize_release_version(&release.tag_name)
@@ -419,16 +343,7 @@ fn resolve_update_candidate(
     Ok(ResolvedUpdateCandidate { status, asset: None })
 }
 
-fn fetch_viewer(token: &str) -> Result<GithubViewer, DynError> {
-    let client = github_client(token)?;
-    Ok(client
-        .get("https://api.github.com/user")
-        .send()?
-        .error_for_status()?
-        .json()?)
-}
-
-fn github_client(token: &str) -> Result<Client, DynError> {
+fn github_client() -> Result<Client, DynError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -437,10 +352,6 @@ fn github_client(token: &str) -> Result<Client, DynError> {
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", token.trim()))?,
     );
 
     Ok(Client::builder().default_headers(headers).build()?)
@@ -528,15 +439,15 @@ fn default_status() -> UpdateStatus {
         staged_asset_path: None,
         staged_sha256: None,
         staged_at_unix: None,
-        detail: "GitHub updater is idle. Configure a token to unlock live checks.".into(),
+        detail: "Updater not checked yet.".into(),
         last_error: None,
     }
 }
 
-fn apply_runtime_fields(mut status: UpdateStatus, token_configured: bool) -> UpdateStatus {
+fn apply_runtime_fields(mut status: UpdateStatus) -> UpdateStatus {
     status.repo_slug = UPDATE_REPO_SLUG.into();
     status.current_version = env!("CARGO_PKG_VERSION").into();
-    status.token_configured = token_configured;
+    status.token_configured = false;
     status.can_install_update = staged_file_exists(&status);
     status
 }
@@ -547,8 +458,18 @@ fn load_status(path: &Path) -> Result<Option<UpdateStatus>, DynError> {
     }
 
     let raw = fs::read_to_string(path)?;
-    let parsed = serde_json::from_str::<UpdateStatus>(&raw)?;
-    Ok(Some(parsed))
+    if raw.trim().is_empty() {
+        quarantine_invalid_state_file(path, "empty")?;
+        return Ok(None);
+    }
+
+    match serde_json::from_str::<UpdateStatus>(&raw) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(_) => {
+            quarantine_invalid_state_file(path, "invalid")?;
+            Ok(None)
+        }
+    }
 }
 
 fn staged_file_exists(status: &UpdateStatus) -> bool {
@@ -558,6 +479,21 @@ fn staged_file_exists(status: &UpdateStatus) -> bool {
         .map(PathBuf::from)
         .map(|path| path.exists())
         .unwrap_or(false)
+}
+
+fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Error> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let stamp = now_unix();
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("update-state.json");
+    let backup_name = format!("{file_name}.{reason}.{stamp}.bak");
+    let backup_path = path.with_file_name(backup_name);
+    fs::rename(path, backup_path)
 }
 
 fn now_unix() -> u64 {
@@ -624,73 +560,6 @@ Copy-Item -Path (Join-Path $SourceDir '*') -Destination $TargetDir -Recurse -For
 Start-Sleep -Milliseconds 250
 Start-Process -FilePath (Join-Path $TargetDir $ExeName)
 "#
-}
-
-fn dpapi_protect(bytes: &[u8]) -> Result<Vec<u8>, DynError> {
-    unsafe {
-        let mut input = CRYPT_INTEGER_BLOB {
-            cbData: bytes.len() as u32,
-            pbData: bytes.as_ptr() as *mut u8,
-        };
-        let mut output = CRYPT_INTEGER_BLOB {
-            cbData: 0,
-            pbData: null_mut(),
-        };
-
-        let protected = CryptProtectData(
-            &mut input,
-            null(),
-            null(),
-            null_mut(),
-            null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        );
-        if protected == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-
-        let result =
-            std::slice::from_raw_parts(output.pbData as *const u8, output.cbData as usize).to_vec();
-        LocalFree(output.pbData.cast());
-        Ok(result)
-    }
-}
-
-fn dpapi_unprotect(bytes: &[u8]) -> Result<Vec<u8>, DynError> {
-    unsafe {
-        let mut input = CRYPT_INTEGER_BLOB {
-            cbData: bytes.len() as u32,
-            pbData: bytes.as_ptr() as *mut u8,
-        };
-        let mut output = CRYPT_INTEGER_BLOB {
-            cbData: 0,
-            pbData: null_mut(),
-        };
-
-        let unprotected = CryptUnprotectData(
-            &mut input,
-            null_mut(),
-            null(),
-            null_mut(),
-            null_mut(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        );
-        if unprotected == 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-
-        let result =
-            std::slice::from_raw_parts(output.pbData as *const u8, output.cbData as usize).to_vec();
-        LocalFree(output.pbData.cast());
-        Ok(result)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct GithubViewer {
-    login: String,
 }
 
 #[derive(Debug, Deserialize)]

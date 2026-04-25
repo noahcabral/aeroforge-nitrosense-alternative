@@ -1,13 +1,16 @@
 use tauri::State;
 
 use super::{
+    blue_light,
     models::{
-        ApplyState, BackendBootstrap, BackendContract, CapabilitySnapshot, ControlSnapshot,
-        FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot, PersistenceStatus,
+        ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, CapabilitySnapshot,
+        ControlSnapshot, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
+        PersistenceStatus, SmartChargeApplyResult,
         PowerProfileId, ProcessorStateSettings, ServiceStatus, ShellStatus, TelemetrySnapshot,
         UpdateChannelId, UpdateStatus,
     },
     service_pipe,
+    smart_charge,
     state::{shell_status, BackendState},
     updater,
 };
@@ -29,18 +32,7 @@ pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
             status.connected = true;
             status
         }
-        Err(error) => ServiceStatus {
-            connected: false,
-            pipe_name: service_pipe::pipe_path().into(),
-            service_name: "AeroForgeService".into(),
-            version: None,
-            state_dir: None,
-            supervisor_file: None,
-            worker_count: 0,
-            updated_at_unix: None,
-            workers: Vec::new(),
-            detail: format!("Service unavailable: {error}"),
-        },
+        Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
     }
 }
 
@@ -56,7 +48,9 @@ pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
 
 #[tauri::command]
 pub fn get_telemetry_snapshot(state: State<'_, BackendState>) -> TelemetrySnapshot {
-    service_pipe::fetch_telemetry().unwrap_or_else(|_| state.telemetry())
+    service_pipe::fetch_telemetry()
+        .or_else(|_| service_pipe::fetch_cached_telemetry())
+        .unwrap_or_else(|_| state.telemetry())
 }
 
 #[tauri::command]
@@ -89,23 +83,6 @@ pub fn get_update_status(state: State<'_, BackendState>) -> UpdateStatus {
 }
 
 #[tauri::command]
-pub fn set_update_token(
-    token: String,
-    state: State<'_, BackendState>,
-) -> Result<UpdateStatus, String> {
-    updater::configure_token(state.updater(), &token).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn clear_update_token(state: State<'_, BackendState>) -> Result<UpdateStatus, String> {
-    state
-        .updater()
-        .clear_token()
-        .map_err(|error| error.to_string())?;
-    Ok(state.update_status())
-}
-
-#[tauri::command]
 pub fn check_for_updates(
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
@@ -126,6 +103,52 @@ pub fn stage_update_download(
 #[tauri::command]
 pub fn install_staged_update(state: State<'_, BackendState>) -> Result<UpdateStatus, String> {
     updater::launch_staged_install(state.updater()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn apply_blue_light_filter(
+    enabled: bool,
+    state: State<'_, BackendState>,
+) -> Result<BlueLightApplyResult, String> {
+    let applied = blue_light::apply_blue_light_filter(enabled).map_err(|error| error.to_string())?;
+
+    let mut controls = state.controls();
+    controls.personal_settings.blue_light_filter_enabled = applied.enabled;
+
+    let controls = state
+        .save_controls(controls)
+        .map_err(|error| error.to_string())?;
+
+    Ok(BlueLightApplyResult {
+        controls,
+        applied_at_unix: applied.applied_at_unix,
+        gain_id: applied.gain_id,
+        detail: applied.detail,
+    })
+}
+
+#[tauri::command]
+pub async fn apply_smart_charging(
+    enabled: bool,
+    state: State<'_, BackendState>,
+) -> Result<SmartChargeApplyResult, String> {
+    let applied = smart_charge::apply_smart_charging(enabled)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let mut controls = state.controls();
+    controls.personal_settings.smart_charging_enabled = applied.enabled;
+
+    let controls = state
+        .save_controls(controls)
+        .map_err(|error| error.to_string())?;
+
+    Ok(SmartChargeApplyResult {
+        controls,
+        applied_at_unix: applied.applied_at_unix,
+        battery_healthy: applied.battery_healthy,
+        detail: applied.detail,
+    })
 }
 
 #[tauri::command]

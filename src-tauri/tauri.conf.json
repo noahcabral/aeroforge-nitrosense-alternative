@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm.cmd run dev",
-    "beforeBuildCommand": "npm.cmd run build"
+    "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendDev.ps1",
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendBuild.ps1"
   },
   "app": {
     "windows": [

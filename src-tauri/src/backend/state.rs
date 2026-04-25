@@ -1,7 +1,9 @@
 use std::{
     fs,
+    io,
     path::{Path, PathBuf},
     sync::RwLock,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::models::{
@@ -129,8 +131,36 @@ fn load_controls(
     }
 
     let raw = fs::read_to_string(config_file)?;
-    let parsed = serde_json::from_str::<ControlSnapshot>(&raw)?;
-    Ok((parsed, true))
+    if raw.trim().is_empty() {
+        quarantine_invalid_state_file(config_file, "empty")?;
+        return Ok((defaults.clone(), false));
+    }
+
+    match serde_json::from_str::<ControlSnapshot>(&raw) {
+        Ok(parsed) => Ok((parsed, true)),
+        Err(_) => {
+            quarantine_invalid_state_file(config_file, "invalid")?;
+            Ok((defaults.clone(), false))
+        }
+    }
+}
+
+fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Error> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("control-state.json");
+    let backup_name = format!("{file_name}.{reason}.{stamp}.bak");
+    let backup_path = path.with_file_name(backup_name);
+    fs::rename(path, backup_path)
 }
 
 fn build_contract() -> BackendContract {
@@ -180,22 +210,12 @@ fn build_contract() -> BackendContract {
             CommandDescriptor {
                 command: "get_update_status".into(),
                 stage: "implemented".into(),
-                purpose: "Return the cached GitHub updater state, staged asset details, and secure-token availability.".into(),
-            },
-            CommandDescriptor {
-                command: "set_update_token".into(),
-                stage: "implemented".into(),
-                purpose: "Store a GitHub token in DPAPI-protected local storage after validating it against GitHub.".into(),
-            },
-            CommandDescriptor {
-                command: "clear_update_token".into(),
-                stage: "implemented".into(),
-                purpose: "Remove the stored GitHub updater token and disable authenticated update checks.".into(),
+                purpose: "Return the cached GitHub updater state and any staged portable asset details.".into(),
             },
             CommandDescriptor {
                 command: "check_for_updates".into(),
                 stage: "implemented".into(),
-                purpose: "Query the configured GitHub repo for the latest stable or preview build metadata.".into(),
+                purpose: "Query the published GitHub release feed for the latest build metadata.".into(),
             },
             CommandDescriptor {
                 command: "stage_update_download".into(),
@@ -238,9 +258,19 @@ fn build_contract() -> BackendContract {
                 purpose: "Validate CPU and GPU fan curves and write current-temperature targets through the AeroForge service.".into(),
             },
             CommandDescriptor {
+                command: "apply_smart_charging".into(),
+                stage: "implemented".into(),
+                purpose: "Apply Acer Care Center BatteryHealthy charging mode and persist the staged smart-charge state.".into(),
+            },
+            CommandDescriptor {
                 command: "set_charge_behavior".into(),
                 stage: "planned".into(),
                 purpose: "Control smart charging, USB power, and related battery behaviors.".into(),
+            },
+            CommandDescriptor {
+                command: "apply_blue_light_filter".into(),
+                stage: "implemented".into(),
+                purpose: "Apply the Acer-style blue light gamma ramp and persist the staged eye-care state.".into(),
             },
             CommandDescriptor {
                 command: "apply_gpu_tuning".into(),
@@ -275,8 +305,8 @@ fn build_capabilities() -> CapabilitySnapshot {
         },
         smart_charging: FeatureSupport {
             available: true,
-            writable: false,
-            requires_elevation: true,
+            writable: true,
+            requires_elevation: false,
         },
         usb_power: FeatureSupport {
             available: true,
@@ -285,7 +315,7 @@ fn build_capabilities() -> CapabilitySnapshot {
         },
         blue_light_filter: FeatureSupport {
             available: true,
-            writable: false,
+            writable: true,
             requires_elevation: false,
         },
         gpu_tuning: FeatureSupport {
@@ -299,9 +329,11 @@ fn build_capabilities() -> CapabilitySnapshot {
             requires_elevation: true,
         },
         notes: vec![
-            "Local fallback values are typed defaults when the AeroForge service named pipe is unavailable.".into(),
+            "When the AeroForge service named pipe is unavailable, the backend prefers cached service state files before falling back to typed zero/default telemetry.".into(),
             "AeroForge-owned control state is now persisted to disk; named-pipe service IPC is now in place for read-only snapshots.".into(),
-            "GitHub updater state is stored separately from control-state.json, and the release token is protected with Windows DPAPI.".into(),
+            "GitHub updater state is stored separately from control-state.json, and release checks now use the public GitHub release feed.".into(),
+            "Blue light filter apply now uses a clean-room gamma ramp implementation matched to Acer Quick Access GainID 0-4 behavior and also updates the Quick Access settings file.".into(),
+            "Smart charging now uses Acer Care Center's local BatteryHealthy websocket path on port 4343. BatteryHealthy 0 keeps the 80% optimized cap, while BatteryHealthy 1 restores full charging.".into(),
             "Power-profile apply now uses direct AcerGamingFunction operating-mode writes for supported modes, then applies the staged Windows processor policy.".into(),
             "GPU tuning apply now flows through the AeroForge service and currently writes editable NVAPI P0 clock offsets while staging unsupported voltage and limit fields.".into(),
             "Fan profile and curve apply now flow through the AeroForge service using direct ROOT\\WMI AcerGamingFunction ACPI calls, with RPM movement verified through telemetry.".into(),
@@ -408,28 +440,28 @@ fn build_default_controls() -> ControlSnapshot {
 
 fn build_default_telemetry() -> TelemetrySnapshot {
     TelemetrySnapshot {
-        cpu_temp_c: 66,
-        cpu_temp_average_c: Some(66),
+        cpu_temp_c: 0,
+        cpu_temp_average_c: None,
         cpu_temp_lowest_core_c: None,
         cpu_temp_highest_core_c: None,
-        gpu_temp_c: 51,
-        system_temp_c: 52,
-        cpu_usage_percent: 49,
-        gpu_usage_percent: 22,
-        gpu_memory_usage_percent: Some(18),
+        gpu_temp_c: 0,
+        system_temp_c: 0,
+        cpu_usage_percent: 0,
+        gpu_usage_percent: 0,
+        gpu_memory_usage_percent: None,
         cpu_name: None,
         cpu_brand: None,
         gpu_name: None,
         gpu_brand: None,
         system_vendor: None,
         system_model: None,
-        cpu_clock_mhz: 2646,
-        gpu_clock_mhz: 3240,
+        cpu_clock_mhz: 0,
+        gpu_clock_mhz: 0,
         cpu_fan_rpm: 0,
         gpu_fan_rpm: 0,
-        battery_percent: 80,
+        battery_percent: 0,
         battery_life_remaining_sec: None,
-        ac_plugged_in: true,
+        ac_plugged_in: false,
     }
 }
 

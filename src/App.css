@@ -28,37 +28,41 @@
 .topbar__brand {
   display: flex;
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.72rem;
+  flex: 0 0 auto;
 }
 
-.brand-mark {
+.topbar__brand-mark {
   display: grid;
   place-items: center;
-  width: 2.35rem;
-  height: 2.35rem;
-  border-radius: 12px;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 14px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(236, 120, 46, 0.2);
+  border: 1px solid rgba(236, 120, 46, 0.24);
+  background: rgba(255, 255, 255, 0.04);
 }
 
-.brand-mark img {
+.topbar__brand-mark img {
   width: 100%;
   height: 100%;
   display: block;
+  object-fit: cover;
 }
 
-.brand-copy {
+.topbar__brand-copy {
   display: grid;
+  align-content: center;
   gap: 0.08rem;
 }
 
-.brand-copy strong {
-  font-size: 0.94rem;
+.topbar__brand-copy strong {
+  font-size: 1.1rem;
+  line-height: 1;
   letter-spacing: -0.03em;
 }
 
-.brand-copy span,
+.brand-subtitle,
 .topbar__status span {
   color: var(--text-dim);
   font-size: 0.82rem;
@@ -1431,6 +1435,17 @@
   cursor: pointer;
 }
 
+.charge-mode-card:disabled,
+.toggle:disabled {
+  opacity: 0.74;
+  cursor: wait;
+}
+
+.charge-mode-card:disabled:hover,
+.toggle:disabled:hover {
+  transform: none;
+}
+
 .charge-mode-card__badge {
   display: grid;
   place-items: center;
@@ -1589,7 +1604,6 @@
   padding: 1.2rem;
   background: rgba(7, 10, 14, 0.68);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(10px);
 }
 
 .screen-preview__panel strong {
@@ -1619,7 +1633,6 @@
   box-shadow:
     0 22px 70px rgba(0, 0, 0, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(24px);
 }
 
 .status-bar,
