@@ -113,7 +113,6 @@ Clean-room boundary:
 
 - AeroForge source does not include Acer source code, decompiled Acer code, or Acer binary string-analysis artifacts
 - Vendor names, WMI class names, method names, and numeric inputs are treated as runtime-observed interface facts
-- Reverse-engineering probes and evidence belong outside this repo, under the desktop-control/project-memory workflow
 
 Useful commands:
 
