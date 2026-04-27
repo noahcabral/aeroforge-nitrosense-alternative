@@ -1,6 +1,7 @@
 pub mod blue_light;
 pub mod boot_logo;
 pub mod commands;
+pub mod cpu_clock;
 pub mod models;
 pub mod nitro_guard;
 pub mod nitro_key;

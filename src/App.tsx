@@ -183,6 +183,12 @@ const customPowerBaseOptions: {
   { id: 'turbo', name: 'Turbo', summary: 'Starts from Acer turbo firmware behavior.' },
 ]
 
+const customPowerBaseCeilingLabels: Record<CustomPowerBaseId, string> = {
+  balanced: 'Balanced base ceiling',
+  performance: 'Performance base ceiling',
+  turbo: 'Turbo base ceiling',
+}
+
 const fanProfiles: FanProfile[] = [
   {
     id: 'auto',
@@ -1122,7 +1128,7 @@ function App() {
   )
   const currentPowerWattage =
     activePowerProfile === 'custom'
-      ? `${Math.round(18 + customProcessorState.max * 0.57)}W ceiling`
+      ? `${customPowerBaseCeilingLabels[customPowerBase]} • ${Math.round(18 + customProcessorState.max * 0.57)}W target`
       : currentPowerProfile.wattage
   const currentPowerRuntime = formatRemainingRuntime(displayedBatteryLifeRemainingSec)
   const runtimeEstimatePending =

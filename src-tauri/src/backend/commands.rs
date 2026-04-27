@@ -1,7 +1,7 @@
 use tauri::State;
 
 use super::{
-    blue_light, boot_logo,
+    blue_light, boot_logo, cpu_clock,
     models::{
         ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, BootLogoApplyResult,
         CapabilitySnapshot, ControlSnapshot, CustomPowerBaseId, FanCurveSet, FanProfileId,
@@ -48,9 +48,15 @@ pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
 
 #[tauri::command]
 pub fn get_telemetry_snapshot(state: State<'_, BackendState>) -> TelemetrySnapshot {
-    service_pipe::fetch_telemetry()
+    let mut telemetry = service_pipe::fetch_telemetry()
         .or_else(|_| service_pipe::fetch_cached_telemetry())
-        .unwrap_or_else(|_| state.telemetry())
+        .unwrap_or_else(|_| state.telemetry());
+
+    if let Some(cpu_clock_mhz) = cpu_clock::read_effective_cpu_clock_mhz() {
+        telemetry.cpu_clock_mhz = cpu_clock_mhz;
+    }
+
+    telemetry
 }
 
 #[tauri::command]

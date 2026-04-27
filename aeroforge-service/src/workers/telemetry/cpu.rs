@@ -163,7 +163,7 @@ fn query_cpu_clock_mhz() -> Result<u16, Box<dyn std::error::Error + Send + Sync>
         .args([
             "-NoProfile",
             "-Command",
-            "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty CurrentClockSpeed)",
+            "$cores = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\\d+,\\d+$' }; if ($cores) { $effective = $cores | ForEach-Object { ([double]$_.ProcessorFrequency) * (([double]$_.PercentProcessorPerformance) / 100.0) } | Measure-Object -Average; [int][math]::Round($effective.Average) } else { $total = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1; if ($total) { [int][math]::Round(([double]$total.ProcessorFrequency) * (([double]$total.PercentProcessorPerformance) / 100.0)) } else { Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty CurrentClockSpeed } }",
         ])
         .output()?;
 
