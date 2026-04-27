@@ -1,8 +1,11 @@
 pub mod blue_light;
+pub mod boot_logo;
 pub mod commands;
 pub mod models;
 pub mod nitro_guard;
+pub mod nitro_key;
 pub mod service_pipe;
+pub mod single_instance;
 pub mod smart_charge;
 pub mod state;
 pub mod updater;

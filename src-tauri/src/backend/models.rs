@@ -75,8 +75,17 @@ pub enum PowerProfileId {
     BatteryGuard,
     Balanced,
     #[serde(alias = "performance")]
+    Performance,
     Turbo,
     Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomPowerBaseId {
+    Balanced,
+    Performance,
+    Turbo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +202,8 @@ pub struct ControlSnapshot {
     pub active_power_profile: PowerProfileId,
     pub active_fan_profile: FanProfileId,
     pub custom_processor_state: ProcessorStateSettings,
+    #[serde(default = "default_custom_power_base")]
+    pub custom_power_base: CustomPowerBaseId,
     pub gpu_tuning: GpuTuningState,
     pub oc_presets: Vec<OcPreset>,
     pub active_oc_slot: String,
@@ -239,6 +250,16 @@ pub struct LiveControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<serde_json::Value>,
+    #[serde(default = "default_true")]
+    pub boot_logo_apply_supported: bool,
+    #[serde(default)]
+    pub last_boot_logo_applied_at_unix: Option<u64>,
+    #[serde(default = "default_waiting_boot_logo_apply_detail")]
+    pub last_boot_logo_apply_detail: String,
+    #[serde(default)]
+    pub last_boot_logo_error: Option<String>,
+    #[serde(default)]
+    pub last_boot_logo_readback: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -257,12 +278,20 @@ fn default_update_channel() -> UpdateChannelId {
     UpdateChannelId::Stable
 }
 
+fn default_custom_power_base() -> CustomPowerBaseId {
+    CustomPowerBaseId::Performance
+}
+
 fn default_waiting_power_apply_detail() -> String {
     "Waiting for the first control action.".into()
 }
 
 fn default_waiting_fan_apply_detail() -> String {
     "Waiting for the first fan-control apply.".into()
+}
+
+fn default_waiting_boot_logo_apply_detail() -> String {
+    "Waiting for the first boot-logo apply.".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +332,14 @@ pub struct GpuTuningApplyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FanControlApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootLogoApplyResult {
     pub controls: ControlSnapshot,
     pub applied_at_unix: u64,
     pub detail: String,

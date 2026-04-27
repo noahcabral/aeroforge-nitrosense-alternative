@@ -44,11 +44,12 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
             writable: false,
             requires_elevation: true,
         },
-        boot_logo: feature(false, true),
+        boot_logo: feature(true, true),
         notes: vec![
             "Service capabilities are now delivered over the AeroForge named pipe.".into(),
             "Power-profile application now writes processor min and max state through Windows powercfg on the active scheme.".into(),
             "Fan profile writes use direct ROOT\\WMI AcerGamingFunction ACPI calls; RPM movement is verified separately through telemetry.".into(),
+            "Boot-logo replacement uses a clean-room CUSTOM_BOOT_LOGO packet path through AcerAgentService and restores the Acer Agent Service lifecycle after apply.".into(),
         ],
     };
 

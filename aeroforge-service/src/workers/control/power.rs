@@ -8,9 +8,12 @@ use crate::{
 };
 
 use super::{
-    acer_wmi::{apply_gaming_profile, GAMING_PROFILE_BALANCED, GAMING_PROFILE_TURBO},
+    acer_wmi::{
+        apply_gaming_profile, GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE,
+        GAMING_PROFILE_TURBO,
+    },
     models::{
-        AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, PowerProfileId,
+        AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, CustomPowerBaseId, PowerProfileId,
         ProcessorStateReadback, ProcessorStateSettings,
     },
     nvapi_whisper::{set_whisper_mode, NvApiWhisperResult},
@@ -27,7 +30,7 @@ pub fn apply_power_profile(
 ) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let profile_id = request.profile_id.clone();
     let processor_state = sanitize_processor_state(request.processor_state)?;
-    let operating_mode = apply_operating_mode(&profile_id)?;
+    let operating_mode = apply_operating_mode(&profile_id, request.custom_base_profile.as_ref())?;
     let profile_label = profile_label(&profile_id);
 
     write_log_line(
@@ -116,6 +119,7 @@ fn sanitize_processor_state(
 
 fn apply_operating_mode(
     profile_id: &PowerProfileId,
+    custom_base_profile: Option<&CustomPowerBaseId>,
 ) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
     match profile_id {
         PowerProfileId::BatteryGuard => {
@@ -128,13 +132,30 @@ fn apply_operating_mode(
             })
         }
         PowerProfileId::Balanced => {
-            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_BALANCED, false)
+            apply_acer_profile_with_whisper_clear(
+                profile_id,
+                GAMING_PROFILE_BALANCED,
+                false,
+                None,
+            )
+        }
+        PowerProfileId::Performance => {
+            apply_acer_profile_with_whisper_clear(
+                profile_id,
+                GAMING_PROFILE_PERFORMANCE,
+                false,
+                None,
+            )
         }
         PowerProfileId::Turbo => {
-            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_TURBO, false)
+            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_TURBO, false, None)
         }
         PowerProfileId::Custom => {
-            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_BALANCED, true)
+            let custom_base = custom_base_profile
+                .cloned()
+                .unwrap_or(CustomPowerBaseId::Performance);
+            let (input, label) = custom_base_profile_details(&custom_base);
+            apply_acer_profile_with_whisper_clear(profile_id, input, true, Some(label))
         }
     }
 }
@@ -143,6 +164,7 @@ fn profile_label(profile_id: &PowerProfileId) -> &'static str {
     match profile_id {
         PowerProfileId::BatteryGuard => "quiet",
         PowerProfileId::Balanced => "balanced",
+        PowerProfileId::Performance => "performance",
         PowerProfileId::Turbo => "turbo",
         PowerProfileId::Custom => "custom",
     }
@@ -156,6 +178,7 @@ fn apply_acer_profile_with_whisper_clear(
     profile_id: &PowerProfileId,
     input: u64,
     balanced_base_for_custom: bool,
+    custom_base_label: Option<&'static str>,
 ) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
     let result = apply_gaming_profile(input)?;
     let gm_output = result.output.ok_or_else(|| {
@@ -185,7 +208,8 @@ fn apply_acer_profile_with_whisper_clear(
 
     let firmware_detail = if balanced_base_for_custom {
         format!(
-            "Applied AcerGamingFunction balanced base mode with SetGamingProfile({}) and gmOutput {} before layering the custom processor policy.",
+            "Applied AcerGamingFunction {} base mode with SetGamingProfile({}) and gmOutput {} before layering the custom processor policy.",
+            custom_base_label.unwrap_or("performance"),
             result.input,
             gm_output
         )
@@ -204,6 +228,14 @@ fn apply_acer_profile_with_whisper_clear(
             format_whisper_detail("Cleared NVIDIA Whisper state", &whisper)
         ),
     })
+}
+
+fn custom_base_profile_details(custom_base: &CustomPowerBaseId) -> (u64, &'static str) {
+    match custom_base {
+        CustomPowerBaseId::Balanced => (GAMING_PROFILE_BALANCED, "balanced"),
+        CustomPowerBaseId::Performance => (GAMING_PROFILE_PERFORMANCE, "performance"),
+        CustomPowerBaseId::Turbo => (GAMING_PROFILE_TURBO, "turbo"),
+    }
 }
 
 fn format_whisper_detail(prefix: &str, result: &NvApiWhisperResult) -> String {

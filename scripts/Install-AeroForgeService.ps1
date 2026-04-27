@@ -10,20 +10,20 @@ $serviceBinDir = Join-Path $serviceRoot 'bin'
 $installedExe = Join-Path $serviceBinDir 'aeroforge-service.exe'
 
 function Resolve-CargoPath {
-  $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
-  if ($cargoCommand) {
-    return $cargoCommand.Source
-  }
-
   $fallbacks = @(
-    'C:\Users\noah\.cargo\bin\cargo.exe',
-    'C:\Users\noah\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe'
+    'C:\Users\noah\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe',
+    'C:\Users\noah\.cargo\bin\cargo.exe'
   )
 
   foreach ($candidate in $fallbacks) {
     if (Test-Path -LiteralPath $candidate) {
       return $candidate
     }
+  }
+
+  $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
+  if ($cargoCommand) {
+    return $cargoCommand.Source
   }
 
   throw 'Unable to locate cargo.exe. Install or repair the Rust toolchain path first.'
@@ -39,6 +39,28 @@ function Invoke-Sc {
   if ($LASTEXITCODE -ne 0) {
     throw "sc.exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
   }
+}
+
+function Copy-WithRetry {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Source,
+    [Parameter(Mandatory = $true)]
+    [string]$Destination
+  )
+
+  $deadline = (Get-Date).AddSeconds(15)
+  do {
+    try {
+      Copy-Item -LiteralPath $Source -Destination $Destination -Force
+      return
+    } catch {
+      if ((Get-Date) -ge $deadline) {
+        throw
+      }
+      Start-Sleep -Milliseconds 500
+    }
+  } while ($true)
 }
 
 $cargoPath = Resolve-CargoPath
@@ -58,7 +80,7 @@ if ($existingService) {
   }
 }
 
-Copy-Item -LiteralPath $buildExe -Destination $installedExe -Force
+Copy-WithRetry -Source $buildExe -Destination $installedExe
 
 if ($existingService) {
   Invoke-Sc -Arguments @('config', $serviceName, 'binPath=', "`"$installedExe`"")

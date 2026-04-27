@@ -16,9 +16,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (min_percent, max_percent) = match profile_id.as_str() {
         "battery-guard" => (5, 45),
         "balanced" => (35, 88),
+        "performance" => (100, 100),
         "turbo" => (100, 100),
         _ => (42, 77),
     };
+    let custom_base_profile = std::env::args().nth(2);
 
     let request = json!({
         "kind": "applyPowerProfile",
@@ -27,7 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "processorState": {
                 "minPercent": min_percent,
                 "maxPercent": max_percent
-            }
+            },
+            "customBaseProfile": custom_base_profile
         }
     });
 

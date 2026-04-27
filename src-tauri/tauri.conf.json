@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AeroForge Control",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "identifier": "com.noah.aeroforgecontrol",
   "build": {
     "frontendDist": "../dist",
@@ -18,6 +18,7 @@
         "minWidth": 1180,
         "minHeight": 760,
         "center": true,
+        "visible": false,
         "decorations": true,
         "transparent": false,
         "resizable": true,
@@ -31,6 +32,16 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "minimumWebview2Version": "124.0.2478.67",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -2,7 +2,6 @@ import {
   type ChangeEvent,
   startTransition,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
 } from 'react'
@@ -11,6 +10,7 @@ import './App.css'
 import aeroforgeMark from './assets/aeroforge-mark.png'
 import {
   applyBlueLightFilter,
+  applyBootLogo,
   applyCustomFanCurves,
   applyFanProfile,
   applyGpuTuning,
@@ -26,7 +26,9 @@ import {
   installStagedUpdate,
   saveControlSnapshot,
   stageUpdateDownload,
+  type CapabilitySnapshot,
   type ControlSnapshot,
+  type CustomPowerBaseId,
   type LiveControlSnapshot,
   type ServiceStatus,
   type TelemetrySnapshot,
@@ -59,7 +61,7 @@ type FrameStats = {
 type CurveSet = Record<CurveTarget, CurvePoint[]>
 
 type PowerProfile = {
-  id: 'battery-guard' | 'balanced' | 'turbo' | 'custom'
+  id: 'battery-guard' | 'balanced' | 'performance' | 'turbo' | 'custom'
   name: string
   strap: string
   summary: string
@@ -74,6 +76,27 @@ type FanProfile = {
   summary: string
   acousticLabel: string
   badge: string
+}
+
+type PersistControlOverrides = {
+  activePowerProfile?: PowerProfile['id']
+  activeFanProfile?: FanProfile['id']
+  customProcessorState?: { min: number; max: number }
+  customPowerBase?: CustomPowerBaseId
+  customCurves?: CurveSet
+  fanSyncLockEnabled?: boolean
+  smartChargingEnabled?: boolean
+  blueLightFilterEnabled?: boolean
+  selectedBootArt?: string
+  customBootFilename?: string
+  updateChannel?: UpdateChannel
+  checkForUpdatesOnLaunch?: boolean
+}
+
+type FinalizeCustomCurveOptions = {
+  activateCustom?: boolean
+  fanSyncLockState?: boolean
+  statusMessage?: string
 }
 
 type GpuTuningState = {
@@ -121,6 +144,14 @@ const powerProfiles: PowerProfile[] = [
     runtime: '5h 40m est.',
   },
   {
+    id: 'performance',
+    name: 'Performance',
+    strap: 'Firmware performance preset',
+    summary: 'Uses the Acer performance preset for higher sustained package power without forcing the top turbo state.',
+    wattage: 'Performance firmware limit',
+    runtime: 'AC preferred',
+  },
+  {
     id: 'turbo',
     name: 'Turbo',
     strap: 'Highest firmware turbo state',
@@ -136,6 +167,20 @@ const powerProfiles: PowerProfile[] = [
     wattage: 'Variable',
     runtime: 'Adaptive',
   },
+]
+
+const customPowerBaseOptions: {
+  id: CustomPowerBaseId
+  name: string
+  summary: string
+}[] = [
+  { id: 'balanced', name: 'Balanced', summary: 'Starts from Acer balanced firmware behavior.' },
+  {
+    id: 'performance',
+    name: 'Performance',
+    summary: 'Starts from Acer performance firmware behavior.',
+  },
+  { id: 'turbo', name: 'Turbo', summary: 'Starts from Acer turbo firmware behavior.' },
 ]
 
 const fanProfiles: FanProfile[] = [
@@ -380,6 +425,7 @@ const tempMax = 90
 const speedMin = 2
 const speedMax = 100
 const BACKEND_POLL_INTERVAL_MS = 1000
+const HIDDEN_BACKEND_POLL_INTERVAL_MS = 5000
 const RUNTIME_ESTIMATE_COUNTDOWN_SEC = 30
 
 function pointToChart(point: CurvePoint) {
@@ -459,6 +505,67 @@ function describeError(error: unknown) {
     return JSON.stringify(error)
   } catch {
     return 'Unknown error'
+  }
+}
+
+type PreparedBootLogo = {
+  fileName: string
+  imageBase64: string
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read boot-logo image.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function loadImageElement(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Unable to decode boot-logo image.'))
+    image.src = src
+  })
+}
+
+function buildJpegBootLogoName(fileName: string) {
+  const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
+  return `${stem}.jpg`
+}
+
+async function prepareBootLogoUpload(file: File): Promise<PreparedBootLogo> {
+  const sourceDataUrl = await readFileAsDataUrl(file)
+  const image = await loadImageElement(sourceDataUrl)
+  const maxWidth = Math.max(1, Math.floor(window.screen.width * 0.4))
+  const maxHeight = Math.max(1, Math.floor(window.screen.height * 0.4))
+  const scale = Math.min(1, maxWidth / image.naturalWidth, maxHeight / image.naturalHeight)
+  const width = Math.max(1, Math.round(image.naturalWidth * scale))
+  const height = Math.max(1, Math.round(image.naturalHeight * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Unable to prepare boot-logo canvas.')
+  }
+
+  context.fillStyle = '#000'
+  context.fillRect(0, 0, width, height)
+  context.drawImage(image, 0, 0, width, height)
+
+  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92)
+  const imageBase64 = jpegDataUrl.split(',')[1]
+  if (!imageBase64) {
+    throw new Error('Unable to encode boot-logo JPEG.')
+  }
+
+  return {
+    fileName: buildJpegBootLogoName(file.name),
+    imageBase64,
   }
 }
 
@@ -642,6 +749,8 @@ function getProcessorStateForPowerProfile(
       return { min: 5, max: 45 }
     case 'balanced':
       return { min: 35, max: 88 }
+    case 'performance':
+      return { min: 100, max: 100 }
     case 'turbo':
       return { min: 100, max: 100 }
     case 'custom':
@@ -749,6 +858,7 @@ function mergeControlsWithLiveSnapshot(
       liveControls.activePowerProfile === 'custom' && liveControls.processorState
         ? liveControls.processorState
         : controls.customProcessorState,
+    customPowerBase: controls.customPowerBase,
   }
 }
 
@@ -756,6 +866,7 @@ function buildControlSnapshotForPersistence(input: {
   activePowerProfile: PowerProfile['id']
   activeFanProfile: FanProfile['id']
   customProcessorState: { min: number; max: number }
+  customPowerBase: CustomPowerBaseId
   gpuOverclock: GpuTuningState
   ocProfileSlots: OcProfileSlot[]
   activeOcSlot: string
@@ -778,6 +889,7 @@ function buildControlSnapshotForPersistence(input: {
       minPercent: input.customProcessorState.min,
       maxPercent: input.customProcessorState.max,
     },
+    customPowerBase: input.customPowerBase,
     gpuTuning: toBackendGpuTuningState(input.gpuOverclock),
     ocPresets: input.ocProfileSlots.map(toBackendOcPreset),
     activeOcSlot: input.activeOcSlot,
@@ -801,6 +913,7 @@ function applyBackendControlSnapshot(
   controls: ControlSnapshot,
   setActivePowerProfile: (profile: PowerProfile['id']) => void,
   setCustomProcessorState: (state: { min: number; max: number }) => void,
+  setCustomPowerBase: (base: CustomPowerBaseId) => void,
   setGpuOverclock: (state: GpuTuningState) => void,
   setCustomOcSlot: (slot: OcProfileSlot) => void,
   setActiveOcSlot: (slotId: string) => void,
@@ -818,6 +931,7 @@ function applyBackendControlSnapshot(
   setCheckForUpdatesOnLaunch: (enabled: boolean) => void,
 ) {
   applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
+  setCustomPowerBase(controls.customPowerBase)
   setGpuOverclock(fromBackendGpuTuningState(controls.gpuTuning))
   setActiveFanProfile(controls.activeFanProfile)
   setCustomCurves(fromBackendCurveSet(controls.fanCurves))
@@ -862,6 +976,8 @@ function App() {
     max: 88,
   })
   const customProcessorStateRef = useRef(customProcessorState)
+  const [customPowerBase, setCustomPowerBase] = useState<CustomPowerBaseId>('performance')
+  const customPowerBaseRef = useRef<CustomPowerBaseId>('performance')
   const [gpuOverclock, setGpuOverclock] = useState<GpuTuningState>(defaultGpuOverclock)
   const [customOcSlot, setCustomOcSlot] = useState<OcProfileSlot>(defaultCustomOcSlot)
   const [activeOcSlot, setActiveOcSlot] = useState<string>('daily')
@@ -887,15 +1003,16 @@ function App() {
   const [customBootFilename, setCustomBootFilename] = useState<string>('custom-boot.png')
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
-  const [backendVersion, setBackendVersion] = useState('0.11.0')
+  const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
+  const [backendVersion, setBackendVersion] = useState('0.12.0')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
   const [statusMessage, setStatusMessage] = useState(
-    'Frontend preview only. Hardware, EC, and firmware actions are not wired yet.',
+    'Desktop backend starting. Loading persisted AeroForge state.',
   )
   const [settingsActionPending, setSettingsActionPending] = useState<
-    null | 'smart-charge' | 'blue-light'
+    null | 'smart-charge' | 'blue-light' | 'boot-logo'
   >(null)
   const [glowTarget, setGlowTarget] = useState<string>('balanced')
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
@@ -928,6 +1045,17 @@ function App() {
   const liveControlSnapshotStateRef = useRef<string | null>(null)
   const liveControlSnapshotRef = useRef<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
+  const persistStagedControlsRef = useRef<
+    (overrides?: PersistControlOverrides) => Promise<void>
+  >(async () => {})
+  const finalizeCustomCurveEditRef = useRef<
+    (nextCurves: CurveSet, options?: FinalizeCustomCurveOptions) => Promise<void>
+  >(async () => {})
+  const pushTransportDebugEventRef = useRef<(message: string) => void>(() => {})
+  const pushPollHeartbeatEventRef = useRef<(message: string) => void>(() => {})
+  const runUpdateCheckRef = useRef<
+    ((manual: boolean, channelOverride?: UpdateChannel) => Promise<UpdateStatus>) | null
+  >(null)
 
   const activePreset =
     activeFanProfile === 'custom' ? customCurves : presetCurves[activeFanProfile]
@@ -935,11 +1063,19 @@ function App() {
   const smartChargeTarget = smartChargingEnabled ? '80%' : '100%'
   const smartChargePending = settingsActionPending === 'smart-charge'
   const blueLightPending = settingsActionPending === 'blue-light'
+  const bootLogoPending = settingsActionPending === 'boot-logo'
   const currentPowerProfile = powerProfiles.find(
     (profile) => profile.id === activePowerProfile,
   )!
+  const currentCustomPowerBase =
+    customPowerBaseOptions.find((option) => option.id === customPowerBase) ??
+    customPowerBaseOptions[1]
   const currentFanProfile = fanProfiles.find((profile) => profile.id === activeFanProfile)!
   const currentBootArt = bootArtwork.find((art) => art.id === selectedBootArt)
+  const bootLogoWritable = backendCapabilities?.bootLogo.writable ?? false
+  const bootLogoDisabledReason = bootLogoWritable
+    ? null
+    : 'Boot-logo replacement requires the AeroForge service apply path.'
   const runtimeCustomOcSlot =
     activeOcSlot === customOcSlot.id
       ? {
@@ -984,15 +1120,6 @@ function App() {
     activeTelemetry?.systemModel,
     'System sensor',
   )
-  const voltageMode = 'Unavailable on this GPU'
-  const voltageNarrative =
-    'Voltage offset writes are not exposed on this hardware path, so this control remains staged only.'
-  const ocLiveDomainTitle = 'Core + Memory'
-  const ocLiveDomainNarrative =
-    'Clock offsets apply live through the NVIDIA path. Voltage, power, and temp controls do not.'
-  const ocApplyPathTitle = 'Limits Staged'
-  const ocApplyPathNarrative =
-    'Power limit, temp limit, and voltage values can be stored in the profile, but they are not live writes on this GPU.'
   const currentPowerWattage =
     activePowerProfile === 'custom'
       ? `${Math.round(18 + customProcessorState.max * 0.57)}W ceiling`
@@ -1018,9 +1145,11 @@ function App() {
         : 'Windows did not provide a runtime estimate'
   const currentPowerSummary =
     activePowerProfile === 'custom'
-      ? `Processor state tuned to ${customProcessorState.min}% minimum and ${customProcessorState.max}% maximum for a custom response curve.`
+      ? `Processor state tuned to ${customProcessorState.min}% minimum and ${customProcessorState.max}% maximum on the ${currentCustomPowerBase.name} firmware base.`
       : activePowerProfile === 'battery-guard'
         ? 'Direct Whisper quiet-mode request with a conservative processor policy for lower noise and heat.'
+        : activePowerProfile === 'performance'
+          ? 'Direct Acer performance-mode apply with processor state pinned to 100% minimum and maximum.'
         : activePowerProfile === 'turbo'
           ? 'Direct Acer turbo mode apply with processor state pinned to 100% minimum and maximum.'
           : currentPowerProfile.summary
@@ -1083,27 +1212,24 @@ function App() {
     customProcessorStateRef.current = customProcessorState
   }, [customProcessorState])
 
-  async function persistStagedControls(overrides?: {
-    activePowerProfile?: PowerProfile['id']
-    activeFanProfile?: FanProfile['id']
-    customProcessorState?: { min: number; max: number }
-    customCurves?: CurveSet
-    fanSyncLockEnabled?: boolean
-    smartChargingEnabled?: boolean
-    blueLightFilterEnabled?: boolean
-    updateChannel?: UpdateChannel
-    checkForUpdatesOnLaunch?: boolean
-  }) {
+  useEffect(() => {
+    customPowerBaseRef.current = customPowerBase
+  }, [customPowerBase])
+
+  async function persistStagedControls(overrides?: PersistControlOverrides) {
     const nextActivePowerProfile = overrides?.activePowerProfile ?? activePowerProfile
     const nextActiveFanProfile = overrides?.activeFanProfile ?? activeFanProfile
     const nextCustomProcessorState =
       overrides?.customProcessorState ?? customProcessorStateRef.current
+    const nextCustomPowerBase = overrides?.customPowerBase ?? customPowerBaseRef.current
     const nextCustomCurves = overrides?.customCurves ?? customCurvesRef.current
     const nextFanSyncLockEnabled = overrides?.fanSyncLockEnabled ?? fanSyncLockEnabled
     const nextSmartChargingEnabled =
       overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
     const nextBlueLightFilterEnabled =
       overrides?.blueLightFilterEnabled ?? blueLightFilterEnabledRef.current
+    const nextSelectedBootArt = overrides?.selectedBootArt ?? selectedBootArt
+    const nextCustomBootFilename = overrides?.customBootFilename ?? customBootFilename
     const nextUpdateChannel = overrides?.updateChannel ?? updateChannel
     const nextCheckForUpdatesOnLaunch =
       overrides?.checkForUpdatesOnLaunch ?? checkForUpdatesOnLaunch
@@ -1114,6 +1240,7 @@ function App() {
           activePowerProfile: nextActivePowerProfile,
           activeFanProfile: nextActiveFanProfile,
           customProcessorState: nextCustomProcessorState,
+          customPowerBase: nextCustomPowerBase,
           gpuOverclock,
           ocProfileSlots,
           activeOcSlot,
@@ -1124,8 +1251,8 @@ function App() {
           smartChargingEnabled: nextSmartChargingEnabled,
           usbPowerEnabled,
           blueLightFilterEnabled: nextBlueLightFilterEnabled,
-          selectedBootArt,
-          customBootFilename,
+          selectedBootArt: nextSelectedBootArt,
+          customBootFilename: nextCustomBootFilename,
           updateChannel: nextUpdateChannel,
           checkForUpdatesOnLaunch: nextCheckForUpdatesOnLaunch,
         }),
@@ -1134,6 +1261,7 @@ function App() {
       pushDebugEvent(`staged control persistence failed: ${describeError(error)}`)
     }
   }
+  persistStagedControlsRef.current = persistStagedControls
 
   useEffect(() => {
     if (!initializedPersistenceRef.current) {
@@ -1141,11 +1269,12 @@ function App() {
       return
     }
 
-    void persistStagedControls()
+    void persistStagedControlsRef.current()
   }, [
     activePowerProfile,
     customProcessorState.min,
     customProcessorState.max,
+    customPowerBase,
     smartChargingEnabled,
     usbPowerEnabled,
     blueLightFilterEnabled,
@@ -1155,7 +1284,7 @@ function App() {
     checkForUpdatesOnLaunch,
   ])
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const resetStageFit = (
       setScale: (value: number) => void,
       setScaledHeight: (value: number | null) => void,
@@ -1200,6 +1329,8 @@ function App() {
     }
 
     let frameId = 0
+    let lastScale = -1
+    let lastScaledHeight: number | null = null
 
     const measureStageFit = () => {
       const dashboard = dashboardRef.current
@@ -1227,16 +1358,30 @@ function App() {
       const availableWidth = dashboard.clientWidth
 
       if (naturalHeight <= 0 || naturalWidth <= 0) {
-        activeStage.setScale(1)
-        activeStage.setScaledHeight(null)
+        if (lastScale !== 1) {
+          activeStage.setScale(1)
+          lastScale = 1
+        }
+        if (lastScaledHeight != null) {
+          activeStage.setScaledHeight(null)
+          lastScaledHeight = null
+        }
         return
       }
 
       const nextScale = Math.min(1, availableHeight / naturalHeight, availableWidth / naturalWidth)
       const clampedScale = Number.isFinite(nextScale) ? Math.max(0.78, nextScale) : 1
+      const nextScaledHeight = naturalHeight * clampedScale
 
-      activeStage.setScale(clampedScale)
-      activeStage.setScaledHeight(naturalHeight * clampedScale)
+      if (Math.abs(lastScale - clampedScale) > 0.001) {
+        activeStage.setScale(clampedScale)
+        lastScale = clampedScale
+      }
+
+      if (lastScaledHeight == null || Math.abs(lastScaledHeight - nextScaledHeight) > 0.5) {
+        activeStage.setScaledHeight(nextScaledHeight)
+        lastScaledHeight = nextScaledHeight
+      }
     }
 
     const scheduleMeasure = () => {
@@ -1259,6 +1404,9 @@ function App() {
       if (topbarRef.current) {
         resizeObserver.observe(topbarRef.current)
       }
+      if (activeStage.ref.current) {
+        resizeObserver.observe(activeStage.ref.current)
+      }
     }
 
     return () => {
@@ -1266,19 +1414,7 @@ function App() {
       resizeObserver?.disconnect()
       cancelAnimationFrame(frameId)
     }
-  }, [
-    activeTab,
-    activeFanProfile,
-    activePowerProfile,
-    activeOcSlot,
-    ocApplyState,
-    ocTuningLocked,
-    serviceConnected,
-    runtimeEstimateCountdownSec,
-    displayedCpuIdentity,
-    displayedGpuIdentity,
-    displayedSystemIdentity,
-  ])
+  }, [activeTab])
 
   function pushDebugEvent(message: string) {
     const entry = `${formatDebugClock(new Date())} ${message}`
@@ -1311,6 +1447,8 @@ function App() {
     lastPollHeartbeatRef.current = now
     pushDebugEvent(message)
   }
+  pushTransportDebugEventRef.current = pushTransportDebugEvent
+  pushPollHeartbeatEventRef.current = pushPollHeartbeat
 
   useEffect(() => {
     if (displayedAcPluggedIn === true) {
@@ -1407,7 +1545,7 @@ function App() {
 
     function onPointerUp() {
       setDraggingPoint(null)
-      void finalizeCustomCurveEdit(customCurvesRef.current)
+      void finalizeCustomCurveEditRef.current(customCurvesRef.current)
     }
 
     window.addEventListener('pointermove', onPointerMove)
@@ -1545,16 +1683,20 @@ function App() {
         const telemetry = bootstrap.telemetry
         const liveControls = service.connected
           ? await getLiveControlSnapshot().catch((error) => {
-              pushTransportDebugEvent(`bootstrap live-controls fallback: ${describeError(error)}`)
+              pushTransportDebugEventRef.current(
+                `bootstrap live-controls fallback: ${describeError(error)}`,
+              )
               return null
             })
           : null
 
         if (!cancelled) {
+          setBackendCapabilities(bootstrap.capabilities)
           applyBackendControlSnapshot(
             mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls),
             setActivePowerProfile,
             setCustomProcessorState,
+            setCustomPowerBase,
             setGpuOverclock,
             setCustomOcSlot,
             setActiveOcSlot,
@@ -1602,7 +1744,7 @@ function App() {
           )
         }
 
-        pushTransportDebugEvent(
+        pushTransportDebugEventRef.current(
           service.connected
             ? `bootstrap connected: ${service.detail}`
             : `bootstrap fallback: ${service.detail}`,
@@ -1611,6 +1753,7 @@ function App() {
         const message = describeError(error)
 
         if (!cancelled) {
+          setBackendCapabilities(null)
           setServiceConnected(false)
           setTelemetrySourceLabel('No telemetry')
           setLastBackendError(message)
@@ -1625,7 +1768,7 @@ function App() {
           setStatusMessage(`Desktop bootstrap failed: ${message}`)
         }
 
-        pushTransportDebugEvent(`bootstrap error: ${message}`)
+        pushTransportDebugEventRef.current(`bootstrap error: ${message}`)
       }
     }
 
@@ -1644,7 +1787,9 @@ function App() {
         const telemetry = await getTelemetrySnapshot()
         const liveControls = service.connected
           ? await getLiveControlSnapshot().catch((error) => {
-              pushTransportDebugEvent(`poll live-controls fallback: ${describeError(error)}`)
+              pushTransportDebugEventRef.current(
+                `poll live-controls fallback: ${describeError(error)}`,
+              )
               return null
             })
           : null
@@ -1668,19 +1813,19 @@ function App() {
         }
 
         if (service.connected) {
-          pushPollHeartbeat(
+          pushPollHeartbeatEventRef.current(
             `poll connected: CPU ${presentPositive(
               telemetry?.cpuTempAverageC ?? telemetry?.cpuTempC ?? null,
             ) ?? '?'}C / GPU ${presentPositive(telemetry?.gpuTempC ?? null) ?? '?'}C`,
           )
         } else if (hasUsableTelemetry(telemetry)) {
-          pushPollHeartbeat(
+          pushPollHeartbeatEventRef.current(
             `poll cached: CPU ${presentPositive(
               telemetry?.cpuTempAverageC ?? telemetry?.cpuTempC ?? null,
             ) ?? '?'}C / GPU ${presentPositive(telemetry?.gpuTempC ?? null) ?? '?'}C`,
           )
         } else {
-          pushTransportDebugEvent(`poll fallback: ${service.detail}`)
+          pushTransportDebugEventRef.current(`poll fallback: ${service.detail}`)
         }
       } catch (error) {
         const message = describeError(error)
@@ -1699,20 +1844,54 @@ function App() {
           }
         }
 
-        pushTransportDebugEvent(`poll error: ${message}`)
+        pushTransportDebugEventRef.current(`poll error: ${message}`)
       } finally {
         backendPollInFlightRef.current = false
       }
     }
 
-    const pollTimer = window.setInterval(() => {
-      void pollBackend()
-    }, BACKEND_POLL_INTERVAL_MS)
+    let pollTimer = 0
+
+    function currentPollInterval() {
+      return document.visibilityState === 'hidden'
+        ? HIDDEN_BACKEND_POLL_INTERVAL_MS
+        : BACKEND_POLL_INTERVAL_MS
+    }
+
+    function scheduleNextPoll(delay = currentPollInterval()) {
+      window.clearTimeout(pollTimer)
+      pollTimer = window.setTimeout(() => {
+        void pollBackend().finally(() => {
+          if (!cancelled) {
+            scheduleNextPoll()
+          }
+        })
+      }, delay)
+    }
+
+    function pollNowThenReschedule() {
+      window.clearTimeout(pollTimer)
+      void pollBackend().finally(() => {
+        if (!cancelled) {
+          scheduleNextPoll()
+        }
+      })
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        pollNowThenReschedule()
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    scheduleNextPoll()
 
     return () => {
       cancelled = true
       backendPollInFlightRef.current = false
-      window.clearInterval(pollTimer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.clearTimeout(pollTimer)
     }
   }, [])
 
@@ -1726,7 +1905,7 @@ function App() {
     }
 
     autoUpdateCheckTriggeredRef.current = true
-    void runUpdateCheck(false)
+    void runUpdateCheckRef.current?.(false)
   }, [checkForUpdatesOnLaunch])
 
   function pulseControl(target: string) {
@@ -1771,13 +1950,14 @@ function App() {
       const updatedControls = await applyPowerProfile(profileId, {
         minPercent: nextProcessorState.min,
         maxPercent: nextProcessorState.max,
-      })
+      }, profileId === 'custom' ? customPowerBaseRef.current : null)
       const liveControls = await getLiveControlSnapshot().catch(() => null)
 
       applyBackendControlSnapshot(
         mergeControlsWithLiveSnapshot(updatedControls, liveControls),
         setActivePowerProfile,
         setCustomProcessorState,
+        setCustomPowerBase,
         setGpuOverclock,
         setCustomOcSlot,
         setActiveOcSlot,
@@ -1840,6 +2020,7 @@ function App() {
         result.controls,
         setActivePowerProfile,
         setCustomProcessorState,
+        setCustomPowerBase,
         setGpuOverclock,
         setCustomOcSlot,
         setActiveOcSlot,
@@ -1871,6 +2052,7 @@ function App() {
       result.controls,
       setActivePowerProfile,
       setCustomProcessorState,
+      setCustomPowerBase,
       setGpuOverclock,
       setCustomOcSlot,
       setActiveOcSlot,
@@ -1893,11 +2075,7 @@ function App() {
 
   async function finalizeCustomCurveEdit(
     nextCurves: CurveSet,
-    options?: {
-      activateCustom?: boolean
-      fanSyncLockState?: boolean
-      statusMessage?: string
-    },
+    options?: FinalizeCustomCurveOptions,
   ) {
     const nextActiveFanProfile = options?.activateCustom ? 'custom' : activeFanProfile
     const nextFanSyncLockEnabled = options?.fanSyncLockState ?? fanSyncLockEnabled
@@ -1935,6 +2113,7 @@ function App() {
       setStatusMessage(`Custom fan curve apply failed: ${describeError(error)}`)
     }
   }
+  finalizeCustomCurveEditRef.current = finalizeCustomCurveEdit
 
   function cloneToCustom() {
     const nextCurves = fanSyncLockEnabled
@@ -1989,7 +2168,13 @@ function App() {
     })
   }
 
-  function handleBootFile(event: ChangeEvent<HTMLInputElement>) {
+  async function handleBootFile(event: ChangeEvent<HTMLInputElement>) {
+    if (!bootLogoWritable || settingsActionPending) {
+      setStatusMessage(bootLogoDisabledReason ?? 'Boot-logo replacement is disabled.')
+      event.target.value = ''
+      return
+    }
+
     const file = event.target.files?.[0]
     if (!file) {
       return
@@ -2001,10 +2186,48 @@ function App() {
 
     const objectUrl = URL.createObjectURL(file)
     setCustomBootPreview(objectUrl)
-    setCustomBootFilename(file.name)
+    setCustomBootFilename(buildJpegBootLogoName(file.name))
     setSelectedBootArt('custom')
-    setStatusMessage(`${file.name} staged as the boot splash preview.`)
     pulseControl('boot-upload')
+
+    setSettingsActionPending('boot-logo')
+    setStatusMessage('Preparing and applying the boot-logo image...')
+
+    try {
+      const prepared = await prepareBootLogoUpload(file)
+      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64)
+      applyBackendControlSnapshot(
+        result.controls,
+        setActivePowerProfile,
+        setCustomProcessorState,
+        setCustomPowerBase,
+        setGpuOverclock,
+        setCustomOcSlot,
+        setActiveOcSlot,
+        setOcApplyState,
+        setOcTuningLocked,
+        setActiveFanProfile,
+        commitCustomCurves,
+        setFanSyncLockEnabled,
+        commitSmartChargingEnabled,
+        setUsbPowerEnabled,
+        commitBlueLightFilterEnabled,
+        setSelectedBootArt,
+        setCustomBootFilename,
+        setUpdateChannel,
+        setCheckForUpdatesOnLaunch,
+      )
+      await persistStagedControls({
+        selectedBootArt: 'custom',
+        customBootFilename: prepared.fileName,
+      })
+      setStatusMessage(result.detail)
+    } catch (error) {
+      setStatusMessage(`Boot-logo apply failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'boot-logo' ? null : current))
+      event.target.value = ''
+    }
   }
 
   async function runUpdateCheck(manual: boolean, channelOverride?: UpdateChannel) {
@@ -2025,6 +2248,7 @@ function App() {
       setUpdateActionPending(null)
     }
   }
+  runUpdateCheckRef.current = runUpdateCheck
 
   async function handleStageLatestUpdate() {
     setUpdateActionPending('stage')
@@ -2156,6 +2380,27 @@ function App() {
     pulseControl('custom')
   }
 
+  function updateCustomPowerBase(nextBase: CustomPowerBaseId) {
+    if (nextBase === customPowerBaseRef.current) {
+      return
+    }
+
+    customPowerBaseRef.current = nextBase
+    setCustomPowerBase(nextBase)
+    setActivePowerProfile('custom')
+    void persistStagedControls({
+      activePowerProfile: 'custom',
+      customPowerBase: nextBase,
+    })
+
+    const selectedBase =
+      customPowerBaseOptions.find((option) => option.id === nextBase)?.name ?? nextBase
+    setStatusMessage(
+      `Custom firmware base changed to ${selectedBase}${serviceConnected ? '. Click the Custom tile to apply it through the service.' : ' in the preview.'}`,
+    )
+    pulseControl('custom')
+  }
+
   function updateGpuOverclockSetting(
     field: keyof GpuTuningState,
     value: number,
@@ -2204,6 +2449,7 @@ function App() {
         result.controls,
         setActivePowerProfile,
         setCustomProcessorState,
+        setCustomPowerBase,
         setGpuOverclock,
         setCustomOcSlot,
         setActiveOcSlot,
@@ -2245,6 +2491,7 @@ function App() {
           activePowerProfile: 'custom',
           activeFanProfile,
           customProcessorState,
+          customPowerBase,
           gpuOverclock,
           ocProfileSlots: [...builtInOcProfileSlots, savedCustomSlot],
           activeOcSlot: savedCustomSlot.id,
@@ -2286,6 +2533,7 @@ function App() {
           activePowerProfile,
           activeFanProfile,
           customProcessorState,
+          customPowerBase,
           gpuOverclock,
           ocProfileSlots,
           activeOcSlot,
@@ -2419,10 +2667,10 @@ function App() {
               </div>
 
               <div className="home-stage__actions">
-                <button className="button button--primary" onClick={() => setActiveTab('power')}>
+                <button className="button button--home-action" onClick={() => setActiveTab('power')}>
                   Open Power Modes
                 </button>
-                <button className="button" onClick={() => setActiveTab('fans')}>
+                <button className="button button--home-action" onClick={() => setActiveTab('fans')}>
                   Open Fan Control
                 </button>
               </div>
@@ -2714,6 +2962,35 @@ function App() {
                       </span>
                     </div>
 
+                    <div className="power-setting power-setting--select">
+                      <div className="power-setting__header power-setting__header--stacked">
+                        <div className="power-setting__title power-setting__title--stacked">
+                          <strong>Custom Firmware Base</strong>
+                          <span>
+                            Choose which Acer preset Custom should ride on before the processor
+                            policy is layered on top.
+                          </span>
+                        </div>
+                        <small>{currentCustomPowerBase.summary}</small>
+                      </div>
+
+                      <label className="power-select">
+                        <span className="eyebrow">Base preset</span>
+                        <select
+                          value={customPowerBase}
+                          onChange={(event) =>
+                            updateCustomPowerBase(event.target.value as CustomPowerBaseId)
+                          }
+                        >
+                          {customPowerBaseOptions.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
                     <div className="power-custom-grid">
                       <ProcessorStateControl
                         label="Minimum Processor State"
@@ -2731,9 +3008,7 @@ function App() {
                       <div className="power-oc-panel__header">
                         <strong>GPU Overclocking</strong>
                         <span>
-                          Core and memory offsets apply live through the NVIDIA path. Voltage,
-                          power limit, and temperature limit remain staged until a supported write
-                          path exists.
+                          Core and memory offsets apply live through the NVIDIA path on this GPU.
                         </span>
                       </div>
 
@@ -2809,66 +3084,6 @@ function App() {
                           disabled={ocTuningLocked}
                           onChange={(value) => updateGpuOverclockSetting('memoryClock', value)}
                         />
-                        <OverclockSlider
-                          label="Power Limit"
-                          unit="%"
-                          value={gpuOverclock.powerLimit}
-                          min={60}
-                          max={125}
-                          step={1}
-                          disabled
-                          statusLabel="Inactive"
-                          note="Driver does not expose live power-limit writes on this GPU."
-                          onChange={(value) => updateGpuOverclockSetting('powerLimit', value)}
-                        />
-                        <OverclockSlider
-                          label="Temp Limit"
-                          unit="C"
-                          value={gpuOverclock.tempLimit}
-                          min={65}
-                          max={90}
-                          step={1}
-                          disabled
-                          statusLabel="Inactive"
-                          note="Thermal ceiling changes are not writable through the active driver path."
-                          onChange={(value) => updateGpuOverclockSetting('tempLimit', value)}
-                        />
-                      </div>
-
-                      <div className="power-oc-bottomline">
-                        <div className="power-oc-summary">
-                          <span className="eyebrow">Voltage Mode</span>
-                          <strong>{voltageMode}</strong>
-                          <small>{voltageNarrative}</small>
-
-                          <OverclockSlider
-                            label="Core Voltage"
-                            unit="mV"
-                            value={gpuOverclock.voltageOffset}
-                            min={-150}
-                            max={150}
-                            step={5}
-                            disabled
-                            statusLabel="Inactive"
-                            note="Voltage offset writes are locked out on this hardware."
-                            onChange={(value) =>
-                              updateGpuOverclockSetting('voltageOffset', value)
-                            }
-                          />
-                        </div>
-
-                        <div className="power-oc-readout">
-                          <div className="power-oc-readout__metric">
-                            <span className="eyebrow">Live Domains</span>
-                            <strong>{ocLiveDomainTitle}</strong>
-                            <small>{ocLiveDomainNarrative}</small>
-                          </div>
-                          <div className="power-oc-readout__metric">
-                            <span className="eyebrow">Limit Writes</span>
-                            <strong>{ocApplyPathTitle}</strong>
-                            <small>{ocApplyPathNarrative}</small>
-                          </div>
-                        </div>
                       </div>
 
                       <div className="power-oc-actions">
@@ -3185,8 +3400,9 @@ function App() {
                         <div className="boot-setting-copy">
                           <strong>Boot Logo Customization</strong>
                           <p>
-                            Swap the staged splash image shown in this frontend preview. Firmware
-                            asset replacement is still intentionally unwired.
+                            {bootLogoWritable
+                              ? 'Upload an image and AeroForge will convert it to a firmware-safe JPEG before writing CUSTOM_BOOT_LOGO.'
+                              : bootLogoDisabledReason}
                           </p>
                         </div>
 
@@ -3211,9 +3427,13 @@ function App() {
                                 : currentBootArt?.name ?? 'Preset boot image'}
                             </strong>
                             <small>
-                              {selectedBootArt === 'custom'
-                                ? 'Custom splash staged in the preview'
-                                : 'Preset splash staged in the preview'}
+                              {bootLogoWritable
+                                ? selectedBootArt === 'custom'
+                                  ? bootLogoPending
+                                    ? 'Applying custom splash through the AeroForge service'
+                                    : 'Custom splash applied through the AeroForge service'
+                                  : 'Preset preview only. Upload an image file to apply a firmware logo.'
+                                : bootLogoDisabledReason}
                             </small>
                           </div>
                         </div>
@@ -3221,30 +3441,44 @@ function App() {
                         <div className="branding-controls branding-controls--boot">
                           <label
                             className={`upload-card upload-card--boot ${
+                              !bootLogoWritable || settingsActionPending !== null ? 'is-disabled ' : ''
+                            }${
                               glowTarget === 'boot-upload' ? 'is-pulsing' : ''
                             }`}
+                            aria-disabled={!bootLogoWritable || settingsActionPending !== null}
                           >
-                            <input type="file" accept="image/*" onChange={handleBootFile} />
-                            <strong>Upload custom splash</strong>
-                            <span>PNG, JPG, or WEBP. Frontend preview only.</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={handleBootFile}
+                              disabled={!bootLogoWritable || settingsActionPending !== null}
+                            />
+                            <strong>{bootLogoPending ? 'Applying splash' : 'Upload custom splash'}</strong>
+                            <span>
+                              {bootLogoWritable
+                                ? 'PNG, JPG, WEBP, or GIF. AeroForge writes a converted JPG.'
+                                : bootLogoDisabledReason}
+                            </span>
                           </label>
 
                           <div className="boot-presets">
                             <div className="boot-presets__header">
-                              <span className="eyebrow">Previous Boot Logos</span>
+                              <span className="eyebrow">Boot Logo Previews</span>
                             </div>
 
                             <div className="art-grid art-grid--boot">
                               {bootArtwork.map((art) => (
                                 <button
+                                  type="button"
                                   key={art.id}
                                   className={`art-tile ${
                                     selectedBootArt === art.id ? 'is-selected' : ''
                                   }`}
+                                  disabled={settingsActionPending !== null}
                                   onClick={() => {
                                     setSelectedBootArt(art.id)
                                     setStatusMessage(
-                                      `${art.name} selected as the staged boot image.`,
+                                      `${art.name} selected as a preview. Upload an image file to apply a firmware logo.`,
                                     )
                                   }}
                                 >

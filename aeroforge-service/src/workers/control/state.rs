@@ -1,8 +1,8 @@
 use crate::paths::ServicePaths;
 
 use super::models::{
-    AppliedFanControlSnapshot, AppliedGpuTuningSnapshot, AppliedPowerProfileSnapshot,
-    ControlSnapshot,
+    AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
+    AppliedPowerProfileSnapshot, ControlSnapshot,
 };
 
 pub fn load_snapshot(
@@ -74,6 +74,19 @@ pub fn persist_fan_apply_success(
     persist_snapshot(paths, &snapshot)
 }
 
+pub fn persist_boot_logo_apply_success(
+    paths: &ServicePaths,
+    applied: &AppliedBootLogoSnapshot,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut snapshot = load_snapshot(paths)?;
+    snapshot.boot_logo_apply_supported = true;
+    snapshot.last_boot_logo_applied_at_unix = Some(applied.applied_at_unix);
+    snapshot.last_boot_logo_apply_detail = applied.detail.clone();
+    snapshot.last_boot_logo_error = None;
+    snapshot.last_boot_logo_readback = applied.readback.clone();
+    persist_snapshot(paths, &snapshot)
+}
+
 pub fn persist_apply_error(
     paths: &ServicePaths,
     detail: &str,
@@ -102,6 +115,17 @@ pub fn persist_fan_apply_error(
     let mut snapshot = load_snapshot(paths)?;
     snapshot.last_fan_error = Some(detail.into());
     snapshot.last_fan_apply_detail = "The most recent fan-control apply attempt failed.".into();
+    persist_snapshot(paths, &snapshot)
+}
+
+pub fn persist_boot_logo_apply_error(
+    paths: &ServicePaths,
+    detail: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut snapshot = load_snapshot(paths)?;
+    snapshot.last_boot_logo_error = Some(detail.into());
+    snapshot.last_boot_logo_apply_detail =
+        "The most recent boot-logo apply attempt failed.".into();
     persist_snapshot(paths, &snapshot)
 }
 

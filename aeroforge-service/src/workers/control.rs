@@ -1,4 +1,5 @@
 mod acer_wmi;
+mod boot_logo;
 mod fan;
 mod gpu_tuning;
 mod models;
@@ -13,9 +14,9 @@ use crate::{
 };
 
 pub use models::{
-    AppliedFanControlSnapshot, AppliedGpuTuningSnapshot, AppliedPowerProfileSnapshot,
-    ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
-    ApplyPowerProfileRequest, FanProfileId,
+    AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
+    AppliedPowerProfileSnapshot, ApplyBootLogoRequest, ApplyCustomFanCurvesRequest,
+    ApplyFanProfileRequest, ApplyGpuTuningRequest, ApplyPowerProfileRequest, FanProfileId,
 };
 
 const WORKER_NAME: &str = "control-worker";
@@ -84,6 +85,24 @@ pub fn apply_fan_profile(
             let detail = error.to_string();
             let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
             let _ = state::persist_fan_apply_error(paths, &detail);
+            Err(error)
+        }
+    }
+}
+
+pub fn apply_boot_logo(
+    paths: &ServicePaths,
+    request: ApplyBootLogoRequest,
+) -> Result<AppliedBootLogoSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    match boot_logo::apply_boot_logo(paths, request) {
+        Ok(applied) => {
+            state::persist_boot_logo_apply_success(paths, &applied)?;
+            Ok(applied)
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            let _ = write_log_line(&paths.component_log("control-boot-logo"), "ERROR", &detail);
+            let _ = state::persist_boot_logo_apply_error(paths, &detail);
             Err(error)
         }
     }

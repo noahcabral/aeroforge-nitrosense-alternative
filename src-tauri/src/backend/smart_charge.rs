@@ -9,8 +9,8 @@ use native_tls::TlsConnector as NativeTlsConnector;
 use serde_json::{json, Map, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async_tls_with_config, tungstenite::client::IntoClientRequest,
-    tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
+    connect_async_tls_with_config, tungstenite::client::IntoClientRequest, tungstenite::Message,
+    Connector, MaybeTlsStream, WebSocketStream,
 };
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -33,15 +33,19 @@ pub async fn sync_saved_state(enabled: bool) -> Result<SmartChargeApplyPayload, 
 
 pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
     let requested_battery_healthy = if enabled { 0 } else { 1 };
-    let mut client = with_timeout("connect to Acer Care Center", CareCenterClient::connect()).await?;
+    let mut client =
+        with_timeout("connect to Acer Care Center", CareCenterClient::connect()).await?;
 
     with_timeout(
         "set Acer Care Center BatteryHealthy",
         client.set_battery_healthy(requested_battery_healthy),
     )
     .await?;
-    let verified_battery_healthy =
-        with_timeout("read Acer Care Center BatteryHealthy", client.get_battery_healthy()).await?;
+    let verified_battery_healthy = with_timeout(
+        "read Acer Care Center BatteryHealthy",
+        client.get_battery_healthy(),
+    )
+    .await?;
     if verified_battery_healthy != requested_battery_healthy {
         return Err(io::Error::other(format!(
             "Care Center returned BatteryHealthy {} after requesting {}.",
@@ -50,9 +54,12 @@ pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPaylo
         .into());
     }
 
-    let boundary = with_timeout("read Acer Care Center BatteryBoundary", client.get_battery_boundary())
-        .await
-        .ok();
+    let boundary = with_timeout(
+        "read Acer Care Center BatteryBoundary",
+        client.get_battery_boundary(),
+    )
+    .await
+    .ok();
     persist_battery_healthy(verified_battery_healthy)?;
 
     let detail = match (enabled, boundary) {
@@ -88,10 +95,7 @@ where
 {
     match tokio::time::timeout(CARE_CENTER_TIMEOUT, future).await {
         Ok(result) => result,
-        Err(_) => Err(io::Error::other(format!(
-            "Timed out while trying to {label}."
-        ))
-        .into()),
+        Err(_) => Err(io::Error::other(format!("Timed out while trying to {label}.")).into()),
     }
 }
 
@@ -205,7 +209,10 @@ impl CareCenterClient {
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok())
             .ok_or_else(|| {
-                io::Error::other(format!("BatteryHealthy get response did not contain Value: {response}")).into()
+                io::Error::other(format!(
+                    "BatteryHealthy get response did not contain Value: {response}"
+                ))
+                .into()
             })
     }
 
@@ -223,21 +230,27 @@ impl CareCenterClient {
             .get("Result")
             .and_then(Value::as_object)
             .ok_or_else(|| {
-                io::Error::other(format!("BatteryBoundary response missing Result object: {response}"))
+                io::Error::other(format!(
+                    "BatteryBoundary response missing Result object: {response}"
+                ))
             })?;
         let upper_bound = result
             .get("UpperBound")
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok())
             .ok_or_else(|| {
-                io::Error::other(format!("BatteryBoundary response missing UpperBound: {response}"))
+                io::Error::other(format!(
+                    "BatteryBoundary response missing UpperBound: {response}"
+                ))
             })?;
         let lower_bound = result
             .get("LowerBound")
             .and_then(Value::as_u64)
             .and_then(|value| u8::try_from(value).ok())
             .ok_or_else(|| {
-                io::Error::other(format!("BatteryBoundary response missing LowerBound: {response}"))
+                io::Error::other(format!(
+                    "BatteryBoundary response missing LowerBound: {response}"
+                ))
             })?;
 
         Ok(BatteryBoundary {
@@ -247,9 +260,7 @@ impl CareCenterClient {
     }
 
     async fn send_command(&mut self, payload: Value) -> Result<Value, DynError> {
-        self.socket
-            .send(Message::Text(payload.to_string()))
-            .await?;
+        self.socket.send(Message::Text(payload.to_string())).await?;
         recv_json(&mut self.socket).await
     }
 }

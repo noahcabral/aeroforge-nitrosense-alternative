@@ -7,8 +7,17 @@ pub enum PowerProfileId {
     BatteryGuard,
     Balanced,
     #[serde(alias = "performance")]
+    Performance,
     Turbo,
     Custom,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomPowerBaseId {
+    Balanced,
+    Performance,
+    Turbo,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,6 +81,8 @@ pub struct FanCurveSet {
 pub struct ApplyPowerProfileRequest {
     pub profile_id: PowerProfileId,
     pub processor_state: ProcessorStateSettings,
+    #[serde(default)]
+    pub custom_base_profile: Option<CustomPowerBaseId>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,6 +101,14 @@ pub struct ApplyFanProfileRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyCustomFanCurvesRequest {
     pub curves: FanCurveSet,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyBootLogoRequest {
+    pub image_path: String,
+    #[serde(default)]
+    pub original_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -118,6 +137,17 @@ pub struct AppliedFanControlSnapshot {
     pub curves: Option<FanCurveSet>,
     pub cpu_speed_percent: Option<u8>,
     pub gpu_speed_percent: Option<u8>,
+    pub readback: Option<Value>,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedBootLogoSnapshot {
+    pub image_path: String,
+    #[serde(default)]
+    pub original_filename: Option<String>,
     pub readback: Option<Value>,
     pub applied_at_unix: u64,
     pub detail: String,
@@ -163,6 +193,16 @@ pub struct ControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<Value>,
+    #[serde(default = "default_true")]
+    pub boot_logo_apply_supported: bool,
+    #[serde(default)]
+    pub last_boot_logo_applied_at_unix: Option<u64>,
+    #[serde(default = "default_waiting_boot_logo_apply_detail")]
+    pub last_boot_logo_apply_detail: String,
+    #[serde(default)]
+    pub last_boot_logo_error: Option<String>,
+    #[serde(default)]
+    pub last_boot_logo_readback: Option<Value>,
 }
 
 fn default_true() -> bool {
@@ -171,6 +211,10 @@ fn default_true() -> bool {
 
 fn default_waiting_fan_apply_detail() -> String {
     "Waiting for the first fan-control apply.".into()
+}
+
+fn default_waiting_boot_logo_apply_detail() -> String {
+    "Waiting for the first boot-logo apply.".into()
 }
 
 impl ControlSnapshot {
@@ -198,6 +242,11 @@ impl ControlSnapshot {
             last_fan_apply_detail: default_waiting_fan_apply_detail(),
             last_fan_error: None,
             last_fan_readback: None,
+            boot_logo_apply_supported: true,
+            last_boot_logo_applied_at_unix: None,
+            last_boot_logo_apply_detail: default_waiting_boot_logo_apply_detail(),
+            last_boot_logo_error: None,
+            last_boot_logo_readback: None,
         }
     }
 }

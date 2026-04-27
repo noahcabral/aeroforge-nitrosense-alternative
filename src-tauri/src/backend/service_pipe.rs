@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::models::{
-    CapabilitySnapshot, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
-    PowerProfileId, ProcessorStateSettings, ServiceStatus, ServiceWorkerStatus, TelemetrySnapshot,
+    CapabilitySnapshot, CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState,
+    LiveControlSnapshot, PowerProfileId, ProcessorStateSettings, ServiceStatus,
+    ServiceWorkerStatus, TelemetrySnapshot,
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
@@ -46,6 +47,9 @@ enum PipeRequest {
     ApplyCustomFanCurves {
         payload: ApplyCustomFanCurvesRequest,
     },
+    ApplyBootLogo {
+        payload: ApplyBootLogoRequest,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,7 @@ enum PipeResponse {
 struct ApplyPowerProfileRequest {
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
+    custom_base_profile: Option<CustomPowerBaseId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,13 +85,18 @@ struct ApplyCustomFanCurvesRequest {
     curves: FanCurveSet,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyBootLogoRequest {
+    image_path: String,
+    original_filename: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedPowerProfilePayload {
     pub profile_id: PowerProfileId,
     pub processor_state: ProcessorStateSettings,
-    pub applied_at_unix: u64,
-    pub detail: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,8 +116,11 @@ pub struct AppliedFanControlPayload {
     pub detail: String,
 }
 
-pub fn pipe_path() -> &'static str {
-    PIPE_PATH
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedBootLogoPayload {
+    pub applied_at_unix: u64,
+    pub detail: String,
 }
 
 pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
@@ -168,8 +181,8 @@ pub fn fetch_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error 
     Ok(serde_json::from_value::<TelemetrySnapshot>(payload)?)
 }
 
-pub fn fetch_cached_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>>
-{
+pub fn fetch_cached_telemetry(
+) -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let raw = fs::read_to_string(telemetry_file_path())?;
     Ok(serde_json::from_str::<TelemetrySnapshot>(&raw)?)
 }
@@ -183,11 +196,13 @@ pub fn fetch_live_controls() -> Result<LiveControlSnapshot, Box<dyn std::error::
 pub fn apply_power_profile(
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
+    custom_base_profile: Option<CustomPowerBaseId>,
 ) -> Result<AppliedPowerProfilePayload, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::ApplyPowerProfile {
         payload: ApplyPowerProfileRequest {
             profile_id,
             processor_state,
+            custom_base_profile,
         },
     })?;
     Ok(serde_json::from_value::<AppliedPowerProfilePayload>(
@@ -220,6 +235,19 @@ pub fn apply_custom_fan_curves(
         payload: ApplyCustomFanCurvesRequest { curves },
     })?;
     Ok(serde_json::from_value::<AppliedFanControlPayload>(payload)?)
+}
+
+pub fn apply_boot_logo(
+    image_path: String,
+    original_filename: Option<String>,
+) -> Result<AppliedBootLogoPayload, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = request(PipeRequest::ApplyBootLogo {
+        payload: ApplyBootLogoRequest {
+            image_path,
+            original_filename,
+        },
+    })?;
+    Ok(serde_json::from_value::<AppliedBootLogoPayload>(payload)?)
 }
 
 fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

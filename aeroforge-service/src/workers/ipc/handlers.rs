@@ -87,6 +87,18 @@ pub fn process_request(
                 },
             }
         }
+        PipeRequest::ApplyBootLogo { payload } => match control::apply_boot_logo(paths, payload) {
+            Ok(applied) => PipeResponse::Ok {
+                payload: serde_json::to_value(applied).unwrap_or_else(|error| {
+                    json!({
+                        "detail": format!("Applied boot logo but failed to serialize response: {error}")
+                    })
+                }),
+            },
+            Err(error) => PipeResponse::Error {
+                message: error.to_string(),
+            },
+        },
     }
 }
 

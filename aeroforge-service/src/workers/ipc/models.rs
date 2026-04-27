@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::workers::control::{
-    ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
+    ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
     ApplyPowerProfileRequest,
 };
 
@@ -24,6 +24,9 @@ pub enum PipeRequest {
     },
     ApplyCustomFanCurves {
         payload: ApplyCustomFanCurvesRequest,
+    },
+    ApplyBootLogo {
+        payload: ApplyBootLogoRequest,
     },
 }
 

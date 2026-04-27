@@ -45,6 +45,7 @@ const GM_INPUT: &str = "gmInput";
 const GM_OUTPUT: &str = "gmOutput";
 
 pub const GAMING_PROFILE_BALANCED: u64 = 0x0000_0001;
+pub const GAMING_PROFILE_PERFORMANCE: u64 = 0x0000_0004;
 pub const GAMING_PROFILE_TURBO: u64 = 0x0000_0005;
 
 pub const FAN_BEHAVIOR_AUTO: u64 = 0x0041_0009;

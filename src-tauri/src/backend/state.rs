@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
@@ -8,9 +7,9 @@ use std::{
 
 use super::models::{
     ApplyState, BackendContract, BootArtId, CapabilitySnapshot, CommandDescriptor, ControlSnapshot,
-    FanCurvePoint, FanCurveSet, FanProfileId, FeatureSupport, GpuTuningState, OcPreset,
-    PersistenceStatus, PersonalSettings, PowerProfileId, ProcessorStateSettings, ShellStatus,
-    TelemetrySnapshot, UpdateChannelId, UpdateStatus,
+    CustomPowerBaseId, FanCurvePoint, FanCurveSet, FanProfileId, FeatureSupport, GpuTuningState,
+    OcPreset, PersistenceStatus, PersonalSettings, PowerProfileId, ProcessorStateSettings,
+    ShellStatus, TelemetrySnapshot, UpdateChannelId, UpdateStatus,
 };
 use super::updater::UpdaterStore;
 
@@ -83,6 +82,13 @@ impl BackendState {
             config_file: self.config_file.display().to_string(),
             initialized_from_disk: self.initialized_from_disk,
         }
+    }
+
+    pub fn config_root(&self) -> PathBuf {
+        self.config_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     pub fn updater(&self) -> &UpdaterStore {
@@ -278,9 +284,9 @@ fn build_contract() -> BackendContract {
                 purpose: "Apply GPU clock tuning through the AeroForge service and persist the staged tuning state.".into(),
             },
             CommandDescriptor {
-                command: "stage_boot_logo".into(),
-                stage: "planned".into(),
-                purpose: "Validate and stage boot-logo image replacement.".into(),
+                command: "apply_boot_logo".into(),
+                stage: "implemented".into(),
+                purpose: "Convert, stage, and apply a boot-logo image through the service.".into(),
             },
         ],
     }
@@ -325,7 +331,7 @@ fn build_capabilities() -> CapabilitySnapshot {
         },
         boot_logo: FeatureSupport {
             available: true,
-            writable: false,
+            writable: true,
             requires_elevation: true,
         },
         notes: vec![
@@ -337,6 +343,7 @@ fn build_capabilities() -> CapabilitySnapshot {
             "Power-profile apply now uses direct AcerGamingFunction operating-mode writes for supported modes, then applies the staged Windows processor policy.".into(),
             "GPU tuning apply now flows through the AeroForge service and currently writes editable NVAPI P0 clock offsets while staging unsupported voltage and limit fields.".into(),
             "Fan profile and curve apply now flow through the AeroForge service using direct ROOT\\WMI AcerGamingFunction ACPI calls, with RPM movement verified through telemetry.".into(),
+            "Boot-logo upload now converts user images to firmware-safe JPEG and asks the AeroForge service to apply CUSTOM_BOOT_LOGO through the clean-room AcerAgentService packet path.".into(),
         ],
     }
 }
@@ -357,6 +364,7 @@ fn build_default_controls() -> ControlSnapshot {
             min_percent: 35,
             max_percent: 88,
         },
+        custom_power_base: CustomPowerBaseId::Performance,
         gpu_tuning: default_gpu_tuning.clone(),
         oc_presets: vec![
             OcPreset {

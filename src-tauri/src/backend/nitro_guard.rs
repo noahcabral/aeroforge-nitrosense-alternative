@@ -42,8 +42,7 @@ fn terminate_nitro_processes() -> Result<usize, Box<dyn std::error::Error + Send
                 TH32CS_SNAPPROCESS,
             },
             Threading::{
-                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-                TerminateProcess,
+                OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
             },
         },
     };
@@ -106,7 +105,10 @@ fn terminate_nitro_processes() -> Result<usize, Box<dyn std::error::Error + Send
 fn wide_to_string(buffer: &[u16]) -> String {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
-    let length = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    let length = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
     OsString::from_wide(&buffer[..length])
         .to_string_lossy()
         .into_owned()

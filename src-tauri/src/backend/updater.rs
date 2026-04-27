@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
     sync::RwLock,
@@ -57,7 +56,10 @@ impl UpdaterStore {
 
     pub fn save_status(&self, status: UpdateStatus) -> Result<UpdateStatus, DynError> {
         let runtime_status = apply_runtime_fields(status);
-        fs::write(&self.status_file, serde_json::to_string_pretty(&runtime_status)?)?;
+        fs::write(
+            &self.status_file,
+            serde_json::to_string_pretty(&runtime_status)?,
+        )?;
 
         {
             let mut guard = self.status.write().expect("updater status lock poisoned");
@@ -72,7 +74,10 @@ impl UpdaterStore {
     }
 }
 
-pub fn refresh_status(store: &UpdaterStore, channel: UpdateChannelId) -> Result<UpdateStatus, DynError> {
+pub fn refresh_status(
+    store: &UpdaterStore,
+    channel: UpdateChannelId,
+) -> Result<UpdateStatus, DynError> {
     let resolved = resolve_update_candidate(channel, store.status())?;
     store.save_status(resolved.status)
 }
@@ -82,18 +87,18 @@ pub fn stage_latest_update(
     channel: UpdateChannelId,
 ) -> Result<UpdateStatus, DynError> {
     let resolved = resolve_update_candidate(channel, store.status())?;
-    let candidate = resolved
-        .asset
-        .ok_or_else(|| io::Error::other("No portable update asset is available for the selected channel."))?;
+    let candidate = resolved.asset.ok_or_else(|| {
+        io::Error::other("No portable update asset is available for the selected channel.")
+    })?;
 
-    let stage_root = store
-        .updates_dir()
-        .join(resolved
+    let stage_root = store.updates_dir().join(
+        resolved
             .status
             .latest_version
             .clone()
             .unwrap_or_else(|| "unknown".into())
-            .replace(['/', '\\', ':'], "-"));
+            .replace(['/', '\\', ':'], "-"),
+    );
     fs::create_dir_all(&stage_root)?;
     let staged_file = stage_root.join(&candidate.name);
 
@@ -113,10 +118,7 @@ pub fn stage_latest_update(
     status.staged_sha256 = Some(staged_sha256);
     status.staged_at_unix = Some(now_unix());
     status.can_install_update = true;
-    status.detail = format!(
-        "Downloaded {} and staged it for install.",
-        candidate.name
-    );
+    status.detail = format!("Downloaded {} and staged it for install.", candidate.name);
     status.last_error = None;
 
     store.save_status(status)
@@ -151,7 +153,10 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .to_path_buf();
     ensure_writable_directory(&target_dir)?;
 
-    let extract_root = store.updates_dir().join("install").join(now_unix().to_string());
+    let extract_root = store
+        .updates_dir()
+        .join("install")
+        .join(now_unix().to_string());
     if extract_root.exists() {
         fs::remove_dir_all(&extract_root)?;
     }
@@ -286,7 +291,10 @@ fn resolve_update_candidate(
             status.detail =
                 "Preview channel is configured, but the selected repo has no commits or releases yet.".into();
 
-            return Ok(ResolvedUpdateCandidate { status, asset: None });
+            return Ok(ResolvedUpdateCandidate {
+                status,
+                asset: None,
+            });
         }
 
         let commit = match fetch_commit(&client, &repo.default_branch) {
@@ -304,11 +312,13 @@ fn resolve_update_candidate(
                 status.last_error = Some(error.to_string());
                 status.detail = format!(
                     "Preview channel could not resolve {} yet. {}",
-                    repo.default_branch,
-                    error
+                    repo.default_branch, error
                 );
 
-                return Ok(ResolvedUpdateCandidate { status, asset: None });
+                return Ok(ResolvedUpdateCandidate {
+                    status,
+                    asset: None,
+                });
             }
         };
         status.feed_kind = "commit".into();
@@ -326,7 +336,10 @@ fn resolve_update_candidate(
             short_sha(&commit.sha)
         );
 
-        return Ok(ResolvedUpdateCandidate { status, asset: None });
+        return Ok(ResolvedUpdateCandidate {
+            status,
+            asset: None,
+        });
     }
 
     status.feed_kind = "none".into();
@@ -340,7 +353,10 @@ fn resolve_update_candidate(
     status.can_install_update = staged_file_exists(&status);
     status.detail = "Stable channel has no published release yet.".into();
 
-    Ok(ResolvedUpdateCandidate { status, asset: None })
+    Ok(ResolvedUpdateCandidate {
+        status,
+        asset: None,
+    })
 }
 
 fn github_client() -> Result<Client, DynError> {
@@ -413,7 +429,9 @@ fn select_portable_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
 
 fn normalize_release_version(tag_name: &str) -> Option<String> {
     let trimmed = tag_name.trim().trim_start_matches(['v', 'V']);
-    Version::parse(trimmed).ok().map(|version| version.to_string())
+    Version::parse(trimmed)
+        .ok()
+        .map(|version| version.to_string())
 }
 
 fn short_sha(sha: &str) -> String {

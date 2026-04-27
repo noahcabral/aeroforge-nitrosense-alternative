@@ -55,7 +55,8 @@ export type CapabilitySnapshot = {
   notes: string[]
 }
 
-export type PowerProfileId = 'battery-guard' | 'balanced' | 'turbo' | 'custom'
+export type PowerProfileId = 'battery-guard' | 'balanced' | 'performance' | 'turbo' | 'custom'
+export type CustomPowerBaseId = 'balanced' | 'performance' | 'turbo'
 export type FanProfileId = 'auto' | 'max' | 'custom'
 export type BootArtId = 'ember' | 'arc' | 'slate' | 'custom'
 export type ApplyState = 'staged' | 'live'
@@ -111,6 +112,7 @@ export type ControlSnapshot = {
   activePowerProfile: PowerProfileId
   activeFanProfile: FanProfileId
   customProcessorState: ProcessorStateSettings
+  customPowerBase: CustomPowerBaseId
   gpuTuning: GpuTuningState
   ocPresets: OcPreset[]
   activeOcSlot: string
@@ -140,6 +142,11 @@ export type LiveControlSnapshot = {
   lastFanApplyDetail: string
   lastFanError: string | null
   lastFanReadback: unknown | null
+  bootLogoApplySupported: boolean
+  lastBootLogoAppliedAtUnix: number | null
+  lastBootLogoApplyDetail: string
+  lastBootLogoError: string | null
+  lastBootLogoReadback: unknown | null
 }
 
 export type TelemetrySnapshot = {
@@ -174,6 +181,12 @@ export type GpuTuningApplyResult = {
 }
 
 export type FanControlApplyResult = {
+  controls: ControlSnapshot
+  appliedAtUnix: number
+  detail: string
+}
+
+export type BootLogoApplyResult = {
   controls: ControlSnapshot
   appliedAtUnix: number
   detail: string
@@ -288,8 +301,13 @@ export async function resetControlSnapshot() {
 export async function applyPowerProfile(
   profileId: PowerProfileId,
   processorState: ProcessorStateSettings,
+  customBaseProfile?: CustomPowerBaseId | null,
 ) {
-  return invoke<ControlSnapshot>('apply_power_profile', { profileId, processorState })
+  return invoke<ControlSnapshot>('apply_power_profile', {
+    profileId,
+    processorState,
+    customBaseProfile: customBaseProfile ?? null,
+  })
 }
 
 export async function applyGpuTuning(tuning: GpuTuningState, activeOcSlot: string) {
@@ -302,4 +320,8 @@ export async function applyFanProfile(profileId: FanProfileId) {
 
 export async function applyCustomFanCurves(curves: FanCurveSet) {
   return invoke<FanControlApplyResult>('apply_custom_fan_curves', { curves })
+}
+
+export async function applyBootLogo(fileName: string, imageBase64: string) {
+  return invoke<BootLogoApplyResult>('apply_boot_logo', { fileName, imageBase64 })
 }

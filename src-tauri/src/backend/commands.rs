@@ -1,16 +1,16 @@
 use tauri::State;
 
 use super::{
-    blue_light,
+    blue_light, boot_logo,
     models::{
-        ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, CapabilitySnapshot,
-        ControlSnapshot, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
-        PersistenceStatus, SmartChargeApplyResult,
-        PowerProfileId, ProcessorStateSettings, ServiceStatus, ShellStatus, TelemetrySnapshot,
-        UpdateChannelId, UpdateStatus,
+        ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, BootLogoApplyResult,
+        CapabilitySnapshot, ControlSnapshot, CustomPowerBaseId, FanCurveSet, FanProfileId,
+        GpuTuningState, LiveControlSnapshot, PersistenceStatus, PowerProfileId,
+        ProcessorStateSettings,
+        ServiceStatus, ShellStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId,
+        UpdateStatus,
     },
-    service_pipe,
-    smart_charge,
+    service_pipe, smart_charge,
     state::{shell_status, BackendState},
     updater,
 };
@@ -87,7 +87,8 @@ pub fn check_for_updates(
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
-    let resolved_channel = channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
+    let resolved_channel =
+        channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
     updater::refresh_status(state.updater(), resolved_channel).map_err(|error| error.to_string())
 }
 
@@ -96,8 +97,10 @@ pub fn stage_update_download(
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
-    let resolved_channel = channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    updater::stage_latest_update(state.updater(), resolved_channel).map_err(|error| error.to_string())
+    let resolved_channel =
+        channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
+    updater::stage_latest_update(state.updater(), resolved_channel)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -110,7 +113,8 @@ pub fn apply_blue_light_filter(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<BlueLightApplyResult, String> {
-    let applied = blue_light::apply_blue_light_filter(enabled).map_err(|error| error.to_string())?;
+    let applied =
+        blue_light::apply_blue_light_filter(enabled).map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.personal_settings.blue_light_filter_enabled = applied.enabled;
@@ -170,15 +174,23 @@ pub fn reset_control_snapshot(state: State<'_, BackendState>) -> Result<ControlS
 pub fn apply_power_profile(
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
+    custom_base_profile: Option<CustomPowerBaseId>,
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
-    let applied = service_pipe::apply_power_profile(profile_id.clone(), processor_state.clone())
-        .map_err(|error| error.to_string())?;
+    let applied = service_pipe::apply_power_profile(
+        profile_id.clone(),
+        processor_state.clone(),
+        custom_base_profile.clone(),
+    )
+    .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_power_profile = applied.profile_id;
     if matches!(controls.active_power_profile, PowerProfileId::Custom) {
         controls.custom_processor_state = applied.processor_state;
+        if let Some(custom_base_profile) = custom_base_profile {
+            controls.custom_power_base = custom_base_profile;
+        }
     }
 
     state
@@ -249,6 +261,34 @@ pub fn apply_custom_fan_curves(
         .map_err(|error| error.to_string())?;
 
     Ok(super::models::FanControlApplyResult {
+        controls,
+        applied_at_unix: applied.applied_at_unix,
+        detail: applied.detail,
+    })
+}
+
+#[tauri::command]
+pub fn apply_boot_logo(
+    file_name: String,
+    image_base64: String,
+    state: State<'_, BackendState>,
+) -> Result<BootLogoApplyResult, String> {
+    let image_path =
+        boot_logo::save_uploaded_boot_logo(&state.config_root(), &file_name, &image_base64)
+            .map_err(|error| error.to_string())?;
+    let image_path_string = image_path.display().to_string();
+    let applied = service_pipe::apply_boot_logo(image_path_string, Some(file_name.clone()))
+        .map_err(|error| error.to_string())?;
+
+    let mut controls = state.controls();
+    controls.personal_settings.selected_boot_art = super::models::BootArtId::Custom;
+    controls.personal_settings.custom_boot_filename = file_name;
+
+    let controls = state
+        .save_controls(controls)
+        .map_err(|error| error.to_string())?;
+
+    Ok(BootLogoApplyResult {
         controls,
         applied_at_unix: applied.applied_at_unix,
         detail: applied.detail,

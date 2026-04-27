@@ -57,7 +57,19 @@ npm.cmd run portable:build
 This creates:
 
 - `portable\AeroForge Control Portable\`
-- `portable\AeroForge-Control-Portable-0.11.0.zip`
+- `portable\AeroForge-Control-Portable-0.12.0.zip`
+
+## Install the Nitro key helper
+
+```powershell
+npm.cmd run startup:install
+```
+
+This registers `aeroforge-hotkey-helper.exe --daemon` in the logged-in user session so the physical Nitro key can open or focus AeroForge without keeping the WebView UI resident. To remove it:
+
+```powershell
+npm.cmd run startup:uninstall
+```
 
 ## Notes for backend wiring later
 
