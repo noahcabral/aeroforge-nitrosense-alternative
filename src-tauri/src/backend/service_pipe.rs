@@ -142,13 +142,21 @@ pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
             (SERVICE_NAME.into(), 0, None, Vec::new())
         };
 
-    let detail = if supervisor_file.exists() {
+    let missing_pipe_detail = if pipe_error.contains("os error 2") {
         format!(
-            "Service unavailable: {pipe_error}. Loaded cached supervisor snapshot from {}.",
-            supervisor_file.display()
+            "{SERVICE_NAME} is not installed or is not running. Install AeroForge with the setup installer, or start {SERVICE_NAME}. Raw pipe error: {pipe_error}"
         )
     } else {
         format!("Service unavailable: {pipe_error}")
+    };
+
+    let detail = if supervisor_file.exists() {
+        format!(
+            "{missing_pipe_detail}. Loaded cached supervisor snapshot from {}.",
+            supervisor_file.display()
+        )
+    } else {
+        missing_pipe_detail
     };
 
     ServiceStatus {

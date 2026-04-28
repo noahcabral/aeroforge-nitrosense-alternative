@@ -115,3 +115,33 @@ FunctionEnd
 
   nitro_preinstall_done:
 !macroend
+
+Function InstallAeroForgeService
+  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_missing
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1"' $8
+    ${If} $8 = 0
+      Return
+    ${EndIf}
+
+    MessageBox MB_ICONSTOP|MB_OK "${PRODUCTNAME} could not install AeroForgeService. The service installer exited with code $8."
+    Abort
+
+  aeroforge_service_missing:
+    MessageBox MB_ICONSTOP|MB_OK "${PRODUCTNAME} could not install AeroForgeService because bundled service resources are missing."
+    Abort
+FunctionEnd
+
+Function un.UninstallAeroForgeService
+  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_uninstall_done
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -Uninstall' $8
+
+  aeroforge_service_uninstall_done:
+FunctionEnd
+
+!macro NSIS_HOOK_POSTINSTALL
+  Call InstallAeroForgeService
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  Call un.UninstallAeroForgeService
+!macroend
