@@ -1,5 +1,11 @@
 # AeroForge Control
 
+## Bug Reports And Feedback
+
+If AeroForge breaks, behaves oddly, or you want to report a bug or leave feedback, go here first:
+
+[https://discord.gg/EuWpmkjQY8](https://discord.gg/EuWpmkjQY8)
+
 Premium-feeling frontend prototype for a laptop fan control and battery or power management application. The project now includes a Tauri desktop shell around the React UI and a Windows service for hardware-facing control paths.
 
 ## Included UI flows
