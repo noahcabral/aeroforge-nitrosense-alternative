@@ -107,10 +107,7 @@ fn start_windows(app_handle: AppHandle) {
 
 #[cfg(windows)]
 fn start_hotkey_helper(log_path: &Option<PathBuf>) {
-    let helper_path = match env::current_exe().ok().and_then(|path| {
-        path.parent()
-            .map(|parent| parent.join("aeroforge-hotkey-helper.exe"))
-    }) {
+    let helper_path = match resolve_preferred_hotkey_helper_path() {
         Some(path) => path,
         None => {
             write_listener_log(log_path, "hotkey helper path could not be resolved");
@@ -141,6 +138,46 @@ fn start_hotkey_helper(log_path: &Option<PathBuf>) {
             write_listener_log(log_path, &format!("hotkey helper launch failed: {error}"))
         }
     }
+}
+
+#[cfg(windows)]
+fn resolve_preferred_hotkey_helper_path() -> Option<PathBuf> {
+    preferred_installed_hotkey_helper_path().or_else(current_directory_hotkey_helper_path)
+}
+
+#[cfg(windows)]
+fn preferred_installed_hotkey_helper_path() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local_app_data)
+                .join("AeroForge Control")
+                .join("aeroforge-hotkey-helper.exe"),
+        );
+    }
+    if let Some(program_files) = env::var_os("ProgramFiles") {
+        candidates.push(
+            PathBuf::from(program_files)
+                .join("AeroForge Control")
+                .join("aeroforge-hotkey-helper.exe"),
+        );
+    }
+
+    candidates.into_iter().find(|helper_path| {
+        helper_path.exists()
+            && helper_path
+                .parent()
+                .map(|parent| parent.join("aeroforge-control.exe").exists())
+                .unwrap_or(false)
+    })
+}
+
+#[cfg(windows)]
+fn current_directory_hotkey_helper_path() -> Option<PathBuf> {
+    env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join("aeroforge-hotkey-helper.exe"))
+    })
 }
 
 #[cfg(windows)]
