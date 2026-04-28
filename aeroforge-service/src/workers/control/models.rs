@@ -193,7 +193,7 @@ pub struct ControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<Value>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub boot_logo_apply_supported: bool,
     #[serde(default)]
     pub last_boot_logo_applied_at_unix: Option<u64>,
@@ -209,12 +209,16 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_waiting_fan_apply_detail() -> String {
     "Waiting for the first fan-control apply.".into()
 }
 
 fn default_waiting_boot_logo_apply_detail() -> String {
-    "Waiting for the first boot-logo apply.".into()
+    "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into()
 }
 
 impl ControlSnapshot {
@@ -242,7 +246,7 @@ impl ControlSnapshot {
             last_fan_apply_detail: default_waiting_fan_apply_detail(),
             last_fan_error: None,
             last_fan_readback: None,
-            boot_logo_apply_supported: true,
+            boot_logo_apply_supported: false,
             last_boot_logo_applied_at_unix: None,
             last_boot_logo_apply_detail: default_waiting_boot_logo_apply_detail(),
             last_boot_logo_error: None,

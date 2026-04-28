@@ -285,8 +285,8 @@ fn build_contract() -> BackendContract {
             },
             CommandDescriptor {
                 command: "apply_boot_logo".into(),
-                stage: "implemented".into(),
-                purpose: "Convert, stage, and apply a boot-logo image through the service.".into(),
+                stage: "blocked".into(),
+                purpose: "Direct boot-logo firmware apply is disabled until AeroForge has a verified hardware path.".into(),
             },
         ],
     }
@@ -330,8 +330,8 @@ fn build_capabilities() -> CapabilitySnapshot {
             requires_elevation: true,
         },
         boot_logo: FeatureSupport {
-            available: true,
-            writable: true,
+            available: false,
+            writable: false,
             requires_elevation: true,
         },
         notes: vec![
@@ -343,7 +343,7 @@ fn build_capabilities() -> CapabilitySnapshot {
             "Power-profile apply now uses direct AcerGamingFunction operating-mode writes for supported modes, then applies the staged Windows processor policy.".into(),
             "GPU tuning apply now flows through the AeroForge service and currently writes editable NVAPI P0 clock offsets while staging unsupported voltage and limit fields.".into(),
             "Fan profile and curve apply now flow through the AeroForge service using direct ROOT\\WMI AcerGamingFunction ACPI calls, with RPM movement verified through telemetry.".into(),
-            "Boot-logo upload now converts user images to firmware-safe JPEG and asks the AeroForge service to apply CUSTOM_BOOT_LOGO through the clean-room AcerAgentService packet path.".into(),
+            "Boot-logo previews and upload staging remain local only; firmware apply is disabled until AeroForge has a verified direct hardware path.".into(),
         ],
     }
 }

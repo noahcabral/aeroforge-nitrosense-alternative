@@ -22,6 +22,14 @@ pub fn persist_default_snapshot(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = paths.worker_snapshot("control");
     if path.exists() {
+        let mut snapshot = load_snapshot(paths)?;
+        if snapshot.boot_logo_apply_supported {
+            snapshot.boot_logo_apply_supported = false;
+            snapshot.last_boot_logo_apply_detail =
+                "Boot-logo firmware apply is disabled until a direct hardware path is implemented."
+                    .into();
+            persist_snapshot(paths, &snapshot)?;
+        }
         return Ok(());
     }
 
@@ -123,9 +131,10 @@ pub fn persist_boot_logo_apply_error(
     detail: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
+    snapshot.boot_logo_apply_supported = false;
     snapshot.last_boot_logo_error = Some(detail.into());
     snapshot.last_boot_logo_apply_detail =
-        "The most recent boot-logo apply attempt failed.".into();
+        "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into();
     persist_snapshot(paths, &snapshot)
 }
 

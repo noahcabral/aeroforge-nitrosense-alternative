@@ -250,7 +250,7 @@ pub struct LiveControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<serde_json::Value>,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub boot_logo_apply_supported: bool,
     #[serde(default)]
     pub last_boot_logo_applied_at_unix: Option<u64>,
@@ -264,6 +264,10 @@ pub struct LiveControlSnapshot {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_boot_art() -> BootArtId {
@@ -291,7 +295,7 @@ fn default_waiting_fan_apply_detail() -> String {
 }
 
 fn default_waiting_boot_logo_apply_detail() -> String {
-    "Waiting for the first boot-logo apply.".into()
+    "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

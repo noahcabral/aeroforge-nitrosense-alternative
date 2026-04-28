@@ -1081,7 +1081,7 @@ function App() {
   const bootLogoWritable = backendCapabilities?.bootLogo.writable ?? false
   const bootLogoDisabledReason = bootLogoWritable
     ? null
-    : 'Boot-logo replacement requires the AeroForge service apply path.'
+    : 'Boot-logo firmware apply is disabled until AeroForge has a verified direct hardware path.'
   const runtimeCustomOcSlot =
     activeOcSlot === customOcSlot.id
       ? {
@@ -3407,7 +3407,7 @@ function App() {
                           <strong>Boot Logo Customization</strong>
                           <p>
                             {bootLogoWritable
-                              ? 'Upload an image and AeroForge will convert it to a firmware-safe JPEG before writing CUSTOM_BOOT_LOGO.'
+                              ? 'Upload an image and AeroForge will convert it to a firmware-safe JPEG before firmware apply.'
                               : bootLogoDisabledReason}
                           </p>
                         </div>
@@ -3436,8 +3436,8 @@ function App() {
                               {bootLogoWritable
                                 ? selectedBootArt === 'custom'
                                   ? bootLogoPending
-                                    ? 'Applying custom splash through the AeroForge service'
-                                    : 'Custom splash applied through the AeroForge service'
+                                    ? 'Applying custom splash through AeroForge'
+                                    : 'Custom splash applied through AeroForge'
                                   : 'Preset preview only. Upload an image file to apply a firmware logo.'
                                 : bootLogoDisabledReason}
                             </small>
