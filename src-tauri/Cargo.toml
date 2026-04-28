@@ -1,6 +1,6 @@
 [package]
 name = "aeroforge-control"
-version = "0.12.1"
+version = "0.12.2"
 description = "Premium laptop fan control and power management desktop shell."
 authors = ["Noah"]
 license = ""
@@ -26,6 +26,10 @@ path = "src/bin/pipe_probe.rs"
 [[bin]]
 name = "aeroforge-hotkey-helper"
 path = "src/bin/aeroforge_hotkey_helper.rs"
+
+[[bin]]
+name = "aeroforge-update-bridge"
+path = "src/bin/aeroforge_update_bridge.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }

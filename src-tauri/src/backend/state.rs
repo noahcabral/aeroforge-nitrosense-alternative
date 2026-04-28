@@ -216,7 +216,7 @@ fn build_contract() -> BackendContract {
             CommandDescriptor {
                 command: "get_update_status".into(),
                 stage: "implemented".into(),
-                purpose: "Return the cached GitHub updater state and any staged portable asset details.".into(),
+                purpose: "Return the cached GitHub updater state and any staged update asset details.".into(),
             },
             CommandDescriptor {
                 command: "check_for_updates".into(),
@@ -226,7 +226,7 @@ fn build_contract() -> BackendContract {
             CommandDescriptor {
                 command: "stage_update_download".into(),
                 stage: "implemented".into(),
-                purpose: "Download the latest portable ZIP asset into AeroForge's local staging directory.".into(),
+                purpose: "Download the latest setup EXE or portable ZIP into AeroForge's local staging directory.".into(),
             },
             CommandDescriptor {
                 command: "install_staged_update".into(),

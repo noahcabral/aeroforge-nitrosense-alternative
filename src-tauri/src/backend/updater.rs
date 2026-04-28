@@ -22,6 +22,7 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 const UPDATE_REPO_SLUG: &str = "noahcabral/aeroforge-nitrosense-alternative";
 const UPDATE_STATE_FILE: &str = "update-state.json";
 const UPDATES_DIR_NAME: &str = "updates";
+const SETUP_ASSET_PREFIX: &str = "AeroForge-Control-Setup-";
 const PORTABLE_ASSET_PREFIX: &str = "AeroForge-Control-Portable-";
 
 pub struct UpdaterStore {
@@ -88,7 +89,7 @@ pub fn stage_latest_update(
 ) -> Result<UpdateStatus, DynError> {
     let resolved = resolve_update_candidate(channel, store.status())?;
     let candidate = resolved.asset.ok_or_else(|| {
-        io::Error::other("No portable update asset is available for the selected channel.")
+        io::Error::other("No installable update asset is available for the selected channel.")
     })?;
 
     let stage_root = store.updates_dir().join(
@@ -130,20 +131,30 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .staged_asset_path
         .clone()
         .ok_or_else(|| io::Error::other("No staged update file is available yet."))?;
-    let staged_zip = PathBuf::from(&staged_path);
-    if !staged_zip.exists() {
+    let staged_file = PathBuf::from(&staged_path);
+    if !staged_file.exists() {
         return Err(io::Error::other("The staged update file no longer exists on disk.").into());
     }
-    if staged_zip
+    let extension = staged_file
         .extension()
         .and_then(|extension| extension.to_str())
-        .map(|extension| !extension.eq_ignore_ascii_case("zip"))
-        .unwrap_or(true)
-    {
-        return Err(io::Error::other(
-            "Only portable ZIP update assets can be installed automatically right now.",
-        )
-        .into());
+        .unwrap_or_default();
+
+    if extension.eq_ignore_ascii_case("exe") {
+        Command::new(&staged_file).spawn()?;
+
+        status.can_install_update = true;
+        status.detail =
+            "Setup installer launched. Approve any Windows prompts and follow the installer. AeroForge will close now.".into();
+        status.last_error = None;
+        return store.save_status(status);
+    }
+
+    if !extension.eq_ignore_ascii_case("zip") {
+        return Err(
+            io::Error::other("Only setup EXE and portable ZIP update assets can be installed.")
+                .into(),
+        );
     }
 
     let current_exe = std::env::current_exe()?;
@@ -161,7 +172,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         fs::remove_dir_all(&extract_root)?;
     }
     fs::create_dir_all(&extract_root)?;
-    extract_zip(&staged_zip, &extract_root)?;
+    extract_zip(&staged_file, &extract_root)?;
 
     let staged_exe = extract_root.join(
         current_exe
@@ -206,7 +217,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
 
     status.can_install_update = true;
     status.detail =
-        "Staged installer launched. Close AeroForge now so the updater can replace the portable files.".into();
+        "Portable updater launched. AeroForge will close so the updater can replace the portable files.".into();
     status.last_error = None;
     store.save_status(status)
 }
@@ -229,7 +240,7 @@ fn resolve_update_candidate(
         let latest_version = normalize_release_version(&release.tag_name)
             .or_else(|| release.name.clone())
             .unwrap_or_else(|| release.tag_name.clone());
-        let latest_asset = select_portable_asset(&release.assets);
+        let latest_asset = select_update_asset(&release.assets);
         let current_version = Version::parse(env!("CARGO_PKG_VERSION")).ok();
         let release_version = normalize_release_version(&release.tag_name)
             .and_then(|value| Version::parse(&value).ok());
@@ -252,20 +263,20 @@ fn resolve_update_candidate(
         status.detail = if let Some(asset) = latest_asset.as_ref() {
             if status.update_available {
                 format!(
-                    "{} is available from the {} channel. Portable asset {} is ready to stage.",
+                    "{} is available from the {} channel. Asset {} is ready to stage.",
                     latest_version,
                     channel.as_str(),
                     asset.name
                 )
             } else {
                 format!(
-                    "AeroForge is already on {}. Latest published portable asset is {}.",
+                    "AeroForge is already on {}. Latest published update asset is {}.",
                     latest_version, asset.name
                 )
             }
         } else {
             format!(
-                "{} is published on the {} channel, but no portable ZIP asset is attached yet.",
+                "{} is published on the {} channel, but no setup EXE or portable ZIP asset is attached yet.",
                 latest_version,
                 channel.as_str()
             )
@@ -409,6 +420,27 @@ fn select_release(releases: &[GithubRelease], channel: &UpdateChannelId) -> Opti
             .cloned(),
         UpdateChannelId::Preview => releases.iter().find(|release| !release.draft).cloned(),
     }
+}
+
+fn select_update_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
+    select_setup_asset(assets)
+        .or_else(|| select_portable_asset(assets))
+        .or_else(|| {
+            assets
+                .iter()
+                .find(|asset| asset.name.to_ascii_lowercase().ends_with(".exe"))
+                .cloned()
+        })
+}
+
+fn select_setup_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
+    assets
+        .iter()
+        .find(|asset| {
+            asset.name.starts_with(SETUP_ASSET_PREFIX)
+                && asset.name.to_ascii_lowercase().ends_with(".exe")
+        })
+        .cloned()
 }
 
 fn select_portable_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
