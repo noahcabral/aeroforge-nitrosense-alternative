@@ -984,6 +984,8 @@ function App() {
   const customProcessorStateRef = useRef(customProcessorState)
   const [customPowerBase, setCustomPowerBase] = useState<CustomPowerBaseId>('performance')
   const customPowerBaseRef = useRef<CustomPowerBaseId>('performance')
+  const customPowerApplyTimerRef = useRef<number | null>(null)
+  const customPowerApplyRevisionRef = useRef(0)
   const [gpuOverclock, setGpuOverclock] = useState<GpuTuningState>(defaultGpuOverclock)
   const [customOcSlot, setCustomOcSlot] = useState<OcProfileSlot>(defaultCustomOcSlot)
   const [activeOcSlot, setActiveOcSlot] = useState<string>('daily')
@@ -1023,6 +1025,7 @@ function App() {
   const [glowTarget, setGlowTarget] = useState<string>('balanced')
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
   const [serviceConnected, setServiceConnected] = useState(false)
+  const serviceConnectedRef = useRef(false)
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null)
   const [liveTelemetry, setLiveTelemetry] = useState<TelemetrySnapshot | null>(null)
   const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('No telemetry')
@@ -1221,6 +1224,19 @@ function App() {
   useEffect(() => {
     customPowerBaseRef.current = customPowerBase
   }, [customPowerBase])
+
+  useEffect(() => {
+    serviceConnectedRef.current = serviceConnected
+  }, [serviceConnected])
+
+  useEffect(
+    () => () => {
+      if (customPowerApplyTimerRef.current !== null) {
+        window.clearTimeout(customPowerApplyTimerRef.current)
+      }
+    },
+    [],
+  )
 
   async function persistStagedControls(overrides?: PersistControlOverrides) {
     const nextActivePowerProfile = overrides?.activePowerProfile ?? activePowerProfile
@@ -1924,6 +1940,12 @@ function App() {
   }
 
   async function handlePowerProfile(profileId: PowerProfile['id']) {
+    if (profileId === 'custom' && customPowerApplyTimerRef.current !== null) {
+      window.clearTimeout(customPowerApplyTimerRef.current)
+      customPowerApplyTimerRef.current = null
+      customPowerApplyRevisionRef.current += 1
+    }
+
     const nextProcessorState = getProcessorStateForPowerProfile(
       profileId,
       customProcessorStateRef.current,
@@ -1993,6 +2015,91 @@ function App() {
       setStatusMessage(
         `Power profile apply failed: ${error instanceof Error ? error.message : String(error)}`,
       )
+    }
+  }
+
+  function scheduleCustomPowerApply(
+    nextProcessorState: { min: number; max: number },
+    nextBase: CustomPowerBaseId,
+    reason: string,
+  ) {
+    if (!serviceConnectedRef.current) {
+      setStatusMessage(`${reason} in the preview.`)
+      return
+    }
+
+    if (customPowerApplyTimerRef.current !== null) {
+      window.clearTimeout(customPowerApplyTimerRef.current)
+    }
+
+    const revision = customPowerApplyRevisionRef.current + 1
+    customPowerApplyRevisionRef.current = revision
+    setStatusMessage(`${reason}. Applying to Windows processor policy...`)
+
+    customPowerApplyTimerRef.current = window.setTimeout(() => {
+      customPowerApplyTimerRef.current = null
+      void applyCustomPowerPolicy(revision, nextProcessorState, nextBase)
+    }, 600)
+  }
+
+  async function applyCustomPowerPolicy(
+    revision: number,
+    nextProcessorState: { min: number; max: number },
+    nextBase: CustomPowerBaseId,
+  ) {
+    if (!serviceConnectedRef.current) {
+      return
+    }
+
+    try {
+      const updatedControls = await applyPowerProfile(
+        'custom',
+        {
+          minPercent: nextProcessorState.min,
+          maxPercent: nextProcessorState.max,
+        },
+        nextBase,
+      )
+      const liveControls = await getLiveControlSnapshot().catch(() => null)
+
+      if (revision !== customPowerApplyRevisionRef.current) {
+        return
+      }
+
+      applyBackendControlSnapshot(
+        mergeControlsWithLiveSnapshot(updatedControls, liveControls),
+        setActivePowerProfile,
+        setCustomProcessorState,
+        setCustomPowerBase,
+        setGpuOverclock,
+        setCustomOcSlot,
+        setActiveOcSlot,
+        setOcApplyState,
+        setOcTuningLocked,
+        setActiveFanProfile,
+        commitCustomCurves,
+        setFanSyncLockEnabled,
+        commitSmartChargingEnabled,
+        setUsbPowerEnabled,
+        commitBlueLightFilterEnabled,
+        setSelectedBootArt,
+        setCustomBootFilename,
+        setUpdateChannel,
+        setCheckForUpdatesOnLaunch,
+      )
+      liveControlSnapshotRef.current = liveControls
+
+      setStatusMessage(
+        liveControls?.processorStateReadback
+          ? `Custom processor state applied and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} â€¢ DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
+          : `Custom processor state applied as ${nextProcessorState.min}/${nextProcessorState.max}.`,
+      )
+    } catch (error) {
+      if (revision !== customPowerApplyRevisionRef.current) {
+        return
+      }
+
+      setStatusMessage(`Custom processor apply failed: ${describeError(error)}`)
     }
   }
 
@@ -2378,10 +2485,10 @@ function App() {
       activePowerProfile: 'custom',
       customProcessorState: nextState,
     })
-    setStatusMessage(
-      `Custom processor state updated to ${
-        field === 'min' ? `${value}% minimum` : `${value}% maximum`
-      }${serviceConnected ? '. Click the Custom tile to apply it through the service.' : ' in the preview.'}`,
+    scheduleCustomPowerApply(
+      nextState,
+      customPowerBaseRef.current,
+      `Custom processor state updated to ${nextState.min}% minimum / ${nextState.max}% maximum`,
     )
     pulseControl('custom')
   }
@@ -2401,8 +2508,10 @@ function App() {
 
     const selectedBase =
       customPowerBaseOptions.find((option) => option.id === nextBase)?.name ?? nextBase
-    setStatusMessage(
-      `Custom firmware base changed to ${selectedBase}${serviceConnected ? '. Click the Custom tile to apply it through the service.' : ' in the preview.'}`,
+    scheduleCustomPowerApply(
+      customProcessorStateRef.current,
+      nextBase,
+      `Custom firmware base changed to ${selectedBase}`,
     )
     pulseControl('custom')
   }
