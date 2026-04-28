@@ -1,7 +1,7 @@
 {
   "name": "aeroforge-control",
   "private": true,
-  "version": "0.12.2",
+  "version": "0.12.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
