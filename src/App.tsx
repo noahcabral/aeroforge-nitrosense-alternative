@@ -2813,6 +2813,31 @@ function App() {
                   }
                 />
               </div>
+
+              <div className="home-stage__fan-readouts">
+                <HomeFanReadoutCard
+                  label="GPU Fan"
+                  value={displayedGpuFanRpm}
+                  detail={
+                    displayedGpuFanRpm == null
+                      ? 'Fan telemetry unavailable'
+                      : serviceConnected
+                        ? 'Live graphics cooling speed'
+                        : 'Cached graphics cooling speed'
+                  }
+                />
+                <HomeFanReadoutCard
+                  label="CPU Fan"
+                  value={displayedCpuFanRpm}
+                  detail={
+                    displayedCpuFanRpm == null
+                      ? 'Fan telemetry unavailable'
+                      : serviceConnected
+                        ? 'Live processor cooling speed'
+                        : 'Cached processor cooling speed'
+                  }
+                />
+              </div>
             </section>
 
             <aside className="home-stage__telemetry">
@@ -3746,6 +3771,28 @@ function MetricCard({ label, value, detail }: MetricCardProps) {
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
+    </div>
+  )
+}
+
+type HomeFanReadoutCardProps = {
+  label: string
+  value: number | null
+  detail: string
+}
+
+function HomeFanReadoutCard({ label, value, detail }: HomeFanReadoutCardProps) {
+  return (
+    <div className="home-fan-card">
+      <div className="home-fan-card__visual" aria-hidden="true">
+        <div className="home-fan-card__hub" />
+      </div>
+      <div className="home-fan-card__copy">
+        <span className="eyebrow">{label}</span>
+        <strong>{value == null ? 'Offline' : formatTelemetryValue(value)}</strong>
+        <small>{value == null ? '' : 'RPM'}</small>
+        <p>{detail}</p>
+      </div>
     </div>
   )
 }

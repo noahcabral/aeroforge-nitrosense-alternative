@@ -11,7 +11,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "portable:prep": "powershell -ExecutionPolicy Bypass -File scripts/Make-Portable.ps1",
-    "portable:build": "tauri build --no-bundle && cargo build --release --manifest-path src-tauri/Cargo.toml --bin aeroforge-hotkey-helper && powershell -ExecutionPolicy Bypass -File scripts/Make-Portable.ps1",
+    "portable:build": "tauri build && powershell -ExecutionPolicy Bypass -File scripts/Make-Portable.ps1",
     "service:build": "cargo build --release --manifest-path aeroforge-service/Cargo.toml",
     "service:console": "cargo run --manifest-path aeroforge-service/Cargo.toml -- --console",
     "startup:install": "powershell -ExecutionPolicy Bypass -File scripts/Install-AeroForgeStartup.ps1",

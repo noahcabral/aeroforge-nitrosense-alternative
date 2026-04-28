@@ -306,6 +306,84 @@
   gap: 0.48rem;
 }
 
+.home-stage__fan-readouts {
+  width: min(100%, 520px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin-top: 0.12rem;
+}
+
+.home-fan-card {
+  position: relative;
+  min-height: 158px;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid rgba(236, 120, 46, 0.18);
+  background:
+    radial-gradient(circle at center, rgba(255, 123, 43, 0.08), transparent 52%),
+    linear-gradient(180deg, rgba(18, 24, 33, 0.95), rgba(11, 14, 20, 0.92));
+  border-radius: 22px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 0.48rem;
+  text-align: center;
+  overflow: hidden;
+}
+
+.home-fan-card__visual {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, rgba(7, 7, 10, 1) 0 26%, transparent 27%),
+    repeating-conic-gradient(
+      from 0deg,
+      rgba(236, 120, 46, 0.88) 0deg 18deg,
+      rgba(236, 120, 46, 0.12) 18deg 30deg
+    );
+  box-shadow:
+    inset 0 0 18px rgba(255, 126, 56, 0.18),
+    0 0 18px rgba(255, 122, 46, 0.12);
+}
+
+.home-fan-card__hub {
+  position: absolute;
+  inset: 19px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, rgba(255, 131, 49, 0.22), transparent 46%),
+    rgba(12, 11, 12, 0.96);
+  border: 1px solid rgba(236, 120, 46, 0.12);
+}
+
+.home-fan-card__copy {
+  display: grid;
+  justify-items: center;
+  gap: 0.14rem;
+}
+
+.home-fan-card__copy strong {
+  font-size: clamp(2rem, 4vw, 2.65rem);
+  line-height: 0.92;
+  letter-spacing: -0.06em;
+}
+
+.home-fan-card__copy small {
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.home-fan-card__copy p {
+  margin: 0.16rem 0 0;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 .home-temp-card {
   position: relative;
   display: grid;
@@ -2715,6 +2793,10 @@
 
   .art-grid,
   .home-stage__metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .home-stage__fan-readouts {
     grid-template-columns: 1fr;
   }
 
