@@ -54,10 +54,9 @@ Notes:
 - To start the helper automatically at logon, run scripts\Install-AeroForgeStartup.ps1 from the source tree after building the portable folder.
 - Runtime DLLs from the Tauri release folder are included alongside the executable.
 - WebView2 must be present on the machine. It is already installed on most modern Windows systems.
-- If a fresh machine is missing Visual C++ runtime components and the app does not launch, use the MSI or NSIS installer builds instead.
+- For a first install on a fresh machine, use the Setup EXE so AeroForgeService is installed.
 
 Installer builds:
-- MSI: src-tauri\target\release\bundle\msi
 - NSIS: src-tauri\target\release\bundle\nsis
 "@
 

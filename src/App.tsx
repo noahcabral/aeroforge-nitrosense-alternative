@@ -1010,7 +1010,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.0')
+  const [backendVersion, setBackendVersion] = useState('0.12.1')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
