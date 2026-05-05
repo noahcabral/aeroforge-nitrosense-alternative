@@ -1,6 +1,7 @@
 use std::{
+    ffi::OsStr,
     fs, io,
-    os::windows::process::CommandExt,
+    os::windows::{ffi::OsStrExt, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
     sync::RwLock,
@@ -17,6 +18,7 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use super::models::{UpdateChannelId, UpdateStatus};
+use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -157,7 +159,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .unwrap_or_default();
 
     if extension.eq_ignore_ascii_case("exe") {
-        Command::new(&staged_file).spawn()?;
+        shell_execute_runas(&staged_file)?;
 
         status.can_install_update = true;
         status.detail =
@@ -630,6 +632,40 @@ fn ensure_writable_directory(path: &Path) -> Result<(), DynError> {
     fs::write(&probe, [])?;
     fs::remove_file(probe)?;
     Ok(())
+}
+
+fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
+    let operation = wide_null(OsStr::new("runas"));
+    let file = wide_null(path.as_os_str());
+    let directory = path
+        .parent()
+        .map(|parent| wide_null(parent.as_os_str()))
+        .unwrap_or_else(|| vec![0]);
+    let parameters = [0u16];
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            directory.as_ptr(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let result_code = result as isize;
+    if result_code <= 32 {
+        return Err(io::Error::other(format!(
+            "Windows refused to launch the setup installer with elevation. ShellExecuteW returned {result_code}."
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+fn wide_null(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 fn install_script_body() -> &'static str {

@@ -1,6 +1,42 @@
 Var NitroSenseDisplayName
 Var NitroSenseUninstallString
 
+Function StopAeroForgeRuntimeForInstall
+  DetailPrint "Stopping existing AeroForge runtime processes..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\StopAeroForgeRuntime.ps1" w
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "foreach ($$taskName in @('AeroForgeHotkeyHelper', 'AeroForgePrewarm')) {$\r$\n"
+  FileWrite $9 "  $$task = Get-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  if ($$task) { Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "$$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "if ($$svc) { Stop-Service -Name 'AeroForgeService' -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\StopAeroForgeRuntime.ps1"' $9
+FunctionEnd
+
+Function un.StopAeroForgeRuntimeForUninstall
+  DetailPrint "Stopping AeroForge runtime processes..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\StopAeroForgeRuntime.ps1" w
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "foreach ($$taskName in @('AeroForgeHotkeyHelper', 'AeroForgePrewarm')) {$\r$\n"
+  FileWrite $9 "  $$task = Get-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  if ($$task) { Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "$$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "if ($$svc) { Stop-Service -Name 'AeroForgeService' -Force -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\StopAeroForgeRuntime.ps1"' $9
+FunctionEnd
+
 Function FindNitroSenseInCurrentRoot
   StrCpy $0 0
 
@@ -98,6 +134,7 @@ Function RunNitroSenseUninstall
 FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
+  Call StopAeroForgeRuntimeForInstall
   Call DetectNitroSense
   StrCmp $NitroSenseUninstallString "" nitro_preinstall_done
 
@@ -143,5 +180,6 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  Call un.StopAeroForgeRuntimeForUninstall
   Call un.UninstallAeroForgeService
 !macroend
