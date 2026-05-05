@@ -43,6 +43,7 @@ type CurveTarget = 'cpu' | 'gpu'
 type ControlTab = 'home' | 'power' | 'fans' | 'personal' | 'debug'
 type PersonalSection = 'updates' | 'charge' | 'screen' | 'boot'
 type UpdateChannel = ControlSnapshot['personalSettings']['updateChannel']
+type UpdateAction = 'check' | 'stage' | 'install'
 type CurvePoint = {
   temp: number
   speed: number
@@ -1217,7 +1218,8 @@ function App() {
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
   const [backendVersion, setBackendVersion] = useState('0.12.2')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
-  const [updateActionPending, setUpdateActionPending] = useState<string | null>(null)
+  const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
+  const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
   const [statusMessage, setStatusMessage] = useState(
     'Desktop backend starting. Loading persisted AeroForge state.',
@@ -1401,6 +1403,22 @@ function App() {
       : updateStatus?.feedKind === 'none'
         ? 'No release yet'
         : 'Up to date'
+  const updateActionLabel =
+    updateActionPending === 'check'
+      ? 'Checking release feed'
+      : updateActionPending === 'stage'
+        ? 'Downloading update'
+        : updateActionPending === 'install'
+          ? 'Launching updater'
+          : updateAvailabilityLabel
+  const updateStatusDetail =
+    updateActionMessage ?? updateStatus?.detail ?? 'Updater not checked yet.'
+  const updateCheckButtonLabel =
+    updateActionPending === 'check' ? 'Checking...' : 'Check for Updates'
+  const updateDownloadButtonLabel =
+    updateActionPending === 'stage' ? 'Downloading...' : 'Download Latest Update'
+  const updateInstallButtonLabel =
+    updateActionPending === 'install' ? 'Launching...' : 'Install Staged Update'
   useEffect(() => {
     activeTabRef.current = activeTab
     if (activeTab === 'debug') {
@@ -2688,17 +2706,21 @@ function App() {
 
   async function runUpdateCheck(manual: boolean, channelOverride?: UpdateChannel) {
     setUpdateActionPending('check')
+    setUpdateActionMessage('Checking the published GitHub release feed...')
 
     try {
       const status = await checkForUpdates(channelOverride ?? updateChannel)
       setUpdateStatus(status)
+      setUpdateActionMessage(status.detail)
       if (manual || status.updateAvailable || status.lastError) {
         setStatusMessage(status.detail)
       }
       return status
     } catch (error) {
       const message = describeError(error)
-      setStatusMessage(`Update check failed: ${message}`)
+      const detail = `Update check failed: ${message}`
+      setUpdateActionMessage(detail)
+      setStatusMessage(detail)
       throw error
     } finally {
       setUpdateActionPending(null)
@@ -2708,13 +2730,17 @@ function App() {
 
   async function handleStageLatestUpdate() {
     setUpdateActionPending('stage')
+    setUpdateActionMessage('Downloading the update package and verifying it...')
 
     try {
       const status = await stageUpdateDownload(updateChannel)
       setUpdateStatus(status)
+      setUpdateActionMessage(status.detail)
       setStatusMessage(status.detail)
     } catch (error) {
-      setStatusMessage(`Update download failed: ${describeError(error)}`)
+      const detail = `Update download failed: ${describeError(error)}`
+      setUpdateActionMessage(detail)
+      setStatusMessage(detail)
     } finally {
       setUpdateActionPending(null)
     }
@@ -2722,14 +2748,23 @@ function App() {
 
   async function handleInstallLatestUpdate() {
     setUpdateActionPending('install')
+    setUpdateActionMessage('Launching the staged updater...')
+    const stagedAssetName = updateStatus?.stagedAssetName?.toLowerCase() ?? ''
+    const shouldCloseForPortableUpdate = stagedAssetName.endsWith('.zip')
 
     try {
       const status = await installStagedUpdate()
       setUpdateStatus(status)
+      setUpdateActionMessage(status.detail)
       setStatusMessage(status.detail)
-      await getCurrentWindow().close()
+      if (shouldCloseForPortableUpdate) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1400))
+        await getCurrentWindow().close()
+      }
     } catch (error) {
-      setStatusMessage(`Staged install failed: ${describeError(error)}`)
+      const detail = `Staged install failed: ${describeError(error)}`
+      setUpdateActionMessage(detail)
+      setStatusMessage(detail)
     } finally {
       setUpdateActionPending(null)
     }
@@ -3700,8 +3735,12 @@ function App() {
 
                           <div className="settings-summary-card">
                             <span className="eyebrow">Feed Status</span>
-                            <strong>{updateAvailabilityLabel}</strong>
-                            <small>Last checked {updateLastCheckedLabel}.</small>
+                            <strong>{updateActionLabel}</strong>
+                            <small>
+                              {updateActionPending
+                                ? 'Working now. Buttons unlock when the action finishes.'
+                                : `Last checked ${updateLastCheckedLabel}.`}
+                            </small>
                           </div>
                         </div>
 
@@ -3722,17 +3761,40 @@ function App() {
                           </button>
                         </div>
 
-                        <div className="settings-note">
+                        <div
+                          className={`settings-note ${
+                            updateActionPending
+                              ? 'settings-note--active'
+                              : updateStatus?.lastError
+                                ? 'settings-note--error'
+                                : ''
+                          }`}
+                          aria-busy={updateActionPending !== null}
+                        >
                           <div>
                             <span className="eyebrow">Release Status</span>
-                            <strong>{updateAvailabilityLabel}</strong>
-                            <p>{updateStatus?.detail ?? 'Updater not checked yet.'}</p>
+                            <strong>{updateActionLabel}</strong>
+                            <p>{updateStatusDetail}</p>
+                            {updateActionPending && (
+                              <small className="settings-note__activity">
+                                Action in progress. Leave AeroForge open until this finishes.
+                              </small>
+                            )}
                             {updateStatus?.stagedAssetName && (
                               <small>
-                                Staged package {updateStatus.stagedAssetName}
+                                {updateStatus.canInstallUpdate
+                                  ? 'Staged package '
+                                  : 'Previous staged package '}
+                                {updateStatus.stagedAssetName}
                                 {updateStatus.stagedSha256
-                                  ? ` • SHA256 ${updateStatus.stagedSha256.slice(0, 16)}...`
-                                  : ' • ready for install.'}
+                                  ? ` - SHA256 ${updateStatus.stagedSha256.slice(0, 16)}...${
+                                      updateStatus.canInstallUpdate
+                                        ? ''
+                                        : ' - not installable for the current release.'
+                                    }`
+                                  : updateStatus.canInstallUpdate
+                                    ? ' - ready for install.'
+                                    : ' - not installable for the current release.'}
                               </small>
                             )}
                             {updateStatus?.lastError && <small>Last error: {updateStatus.lastError}</small>}
@@ -3746,7 +3808,7 @@ function App() {
                             onClick={() => void runUpdateCheck(true)}
                             type="button"
                           >
-                            Check for Updates
+                            {updateCheckButtonLabel}
                           </button>
                           <button
                             className="button"
@@ -3754,7 +3816,7 @@ function App() {
                             onClick={() => void handleStageLatestUpdate()}
                             type="button"
                           >
-                            Download Latest Update
+                            {updateDownloadButtonLabel}
                           </button>
                           <button
                             className="button button--ghost"
@@ -3762,7 +3824,7 @@ function App() {
                             onClick={() => void handleInstallLatestUpdate()}
                             type="button"
                           >
-                            Install Staged Update
+                            {updateInstallButtonLabel}
                           </button>
                         </div>
                       </div>

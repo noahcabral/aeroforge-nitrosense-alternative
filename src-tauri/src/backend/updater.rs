@@ -90,6 +90,13 @@ pub fn stage_latest_update(
     channel: UpdateChannelId,
 ) -> Result<UpdateStatus, DynError> {
     let resolved = resolve_update_candidate(channel, store.status())?;
+    if !resolved.status.can_stage_update {
+        return Err(io::Error::other(
+            "No newer update asset is available to download for the selected channel.",
+        )
+        .into());
+    }
+
     let candidate = resolved.asset.ok_or_else(|| {
         io::Error::other("No installable update asset is available for the selected channel.")
     })?;
@@ -129,6 +136,13 @@ pub fn stage_latest_update(
 
 pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynError> {
     let mut status = store.status();
+    if !status.can_install_update {
+        return Err(io::Error::other(
+            "No staged update package matches the latest available release.",
+        )
+        .into());
+    }
+
     let staged_path = status
         .staged_asset_path
         .clone()
@@ -147,7 +161,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
 
         status.can_install_update = true;
         status.detail =
-            "Setup installer launched. Approve any Windows prompts and follow the installer. AeroForge will close now.".into();
+            "Setup installer launched. Approve any Windows prompts and follow the installer. If the installer asks to close AeroForge, close this window.".into();
         status.last_error = None;
         return store.save_status(status);
     }
@@ -262,7 +276,7 @@ fn resolve_update_candidate(
             _ => latest_version != env!("CARGO_PKG_VERSION"),
         };
         status.can_stage_update = latest_asset.is_some() && status.update_available;
-        status.can_install_update = staged_file_exists(&status);
+        status.can_install_update = staged_update_ready(&status);
         status.detail = if let Some(asset) = latest_asset.as_ref() {
             if status.update_available {
                 format!(
@@ -301,7 +315,7 @@ fn resolve_update_candidate(
             status.latest_asset_name = None;
             status.update_available = false;
             status.can_stage_update = false;
-            status.can_install_update = staged_file_exists(&status);
+            status.can_install_update = staged_update_ready(&status);
             status.detail =
                 "Preview channel is configured, but the selected repo has no commits or releases yet.".into();
 
@@ -322,7 +336,7 @@ fn resolve_update_candidate(
                 status.latest_asset_name = None;
                 status.update_available = false;
                 status.can_stage_update = false;
-                status.can_install_update = staged_file_exists(&status);
+                status.can_install_update = staged_update_ready(&status);
                 status.last_error = Some(error.to_string());
                 status.detail = format!(
                     "Preview channel could not resolve {} yet. {}",
@@ -343,7 +357,7 @@ fn resolve_update_candidate(
         status.latest_asset_name = None;
         status.update_available = false;
         status.can_stage_update = false;
-        status.can_install_update = staged_file_exists(&status);
+        status.can_install_update = staged_update_ready(&status);
         status.detail = format!(
             "Preview is tracking {} at {}, but there is no published preview release asset to stage yet.",
             repo.default_branch,
@@ -364,7 +378,7 @@ fn resolve_update_candidate(
     status.latest_asset_name = None;
     status.update_available = false;
     status.can_stage_update = false;
-    status.can_install_update = staged_file_exists(&status);
+    status.can_install_update = staged_update_ready(&status);
     status.detail = "Stable channel has no published release yet.".into();
 
     Ok(ResolvedUpdateCandidate {
@@ -501,7 +515,7 @@ fn apply_runtime_fields(mut status: UpdateStatus) -> UpdateStatus {
     status.repo_slug = UPDATE_REPO_SLUG.into();
     status.current_version = env!("CARGO_PKG_VERSION").into();
     status.token_configured = false;
-    status.can_install_update = staged_file_exists(&status);
+    status.can_install_update = staged_update_ready(&status);
     status
 }
 
@@ -523,6 +537,34 @@ fn load_status(path: &Path) -> Result<Option<UpdateStatus>, DynError> {
             Ok(None)
         }
     }
+}
+
+fn staged_update_ready(status: &UpdateStatus) -> bool {
+    if !status.update_available || !staged_file_exists(status) {
+        return false;
+    }
+
+    let Some(latest_asset_name) = status.latest_asset_name.as_deref() else {
+        return false;
+    };
+
+    let staged_name_matches = status
+        .staged_asset_name
+        .as_deref()
+        .map(|name| name.eq_ignore_ascii_case(latest_asset_name))
+        .unwrap_or(false);
+    let staged_path_matches = status
+        .staged_asset_path
+        .as_ref()
+        .map(PathBuf::from)
+        .and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.eq_ignore_ascii_case(latest_asset_name))
+        })
+        .unwrap_or(false);
+
+    staged_name_matches || staged_path_matches
 }
 
 fn staged_file_exists(status: &UpdateStatus) -> bool {
