@@ -29,6 +29,7 @@ pub fn run() {
             commands::install_staged_update,
             commands::apply_blue_light_filter,
             commands::apply_smart_charging,
+            commands::apply_auto_refresh_rate,
             commands::save_control_snapshot,
             commands::reset_control_snapshot,
             commands::apply_power_profile,

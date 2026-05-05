@@ -1,4 +1,5 @@
 use std::{
+    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -13,6 +14,7 @@ use crate::paths::ServicePaths;
 
 static CPU_USAGE_SAMPLER: OnceLock<Mutex<CpuUsageSampler>> = OnceLock::new();
 static CPU_CLOCK_CACHE: OnceLock<Arc<Mutex<CpuClockCache>>> = OnceLock::new();
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 extern "system" {
     fn GetSystemTimes(
@@ -135,6 +137,7 @@ pub fn build_cpu_thermal_snapshot(
         average_temp_c: low_level
             .average_core_temp_c
             .or(low_level.package_temp_c)
+            .or(firmware.cpu_temp_c)
             .or(firmware.thermal_zone_temp_c),
         lowest_core_temp_c: low_level.lowest_core_temp_c,
         highest_core_temp_c: low_level.highest_core_temp_c,
@@ -160,6 +163,7 @@ fn read_cpu_times() -> Result<CpuTimes, Box<dyn std::error::Error + Send + Sync>
 
 fn query_cpu_clock_mhz() -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
     let output = std::process::Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-Command",

@@ -1,5 +1,6 @@
 use std::{
     fs, io,
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
     sync::RwLock,
@@ -24,6 +25,7 @@ const UPDATE_STATE_FILE: &str = "update-state.json";
 const UPDATES_DIR_NAME: &str = "updates";
 const SETUP_ASSET_PREFIX: &str = "AeroForge-Control-Setup-";
 const PORTABLE_ASSET_PREFIX: &str = "AeroForge-Control-Portable-";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct UpdaterStore {
     status: RwLock<UpdateStatus>,
@@ -151,10 +153,10 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
     }
 
     if !extension.eq_ignore_ascii_case("zip") {
-        return Err(
-            io::Error::other("Only setup EXE and portable ZIP update assets can be installed.")
-                .into(),
-        );
+        return Err(io::Error::other(
+            "Only setup EXE and portable ZIP update assets can be installed.",
+        )
+        .into());
     }
 
     let current_exe = std::env::current_exe()?;
@@ -198,6 +200,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .to_string();
 
     Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")

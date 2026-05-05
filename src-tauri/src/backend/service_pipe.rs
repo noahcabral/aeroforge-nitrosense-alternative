@@ -50,6 +50,9 @@ enum PipeRequest {
     ApplyBootLogo {
         payload: ApplyBootLogoRequest,
     },
+    ApplySmartCharging {
+        payload: ApplySmartChargeRequest,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +95,12 @@ struct ApplyBootLogoRequest {
     original_filename: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplySmartChargeRequest {
+    enabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedPowerProfilePayload {
@@ -119,6 +128,15 @@ pub struct AppliedFanControlPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedBootLogoPayload {
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedSmartChargePayload {
+    pub enabled: bool,
+    pub battery_healthy: u8,
     pub applied_at_unix: u64,
     pub detail: String,
 }
@@ -256,6 +274,17 @@ pub fn apply_boot_logo(
         },
     })?;
     Ok(serde_json::from_value::<AppliedBootLogoPayload>(payload)?)
+}
+
+pub fn apply_smart_charging(
+    enabled: bool,
+) -> Result<AppliedSmartChargePayload, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = request(PipeRequest::ApplySmartCharging {
+        payload: ApplySmartChargeRequest { enabled },
+    })?;
+    Ok(serde_json::from_value::<AppliedSmartChargePayload>(
+        payload,
+    )?)
 }
 
 fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

@@ -266,7 +266,12 @@ fn build_contract() -> BackendContract {
             CommandDescriptor {
                 command: "apply_smart_charging".into(),
                 stage: "implemented".into(),
-                purpose: "Apply Acer Care Center BatteryHealthy charging mode and persist the staged smart-charge state.".into(),
+                purpose: "Apply Acer battery-health charging mode and persist the staged smart-charge state.".into(),
+            },
+            CommandDescriptor {
+                command: "apply_auto_refresh_rate".into(),
+                stage: "implemented".into(),
+                purpose: "Switch the primary display to 60 Hz while on battery and restore the captured refresh rate on AC or disable.".into(),
             },
             CommandDescriptor {
                 command: "set_charge_behavior".into(),
@@ -285,8 +290,8 @@ fn build_contract() -> BackendContract {
             },
             CommandDescriptor {
                 command: "apply_boot_logo".into(),
-                stage: "blocked".into(),
-                purpose: "Direct boot-logo firmware apply is disabled until AeroForge has a verified hardware path.".into(),
+                stage: "implemented".into(),
+                purpose: "Apply a custom boot logo through the AeroForge service using a direct EFI System Partition write with backup and verification.".into(),
             },
         ],
     }
@@ -315,7 +320,7 @@ fn build_capabilities() -> CapabilitySnapshot {
             requires_elevation: false,
         },
         usb_power: FeatureSupport {
-            available: true,
+            available: false,
             writable: false,
             requires_elevation: true,
         },
@@ -330,8 +335,8 @@ fn build_capabilities() -> CapabilitySnapshot {
             requires_elevation: true,
         },
         boot_logo: FeatureSupport {
-            available: false,
-            writable: false,
+            available: true,
+            writable: true,
             requires_elevation: true,
         },
         notes: vec![
@@ -339,11 +344,13 @@ fn build_capabilities() -> CapabilitySnapshot {
             "AeroForge-owned control state is now persisted to disk; named-pipe service IPC is now in place for read-only snapshots.".into(),
             "GitHub updater state is stored separately from control-state.json, and release checks now use the public GitHub release feed.".into(),
             "Blue light filter apply now uses a clean-room gamma ramp implementation matched to Acer Quick Access GainID 0-4 behavior and also updates the Quick Access settings file.".into(),
-            "Smart charging now uses Acer Care Center's local BatteryHealthy websocket path on port 4343. BatteryHealthy 0 keeps the 80% optimized cap, while BatteryHealthy 1 restores full charging.".into(),
-            "Power-profile apply now uses direct AcerGamingFunction operating-mode writes for supported modes, then applies the staged Windows processor policy.".into(),
+            "Smart charging now prefers the AeroForge service named-pipe path so BatteryControl health-mode writes run with service elevation, with desktop BatteryControl and Acer Care Center fallback only when the service is unavailable.".into(),
+            "Power-off USB charging is still staged out of the UI because AeroForge does not yet have a verified direct Windows control surface for that feature.".into(),
+            "Auto 60 Hz on battery uses the Windows display-mode API from the user-session backend and stores the previous refresh rate for AC/disable restore.".into(),
+            "Power-profile apply now prefers direct AcerGamingFunction platform-profile misc-setting writes, falls back to legacy profile writes when needed, then applies the staged Windows processor policy.".into(),
             "GPU tuning apply now flows through the AeroForge service and currently writes editable NVAPI P0 clock offsets while staging unsupported voltage and limit fields.".into(),
-            "Fan profile and curve apply now flow through the AeroForge service using direct ROOT\\WMI AcerGamingFunction ACPI calls, with RPM movement verified through telemetry.".into(),
-            "Boot-logo previews and upload staging remain local only; firmware apply is disabled until AeroForge has a verified direct hardware path.".into(),
+            "Fan profile and curve apply now flow through the AeroForge service using direct ROOT\\WMI AcerGamingFunction ACPI calls, with direct Acer sensor RPM readback preferred for telemetry.".into(),
+            "Boot-logo apply is serviced by AeroForge directly through the EFI System Partition; the write path requires elevation and refuses ambiguous ESP targets.".into(),
         ],
     }
 }
@@ -358,7 +365,7 @@ fn build_default_controls() -> ControlSnapshot {
     };
 
     ControlSnapshot {
-        active_power_profile: PowerProfileId::Balanced,
+        active_power_profile: PowerProfileId::Turbo,
         active_fan_profile: FanProfileId::Auto,
         custom_processor_state: ProcessorStateSettings {
             min_percent: 35,
@@ -438,6 +445,8 @@ fn build_default_controls() -> ControlSnapshot {
             smart_charging_enabled: true,
             usb_power_enabled: true,
             blue_light_filter_enabled: false,
+            auto_refresh_rate_on_battery_enabled: false,
+            auto_refresh_rate_restore_hz: None,
             selected_boot_art: BootArtId::Ember,
             custom_boot_filename: "custom-boot.png".into(),
             update_channel: UpdateChannelId::Stable,

@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::{thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -8,7 +9,7 @@ use crate::{
 use super::{
     acer_wmi::{
         apply_fan_behavior, apply_fan_speed, clamp_manual_fan_percent, FAN_BEHAVIOR_AUTO,
-        FAN_BEHAVIOR_CUSTOM, FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU, FAN_SELECTOR_GPU,
+        FAN_BEHAVIOR_CUSTOM_MIXED, FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU, FAN_SELECTOR_GPU,
     },
     models::{
         AppliedFanControlSnapshot, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
@@ -35,7 +36,7 @@ pub fn apply_fan_profile(
             None,
             Some(100),
             Some(100),
-            "Max fan profile requested through ROOT\\WMI AcerGamingFunction. On ANV15-52, the max behavior bit alone does not reliably drive the fans to full RPM, so AeroForge also sends explicit 100% CPU and GPU fan targets.",
+            "Max fan profile requested through ROOT\\WMI AcerGamingFunction. AeroForge pairs the max behavior write with explicit 100% CPU and GPU fan targets because some Acer firmware only reaches full RPM when both paths are driven together.",
         ),
         FanProfileId::Custom => Err(
             "Custom fan mode requires explicit saved curves instead of a fallback fixed speed."
@@ -62,14 +63,7 @@ pub fn apply_custom_fan_curves(
         cpu_temp, requested_cpu_speed, cpu_speed, gpu_temp, requested_gpu_speed, gpu_speed
     );
 
-    apply_firmware_wmi_fan_control(
-        paths,
-        FanProfileId::Custom,
-        Some(curves),
-        Some(cpu_speed),
-        Some(gpu_speed),
-        &context,
-    )
+    apply_custom_wmi_fan_control(paths, curves, Some(cpu_speed), Some(gpu_speed), &context)
 }
 
 fn apply_firmware_wmi_fan_control(
@@ -106,22 +100,29 @@ fn apply_firmware_wmi_fan_control(
             "method": behavior_result.method,
             "input": behavior_result.input,
             "hresult": format!("0x{:08X}", behavior_result.hresult as u32),
+            "gmOutput": behavior_result.output,
+            "accepted": wmi_output_accepted(&behavior_result),
         },
         "speeds": speed_results.iter().map(|result| {
             json!({
                 "method": result.method,
                 "input": result.input,
                 "hresult": format!("0x{:08X}", result.hresult as u32),
+                "gmOutput": result.output,
+                "accepted": wmi_output_accepted(result),
             })
         }).collect::<Vec<_>>(),
+        "verification": build_fan_verification(),
     }));
 
+    let verification = build_fan_verification_detail();
     let detail = build_apply_detail(
         profile_id.as_str(),
         context,
         behavior_input,
         cpu_speed_percent,
         gpu_speed_percent,
+        &verification,
     );
     write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
 
@@ -136,12 +137,135 @@ fn apply_firmware_wmi_fan_control(
     })
 }
 
+fn apply_custom_wmi_fan_control(
+    paths: &ServicePaths,
+    curves: FanCurveSet,
+    cpu_speed_percent: Option<u8>,
+    gpu_speed_percent: Option<u8>,
+    context: &str,
+) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    write_log_line(
+        &paths.component_log("control-fan"),
+        "INFO",
+        &format!(
+            "Applying custom fan curve by direct speed target only. {} Skipping SetGamingFanBehavior(Custom) because ANV16-41 feedback shows that behavior latch can pin fans to max on some firmware.",
+            context
+        ),
+    )?;
+
+    let speed_results = match apply_direct_speed_targets(cpu_speed_percent, gpu_speed_percent) {
+        Ok(results) => results,
+        Err(error) => {
+            let rollback = apply_fan_behavior(FAN_BEHAVIOR_AUTO)?;
+            let detail = format!(
+                "Custom fan speed write failed before all targets were accepted: {error}. Restored Auto fan behavior with SetGamingFanBehavior({}) and gmOutput {:?}.",
+                rollback.input, rollback.output
+            );
+            write_log_line(&paths.component_log("control-fan"), "WARN", &detail)?;
+            return Ok(AppliedFanControlSnapshot {
+                profile_id: FanProfileId::Auto,
+                curves: Some(curves),
+                cpu_speed_percent: None,
+                gpu_speed_percent: None,
+                readback: Some(json!({
+                    "backend": "acer-gaming-wmi",
+                    "strategy": "custom-direct-speed-rejected-restored-auto",
+                    "error": error.to_string(),
+                    "rollbackBehavior": wmi_result_json(&rollback),
+                })),
+                applied_at_unix: unix_timestamp(),
+                detail,
+            });
+        }
+    };
+
+    if let Some(rejected) = speed_results
+        .iter()
+        .find(|result| !wmi_output_accepted(result))
+    {
+        let rollback = apply_fan_behavior(FAN_BEHAVIOR_AUTO)?;
+        let detail = format!(
+            "Custom fan speed target was rejected by AcerGamingFunction {} input {} gmOutput {:?}. Restored Auto fan behavior with SetGamingFanBehavior({}) and gmOutput {:?}.",
+            rejected.method, rejected.input, rejected.output, rollback.input, rollback.output
+        );
+        write_log_line(&paths.component_log("control-fan"), "WARN", &detail)?;
+        return Ok(AppliedFanControlSnapshot {
+            profile_id: FanProfileId::Auto,
+            curves: Some(curves),
+            cpu_speed_percent: None,
+            gpu_speed_percent: None,
+            readback: Some(json!({
+                "backend": "acer-gaming-wmi",
+                "strategy": "custom-direct-speed-rejected-restored-auto",
+                "rejectedSpeed": wmi_result_json(rejected),
+                "rollbackBehavior": wmi_result_json(&rollback),
+            })),
+            applied_at_unix: unix_timestamp(),
+            detail,
+        });
+    }
+
+    let readback = Some(json!({
+        "backend": "acer-gaming-wmi",
+        "namespace": "ROOT\\WMI",
+        "class": "AcerGamingFunction",
+        "instance": "ACPI\\PNP0C14\\APGe_0",
+        "strategy": "custom-direct-speed-only",
+        "behavior": null,
+        "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
+        "verification": build_fan_verification(),
+    }));
+
+    let verification = build_fan_verification_detail();
+    let detail =
+        build_custom_apply_detail(context, cpu_speed_percent, gpu_speed_percent, &verification);
+    write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
+
+    Ok(AppliedFanControlSnapshot {
+        profile_id: FanProfileId::Custom,
+        curves: Some(curves),
+        cpu_speed_percent,
+        gpu_speed_percent,
+        readback,
+        applied_at_unix: unix_timestamp(),
+        detail,
+    })
+}
+
+fn apply_direct_speed_targets(
+    cpu_speed_percent: Option<u8>,
+    gpu_speed_percent: Option<u8>,
+) -> Result<Vec<super::acer_wmi::AcerWmiMethodResult>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut speed_results = Vec::new();
+    if let Some(cpu_speed) = cpu_speed_percent {
+        speed_results.push(apply_fan_speed(FAN_SELECTOR_CPU, cpu_speed)?);
+    }
+    if let Some(gpu_speed) = gpu_speed_percent {
+        speed_results.push(apply_fan_speed(FAN_SELECTOR_GPU, gpu_speed)?);
+    }
+    Ok(speed_results)
+}
+
 fn behavior_input_for_profile(profile_id: &FanProfileId) -> u64 {
     match profile_id {
         FanProfileId::Auto => FAN_BEHAVIOR_AUTO,
         FanProfileId::Max => FAN_BEHAVIOR_MAX,
-        FanProfileId::Custom => FAN_BEHAVIOR_CUSTOM,
+        FanProfileId::Custom => FAN_BEHAVIOR_CUSTOM_MIXED,
     }
+}
+
+fn wmi_output_accepted(result: &super::acer_wmi::AcerWmiMethodResult) -> bool {
+    matches!(result.output, None | Some(0) | Some(1))
+}
+
+fn wmi_result_json(result: &super::acer_wmi::AcerWmiMethodResult) -> Value {
+    json!({
+        "method": result.method,
+        "input": result.input,
+        "hresult": format!("0x{:08X}", result.hresult as u32),
+        "gmOutput": result.output,
+        "accepted": wmi_output_accepted(result),
+    })
 }
 
 fn build_apply_detail(
@@ -150,6 +274,7 @@ fn build_apply_detail(
     behavior_input: u64,
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
+    verification: &str,
 ) -> String {
     let speed_detail = match (cpu_speed_percent, gpu_speed_percent) {
         (Some(cpu), Some(gpu)) => {
@@ -159,8 +284,115 @@ fn build_apply_detail(
     };
 
     format!(
-        "Fan profile {profile_id} was applied through direct AcerGamingFunction WMI/ACPI calls. {context} Behavior input 0x{behavior_input:08X}. {speed_detail} RPM movement is verified separately through telemetry."
+        "Fan profile {profile_id} was applied through direct AcerGamingFunction WMI/ACPI calls. {context} Behavior input 0x{behavior_input:08X}. {speed_detail} {verification}"
     )
+}
+
+fn build_custom_apply_detail(
+    context: &str,
+    cpu_speed_percent: Option<u8>,
+    gpu_speed_percent: Option<u8>,
+    verification: &str,
+) -> String {
+    let speed_detail = match (cpu_speed_percent, gpu_speed_percent) {
+        (Some(cpu), Some(gpu)) => {
+            format!("CPU speed {cpu}%, GPU speed {gpu}%.")
+        }
+        _ => "No explicit per-fan speed write was requested.".into(),
+    };
+
+    format!(
+        "Custom fan curve target was applied through direct AcerGamingFunction SetGamingFanSpeed calls without SetGamingFanBehavior(Custom). {context} {speed_detail} {verification}"
+    )
+}
+
+fn build_fan_verification_detail() -> String {
+    let verification = build_fan_verification();
+    if verification.telemetry_available {
+        format!(
+            "Immediate fan telemetry readback {}.",
+            verification.describe()
+        )
+    } else {
+        format!(
+            "Immediate fan telemetry verification is unavailable on this machine. {}",
+            verification.describe()
+        )
+    }
+}
+
+fn build_fan_verification() -> FanVerification {
+    let mut attempts = Vec::new();
+    for attempt in 0..3 {
+        let snapshot = super::acer_wmi::read_firmware_sensor_snapshot().ok();
+        let verification = FanVerification::from_snapshot(snapshot);
+        let complete = verification.telemetry_available
+            && (verification.cpu_fan_rpm.unwrap_or(0) > 0
+                || verification.gpu_fan_rpm.unwrap_or(0) > 0);
+        attempts.push(verification);
+        if complete {
+            break;
+        }
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    attempts.into_iter().last().unwrap_or_default()
+}
+
+#[derive(Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FanVerification {
+    telemetry_available: bool,
+    cpu_fan_rpm: Option<u16>,
+    gpu_fan_rpm: Option<u16>,
+    cpu_temp_c: Option<u16>,
+    gpu_temp_c: Option<u16>,
+    system_temp_c: Option<u16>,
+}
+
+impl FanVerification {
+    fn from_snapshot(snapshot: Option<super::acer_wmi::AcerFirmwareSensorReadback>) -> Self {
+        let Some(snapshot) = snapshot else {
+            return Self::default();
+        };
+
+        Self {
+            telemetry_available: snapshot.cpu_fan_rpm.is_some()
+                || snapshot.gpu_fan_rpm.is_some()
+                || snapshot.cpu_temp_c.is_some()
+                || snapshot.gpu_temp_c.is_some()
+                || snapshot.system_temp_c.is_some(),
+            cpu_fan_rpm: snapshot.cpu_fan_rpm,
+            gpu_fan_rpm: snapshot.gpu_fan_rpm,
+            cpu_temp_c: snapshot.cpu_temp_c,
+            gpu_temp_c: snapshot.gpu_temp_c,
+            system_temp_c: snapshot.system_temp_c,
+        }
+    }
+
+    fn describe(&self) -> String {
+        if !self.telemetry_available {
+            return "Acer GetGamingSysInfo did not return CPU/GPU fan or temperature values."
+                .into();
+        }
+
+        format!(
+            "Acer GetGamingSysInfo reported CPU fan {} RPM, GPU fan {} RPM, CPU temp {}, GPU temp {}, system temp {}.",
+            display_optional_u16(self.cpu_fan_rpm),
+            display_optional_u16(self.gpu_fan_rpm),
+            display_optional_u16(self.cpu_temp_c),
+            display_optional_u16(self.gpu_temp_c),
+            display_optional_u16(self.system_temp_c),
+        )
+    }
+}
+
+fn display_optional_u16(value: Option<u16>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unavailable".into())
 }
 
 #[derive(Default)]

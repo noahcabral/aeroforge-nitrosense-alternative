@@ -77,6 +77,27 @@ This registers `aeroforge-hotkey-helper.exe --daemon` in the logged-in user sess
 npm.cmd run startup:uninstall
 ```
 
+## Support debug bundle
+
+For users who cannot get AeroForge working, send them:
+
+```text
+scripts\AeroForge-Debug-Collector.cmd
+```
+
+They can double-click it or run it from Command Prompt. It creates an
+`AeroForge-Debug-YYYYMMDD-HHMMSS.zip` on their Desktop with service status,
+named-pipe read-only probes, AeroForge logs and state snapshots, filtered Acer /
+Nitro / NVIDIA / WebView diagnostics, Windows event logs, power/display state,
+driver inventory, Defender status, startup entries, update reachability, AMD/CPU
+power diagnostics, read-only Acer WMI probes, and a root `summary.json`.
+
+The collector is read-only. It skips binaries, images, staged update payloads,
+WebView cache/storage folders, and token-like filenames, then redacts common
+token/password/secret strings in copied text files. Launch it with
+`-SampleSeconds 60` when you need a short CPU-frequency, fan-RPM, and AeroForge
+pipe sampling trace for intermittent AMD, power, or fan reports.
+
 ## Notes for backend wiring later
 
 - `src/App.tsx` centralizes the mock state for all primary controls.
@@ -104,17 +125,17 @@ Current fan control path:
 
 - fan profile and custom-curve apply requests flow through the AeroForge service
 - the service calls `ROOT\\WMI` `AcerGamingFunction` directly on supported Acer Nitro hardware
-- `SetGamingFanBehavior` receives Acer behavior inputs for auto, custom, and max fan profiles
+- `SetGamingFanBehavior` receives Acer behavior inputs for auto, max, and mixed custom fan profiles
 - `SetGamingFanSpeed` receives per-fan target inputs for CPU and GPU fan percentages
 - when Custom is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
-- RPM movement is verified separately through telemetry rather than trusting the write call alone
+- RPM movement is verified separately through direct Acer sensor telemetry rather than trusting the write call alone
 - no NitroSense websocket, AcerAgentService PSSDK socket, or PredatorSense pipe dependency is used for AeroForge fan writes
 
 Current power control path:
 
-- Balanced and Turbo use direct `ROOT\\WMI` `AcerGamingFunction` profile writes
-- Custom uses the direct balanced firmware base and then layers the requested Windows processor-state policy
-- Quiet uses a direct NVIDIA NVAPI Whisper path with the verified init-plus-setter sequence instead of NitroSense runtime dependencies
+- Balanced, Performance, Turbo, and Custom base profiles prefer `AcerGamingFunction.SetGamingMiscSetting(0x0B, profile)` platform-profile writes and fall back to legacy `SetGamingProfile` only if the misc-setting path is unavailable
+- Custom layers the requested Windows processor-state policy over the selected firmware base
+- Quiet uses Acer platform profile value `0x00` plus the direct NVIDIA NVAPI Whisper path when available
 - Windows processor-state policy is still applied through `powercfg` and read back afterward for AC/DC verification
 
 Current read-only telemetry coverage:
@@ -123,8 +144,9 @@ Current read-only telemetry coverage:
 - Windows system CPU time sampling for CPU usage
 - standard Windows processor queries for current CPU clock
 - NVIDIA NVML for GPU utilization, temperature, and graphics clock when available
+- direct `AcerGamingFunction.GetGamingSysInfo` reads for CPU/GPU/system temperatures and CPU/GPU fan RPMs when available
 - direct HID status reads for CPU and GPU fan speed on supported Nitro hardware
-- ACPI thermal-zone data for platform thermals on supported systems
+- ACPI thermal-zone data as fallback platform thermals on supported systems
 - independent CPU-package and system-board thermal separation is still incomplete until AeroForge adds deeper EC or ACPI decoding
 
 Clean-room boundary:

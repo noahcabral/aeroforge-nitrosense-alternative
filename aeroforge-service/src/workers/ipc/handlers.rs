@@ -99,6 +99,20 @@ pub fn process_request(
                 message: error.to_string(),
             },
         },
+        PipeRequest::ApplySmartCharging { payload } => {
+            match control::apply_smart_charging(paths, payload) {
+                Ok(applied) => PipeResponse::Ok {
+                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
+                        json!({
+                            "detail": format!("Applied smart charging but failed to serialize response: {error}")
+                        })
+                    }),
+                },
+                Err(error) => PipeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
     }
 }
 

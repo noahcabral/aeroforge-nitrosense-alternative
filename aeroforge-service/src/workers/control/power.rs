@@ -9,8 +9,9 @@ use crate::{
 
 use super::{
     acer_wmi::{
-        apply_gaming_profile, GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE,
-        GAMING_PROFILE_TURBO,
+        apply_gaming_misc_setting, apply_gaming_profile, read_gaming_misc_setting,
+        GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE, GAMING_PROFILE_QUIET,
+        GAMING_PROFILE_TURBO, MISC_SETTING_PLATFORM_PROFILE, MISC_SETTING_SUPPORTED_PROFILES,
     },
     models::{
         AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, CustomPowerBaseId, PowerProfileId,
@@ -90,6 +91,7 @@ pub fn apply_power_profile(
     Ok(AppliedPowerProfileSnapshot {
         profile_id,
         processor_state,
+        custom_base_profile: request.custom_base_profile.clone(),
         readback,
         drift_detected,
         applied_at_unix: unix_timestamp(),
@@ -123,30 +125,33 @@ fn apply_operating_mode(
 ) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
     match profile_id {
         PowerProfileId::BatteryGuard => {
-            let whisper = set_whisper_mode(true)?;
-            Ok(AppliedOperatingMode {
-                detail: format_whisper_detail(
-                    "Applied direct NVIDIA Whisper quiet state",
-                    &whisper,
+            let firmware_detail = apply_acer_platform_profile_or_fallback(
+                "quiet",
+                u64::from(GAMING_PROFILE_QUIET),
+                false,
+                None,
+            );
+            let whisper_detail = match set_whisper_mode(true) {
+                Ok(whisper) => {
+                    format_whisper_detail("Applied direct NVIDIA Whisper quiet state", &whisper)
+                }
+                Err(error) => format!(
+                    "NVIDIA Whisper quiet state was unavailable: {error}. Continuing with Windows processor policy."
                 ),
+            };
+            Ok(AppliedOperatingMode {
+                detail: format!("{firmware_detail} {whisper_detail}"),
             })
         }
         PowerProfileId::Balanced => {
-            apply_acer_profile_with_whisper_clear(
-                profile_id,
-                GAMING_PROFILE_BALANCED,
-                false,
-                None,
-            )
+            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_BALANCED, false, None)
         }
-        PowerProfileId::Performance => {
-            apply_acer_profile_with_whisper_clear(
-                profile_id,
-                GAMING_PROFILE_PERFORMANCE,
-                false,
-                None,
-            )
-        }
+        PowerProfileId::Performance => apply_acer_profile_with_whisper_clear(
+            profile_id,
+            GAMING_PROFILE_PERFORMANCE,
+            false,
+            None,
+        ),
         PowerProfileId::Turbo => {
             apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_TURBO, false, None)
         }
@@ -180,54 +185,241 @@ fn apply_acer_profile_with_whisper_clear(
     balanced_base_for_custom: bool,
     custom_base_label: Option<&'static str>,
 ) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
-    let result = apply_gaming_profile(input)?;
-    let gm_output = result.output.ok_or_else(|| {
-        format!(
-            "AcerGamingFunction {} did not return gmOutput for {} mode.",
-            result.method,
-            profile_label(profile_id)
-        )
-    })?;
+    let firmware_detail = apply_acer_platform_profile_or_fallback(
+        profile_label(profile_id),
+        input,
+        balanced_base_for_custom,
+        custom_base_label,
+    );
 
-    if gm_output != 1 {
-        return Err(format!(
-            "{} mode was rejected by direct AcerGamingFunction control with gmOutput {}.",
-            profile_label(profile_id),
-            gm_output
-        )
-        .into());
-    }
-
-    let whisper = set_whisper_mode(false).map_err(|error| {
-        format!(
-            "{} mode reached its AcerGamingFunction base but failed to clear NVIDIA Whisper state: {}",
-            profile_label(profile_id),
-            error
-        )
-    })?;
-
-    let firmware_detail = if balanced_base_for_custom {
-        format!(
-            "Applied AcerGamingFunction {} base mode with SetGamingProfile({}) and gmOutput {} before layering the custom processor policy.",
-            custom_base_label.unwrap_or("performance"),
-            result.input,
-            gm_output
-        )
-    } else {
-        format!(
-            "Applied AcerGamingFunction {} mode with SetGamingProfile({}) and gmOutput {}.",
-            profile_label(profile_id),
-            result.input,
-            gm_output
-        )
+    let whisper_detail = match set_whisper_mode(false) {
+        Ok(whisper) => format_whisper_detail("Cleared NVIDIA Whisper state", &whisper),
+        Err(error) => format!("NVIDIA Whisper clear was unavailable: {error}."),
     };
 
     Ok(AppliedOperatingMode {
-        detail: format!(
-            "{firmware_detail} {}",
-            format_whisper_detail("Cleared NVIDIA Whisper state", &whisper)
-        ),
+        detail: format!("{firmware_detail} {whisper_detail}"),
     })
+}
+
+fn apply_acer_platform_profile_or_fallback(
+    profile_label: &str,
+    input: u64,
+    balanced_base_for_custom: bool,
+    custom_base_label: Option<&'static str>,
+) -> String {
+    let supported_profiles_raw = read_misc_value_byte(MISC_SETTING_SUPPORTED_PROFILES);
+    let current_before = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
+    let value = u8::try_from(input).unwrap_or_default();
+    let supported_detail = describe_supported_profiles(&supported_profiles_raw, value);
+    let before_detail = match current_before {
+        Ok(Some(value)) => format!("Current platform profile before apply read as 0x{value:02X}."),
+        Ok(None) => "Current platform profile before apply returned no gmOutput byte.".into(),
+        Err(error) => format!("Current platform profile before apply was unavailable: {error}."),
+    };
+
+    let misc_result = apply_gaming_misc_setting(MISC_SETTING_PLATFORM_PROFILE, value);
+    let after_misc = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
+    match misc_result {
+        Ok(result) if misc_setting_output_accepted(result.output) => {
+            let misc_confirmed = profile_readback_matches(&after_misc, value);
+            let mode_label = if balanced_base_for_custom {
+                custom_base_label.unwrap_or("performance")
+            } else {
+                profile_label
+            };
+            if misc_confirmed {
+                return format!(
+                    "Confirmed AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. {supported_detail} {before_detail} {}",
+                    result.output,
+                    describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+                );
+            }
+            return format!(
+                "AcerGamingFunction accepted SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}, but the follow-up platform-profile readback did not confirm the target. {supported_detail} {before_detail} {} {}",
+                result.output,
+                describe_profile_readback("Current platform profile after misc-setting write", &after_misc),
+                apply_legacy_gaming_profile(
+                    profile_label,
+                    input,
+                    value,
+                    balanced_base_for_custom,
+                    custom_base_label,
+                )
+            );
+        }
+        Ok(result) => {
+            let fallback = apply_legacy_gaming_profile(
+                profile_label,
+                input,
+                value,
+                balanced_base_for_custom,
+                custom_base_label,
+            );
+            return format!(
+                "AcerGamingFunction rejected platform profile SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}. {supported_detail} {before_detail} {} {fallback}",
+                result.output,
+                describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+            );
+        }
+        Err(error) => {
+            let fallback = apply_legacy_gaming_profile(
+                profile_label,
+                input,
+                value,
+                balanced_base_for_custom,
+                custom_base_label,
+            );
+            return format!(
+                "AcerGamingFunction platform profile misc-setting write unavailable: {error}. {supported_detail} {before_detail} {} {fallback}",
+                describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+            );
+        }
+    }
+}
+
+fn apply_legacy_gaming_profile(
+    profile_label: &str,
+    input: u64,
+    target_profile_value: u8,
+    balanced_base_for_custom: bool,
+    custom_base_label: Option<&'static str>,
+) -> String {
+    match apply_gaming_profile(input) {
+        Ok(result) => {
+            let after_legacy = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
+            let gm_output = result.output;
+            let readback_confirmed = profile_readback_matches(&after_legacy, target_profile_value);
+            if readback_confirmed || legacy_gaming_profile_output_accepted(gm_output) {
+                if balanced_base_for_custom {
+                    let verb = if readback_confirmed {
+                        "Confirmed"
+                    } else {
+                        "Accepted but did not confirm"
+                    };
+                    format!(
+                        "{verb} AcerGamingFunction {} base mode with SetGamingProfile({}) and gmOutput {:?} before layering the custom processor policy. {}",
+                        custom_base_label.unwrap_or("performance"),
+                        result.input,
+                        gm_output,
+                        describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                    )
+                } else {
+                    let verb = if readback_confirmed {
+                        "Confirmed"
+                    } else {
+                        "Accepted but did not confirm"
+                    };
+                    format!(
+                        "{verb} AcerGamingFunction {} mode with SetGamingProfile({}) and gmOutput {:?}. {}",
+                        profile_label,
+                        result.input,
+                        gm_output,
+                        describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                    )
+                }
+            } else if balanced_base_for_custom {
+                format!(
+                    "AcerGamingFunction rejected the {} base mode for Custom with SetGamingProfile({}) and gmOutput {:?}. {} Continuing with Windows processor policy only.",
+                    custom_base_label.unwrap_or("performance"),
+                    result.input,
+                    gm_output,
+                    describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                )
+            } else {
+                format!(
+                    "AcerGamingFunction rejected {} mode with SetGamingProfile({}) and gmOutput {:?}. {} Continuing with Windows processor policy only.",
+                    profile_label,
+                    result.input,
+                    gm_output,
+                    describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                )
+            }
+        }
+        Err(error) => format!(
+            "AcerGamingFunction {} mode write was unavailable: {error}. Continuing with Windows processor policy only.",
+            profile_label
+        ),
+    }
+}
+
+fn misc_setting_output_accepted(output: Option<u64>) -> bool {
+    matches!(output, None | Some(0) | Some(1))
+}
+
+fn legacy_gaming_profile_output_accepted(output: Option<u64>) -> bool {
+    matches!(output, None | Some(0) | Some(1))
+}
+
+fn describe_supported_profiles(
+    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
+    target_profile_value: u8,
+) -> String {
+    match result {
+        Ok(Some(mask)) => {
+            let names = supported_profile_names(*mask);
+            let target_state = if supported_profile_mask_contains(*mask, target_profile_value) {
+                "advertised"
+            } else {
+                "not advertised"
+            };
+            format!(
+                "SupportedProfiles raw bitmask 0x{mask:02X} advertises [{}]; target 0x{target_profile_value:02X} is {target_state}. AeroForge still records write/readback behavior because some Windows providers under-report this bitmask.",
+                names.join(", ")
+            )
+        }
+        Ok(None) => "SupportedProfiles probe returned no gmOutput byte.".into(),
+        Err(error) => format!("SupportedProfiles probe unavailable: {error}."),
+    }
+}
+
+fn supported_profile_mask_contains(mask: u8, profile: u8) -> bool {
+    profile < 8 && (mask & (1u8 << profile)) != 0
+}
+
+fn supported_profile_names(mask: u8) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for (bit, name) in [
+        (0, "quiet"),
+        (1, "balanced"),
+        (4, "performance"),
+        (5, "turbo"),
+        (6, "eco"),
+    ] {
+        if (mask & (1u8 << bit)) != 0 {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        names.push("none");
+    }
+    names
+}
+
+fn read_misc_value_byte(
+    setting: u8,
+) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(read_gaming_misc_setting(setting)?
+        .output
+        .map(|value| (value & 0xFF) as u8))
+}
+
+fn profile_readback_matches(
+    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
+    expected: u8,
+) -> bool {
+    matches!(result, Ok(Some(value)) if *value == expected)
+}
+
+fn describe_profile_readback(
+    label: &str,
+    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
+) -> String {
+    match result {
+        Ok(Some(value)) => format!("{label} read as 0x{value:02X}."),
+        Ok(None) => format!("{label} returned no gmOutput byte."),
+        Err(error) => format!("{label} was unavailable: {error}."),
+    }
 }
 
 fn custom_base_profile_details(custom_base: &CustomPowerBaseId) -> (u64, &'static str) {

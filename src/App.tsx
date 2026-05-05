@@ -8,7 +8,9 @@ import {
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
 import aeroforgeMark from './assets/aeroforge-mark.png'
+import aeroforgeWordmark from './assets/aeroforge-wordmark.png'
 import {
+  applyAutoRefreshRate,
   applyBlueLightFilter,
   applyBootLogo,
   applyCustomFanCurves,
@@ -28,7 +30,9 @@ import {
   stageUpdateDownload,
   type CapabilitySnapshot,
   type ControlSnapshot,
+  type BootArtId,
   type CustomPowerBaseId,
+  type FeatureSupport,
   type LiveControlSnapshot,
   type ServiceStatus,
   type TelemetrySnapshot,
@@ -86,6 +90,8 @@ type PersistControlOverrides = {
   customCurves?: CurveSet
   fanSyncLockEnabled?: boolean
   smartChargingEnabled?: boolean
+  autoRefreshRateOnBatteryEnabled?: boolean
+  autoRefreshRateRestoreHz?: number | null
   blueLightFilterEnabled?: boolean
   selectedBootArt?: string
   customBootFilename?: string
@@ -519,6 +525,11 @@ type PreparedBootLogo = {
   imageBase64: string
 }
 
+type BootArtworkTheme = {
+  glowColor: string
+  gradientStops: [string, string, string]
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -542,8 +553,167 @@ function buildJpegBootLogoName(fileName: string) {
   return `${stem}.jpg`
 }
 
+function buildGifBootLogoName(fileName: string) {
+  const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
+  return `${stem}.gif`
+}
+
+function base64PayloadFromDataUrl(dataUrl: string) {
+  const payload = dataUrl.split(',')[1]
+  if (!payload) {
+    throw new Error('Unable to encode boot-logo image.')
+  }
+  return payload
+}
+
+function buildPresetBootLogoName(art: BootArt) {
+  return `aeroforge-${art.id}-boot-logo.jpg`
+}
+
+function getBootArtworkTheme(art: BootArt): BootArtworkTheme {
+  switch (art.id) {
+    case 'arc':
+      return {
+        glowColor: 'rgba(133, 224, 255, 0.35)',
+        gradientStops: ['#09141d', '#173d5a', '#4594bb'],
+      }
+    case 'slate':
+      return {
+        glowColor: 'rgba(255, 255, 255, 0.22)',
+        gradientStops: ['#15181e', '#414a59', '#6c7585'],
+      }
+    case 'ember':
+    default:
+      return {
+        glowColor: 'rgba(255, 170, 92, 0.34)',
+        gradientStops: ['#30170f', '#9d4d2e', '#cb8a53'],
+      }
+  }
+}
+
+function drawBootArtworkBackground(
+  context: CanvasRenderingContext2D,
+  art: BootArt,
+  width: number,
+  height: number,
+) {
+  const theme = getBootArtworkTheme(art)
+  const background = context.createLinearGradient(0, 0, width, height)
+  background.addColorStop(0, theme.gradientStops[0])
+  background.addColorStop(0.58, theme.gradientStops[1])
+  background.addColorStop(1, theme.gradientStops[2])
+  context.fillStyle = background
+  context.fillRect(0, 0, width, height)
+
+  const glow =
+    art.layout === 'center'
+      ? context.createRadialGradient(
+          width * 0.5,
+          height * 0.52,
+          0,
+          width * 0.5,
+          height * 0.52,
+          width * 0.34,
+        )
+      : context.createRadialGradient(
+          width * 0.28,
+          height * 0.28,
+          0,
+          width * 0.28,
+          height * 0.28,
+          width * 0.36,
+        )
+  glow.addColorStop(0, theme.glowColor)
+  glow.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  context.fillStyle = glow
+  context.fillRect(0, 0, width, height)
+}
+
+async function preparePresetBootLogo(art: BootArt): Promise<PreparedBootLogo> {
+  const width = 1920
+  const height = 1080
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Unable to prepare boot-logo canvas.')
+  }
+
+  drawBootArtworkBackground(context, art, width, height)
+
+  const [markImage, wordmarkImage] = await Promise.all([
+    loadImageElement(aeroforgeMark),
+    loadImageElement(aeroforgeWordmark),
+  ])
+
+  context.textBaseline = 'top'
+  context.shadowColor = 'rgba(0, 0, 0, 0.34)'
+  context.shadowBlur = 28
+  context.shadowOffsetY = 12
+
+  if (art.layout === 'center') {
+    const markWidth = 340
+    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
+    context.drawImage(markImage, (width - markWidth) / 2, 180, markWidth, markHeight)
+    context.shadowBlur = 0
+    context.shadowOffsetY = 0
+    context.fillStyle = '#f6f1ea'
+    context.font = '700 118px "Segoe UI", Arial, sans-serif'
+    context.textAlign = 'center'
+    context.fillText(art.headline, width / 2, 620)
+    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
+    context.font = '500 40px "Segoe UI", Arial, sans-serif'
+    context.fillText(art.subline.toUpperCase(), width / 2, 760)
+  } else if (art.layout === 'banner') {
+    const wordmarkWidth = 760
+    const wordmarkHeight = (wordmarkImage.naturalHeight / wordmarkImage.naturalWidth) * wordmarkWidth
+    context.drawImage(wordmarkImage, 170, 650, wordmarkWidth, wordmarkHeight)
+    const markWidth = 270
+    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
+    context.drawImage(markImage, 1430, 130, markWidth, markHeight)
+    context.shadowBlur = 0
+    context.shadowOffsetY = 0
+    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
+    context.font = '500 38px "Segoe UI", Arial, sans-serif'
+    context.textAlign = 'left'
+    context.fillText(art.subline.toUpperCase(), 182, 845)
+  } else {
+    const markWidth = 280
+    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
+    context.drawImage(markImage, 170, 140, markWidth, markHeight)
+    context.shadowBlur = 0
+    context.shadowOffsetY = 0
+    context.drawImage(
+      wordmarkImage,
+      180,
+      700,
+      760,
+      (wordmarkImage.naturalHeight / wordmarkImage.naturalWidth) * 760,
+    )
+    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
+    context.font = '500 38px "Segoe UI", Arial, sans-serif'
+    context.textAlign = 'left'
+    context.fillText(art.subline.toUpperCase(), 190, 830)
+  }
+
+  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.94)
+  return {
+    fileName: buildPresetBootLogoName(art),
+    imageBase64: base64PayloadFromDataUrl(jpegDataUrl),
+  }
+}
+
 async function prepareBootLogoUpload(file: File): Promise<PreparedBootLogo> {
   const sourceDataUrl = await readFileAsDataUrl(file)
+  if (file.type === 'image/gif' || /\.gif$/i.test(file.name)) {
+    return {
+      fileName: buildGifBootLogoName(file.name),
+      imageBase64: base64PayloadFromDataUrl(sourceDataUrl),
+    }
+  }
+
   const image = await loadImageElement(sourceDataUrl)
   const maxWidth = Math.max(1, Math.floor(window.screen.width * 0.4))
   const maxHeight = Math.max(1, Math.floor(window.screen.height * 0.4))
@@ -564,14 +734,10 @@ async function prepareBootLogoUpload(file: File): Promise<PreparedBootLogo> {
   context.drawImage(image, 0, 0, width, height)
 
   const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-  const imageBase64 = jpegDataUrl.split(',')[1]
-  if (!imageBase64) {
-    throw new Error('Unable to encode boot-logo JPEG.')
-  }
 
   return {
     fileName: buildJpegBootLogoName(file.name),
-    imageBase64,
+    imageBase64: base64PayloadFromDataUrl(jpegDataUrl),
   }
 }
 
@@ -720,6 +886,26 @@ function describeTelemetrySource(
   }
 
   return hasUsableTelemetry(telemetry) ? 'Cached service state' : 'No telemetry'
+}
+
+function describeFeatureSupport(
+  feature: FeatureSupport | null | undefined,
+  unsupportedDetail: string,
+  stagedDetail?: string,
+) {
+  if (!feature) {
+    return null
+  }
+
+  if (!feature.available) {
+    return unsupportedDetail
+  }
+
+  if (!feature.writable) {
+    return stagedDetail ?? unsupportedDetail
+  }
+
+  return null
 }
 
 function buildCpuThermalSummary(
@@ -881,6 +1067,8 @@ function buildControlSnapshotForPersistence(input: {
   customCurves: CurveSet
   fanSyncLockEnabled: boolean
   smartChargingEnabled: boolean
+  autoRefreshRateOnBatteryEnabled: boolean
+  autoRefreshRateRestoreHz: number | null
   usbPowerEnabled: boolean
   blueLightFilterEnabled: boolean
   selectedBootArt: string
@@ -907,6 +1095,8 @@ function buildControlSnapshotForPersistence(input: {
       smartChargingEnabled: input.smartChargingEnabled,
       usbPowerEnabled: input.usbPowerEnabled,
       blueLightFilterEnabled: input.blueLightFilterEnabled,
+      autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
+      autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
       selectedBootArt: input.selectedBootArt as ControlSnapshot['personalSettings']['selectedBootArt'],
       customBootFilename: input.customBootFilename,
       updateChannel: input.updateChannel,
@@ -935,6 +1125,7 @@ function applyBackendControlSnapshot(
   setCustomBootFilename: (filename: string) => void,
   setUpdateChannel: (channel: UpdateChannel) => void,
   setCheckForUpdatesOnLaunch: (enabled: boolean) => void,
+  setAutoRefreshRateSettings?: (enabled: boolean, restoreHz: number | null) => void,
 ) {
   applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
   setCustomPowerBase(controls.customPowerBase)
@@ -954,6 +1145,10 @@ function applyBackendControlSnapshot(
   setSmartChargingEnabled(controls.personalSettings.smartChargingEnabled)
   setUsbPowerEnabled(controls.personalSettings.usbPowerEnabled)
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
+  setAutoRefreshRateSettings?.(
+    controls.personalSettings.autoRefreshRateOnBatteryEnabled,
+    controls.personalSettings.autoRefreshRateRestoreHz,
+  )
   setSelectedBootArt(controls.personalSettings.selectedBootArt)
   setCustomBootFilename(controls.personalSettings.customBootFilename)
   setUpdateChannel('stable')
@@ -976,7 +1171,7 @@ function App() {
   const runtimeEstimateSessionRef = useRef(false)
   const [activeTab, setActiveTab] = useState<ControlTab>('home')
   const [activePowerProfile, setActivePowerProfile] =
-    useState<PowerProfile['id']>('balanced')
+    useState<PowerProfile['id']>('turbo')
   const [customProcessorState, setCustomProcessorState] = useState({
     min: 35,
     max: 88,
@@ -1006,6 +1201,14 @@ function App() {
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
   const [blueLightFilterEnabled, setBlueLightFilterEnabled] = useState(false)
   const blueLightFilterEnabledRef = useRef(false)
+  const [autoRefreshRateOnBatteryEnabled, setAutoRefreshRateOnBatteryEnabled] =
+    useState(false)
+  const autoRefreshRateOnBatteryEnabledRef = useRef(false)
+  const [autoRefreshRateRestoreHz, setAutoRefreshRateRestoreHz] = useState<number | null>(
+    null,
+  )
+  const autoRefreshRateRestoreHzRef = useRef<number | null>(null)
+  const autoRefreshRateSyncKeyRef = useRef<string | null>(null)
   const [selectedBootArt, setSelectedBootArt] = useState<string>('ember')
   const [customBootPreview, setCustomBootPreview] = useState<string | null>(null)
   const [customBootFilename, setCustomBootFilename] = useState<string>('custom-boot.png')
@@ -1020,9 +1223,9 @@ function App() {
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
   const [settingsActionPending, setSettingsActionPending] = useState<
-    null | 'smart-charge' | 'blue-light' | 'boot-logo'
+    null | 'smart-charge' | 'blue-light' | 'boot-logo' | 'refresh-rate'
   >(null)
-  const [glowTarget, setGlowTarget] = useState<string>('balanced')
+  const [glowTarget, setGlowTarget] = useState<string>('turbo')
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
   const [serviceConnected, setServiceConnected] = useState(false)
   const serviceConnectedRef = useRef(false)
@@ -1073,6 +1276,7 @@ function App() {
   const smartChargePending = settingsActionPending === 'smart-charge'
   const blueLightPending = settingsActionPending === 'blue-light'
   const bootLogoPending = settingsActionPending === 'boot-logo'
+  const refreshRatePending = settingsActionPending === 'refresh-rate'
   const currentPowerProfile = powerProfiles.find(
     (profile) => profile.id === activePowerProfile,
   )!
@@ -1081,10 +1285,31 @@ function App() {
     customPowerBaseOptions[1]
   const currentFanProfile = fanProfiles.find((profile) => profile.id === activeFanProfile)!
   const currentBootArt = bootArtwork.find((art) => art.id === selectedBootArt)
-  const bootLogoWritable = backendCapabilities?.bootLogo.writable ?? false
-  const bootLogoDisabledReason = bootLogoWritable
+  const smartChargeDisabledReason = describeFeatureSupport(
+    backendCapabilities?.smartCharging,
+    'Battery-health charging control is not available on this machine.',
+  )
+  const usbPowerDisabledReason = describeFeatureSupport(
+    backendCapabilities?.usbPower,
+    'Power-off USB charging is not available on this machine.',
+    'Power-off USB charging is still not wired to a verified Windows hardware path in AeroForge.',
+  )
+  const blueLightDisabledReason = describeFeatureSupport(
+    backendCapabilities?.blueLightFilter,
+    'AeroForge could not expose the blue light filter on this machine.',
+  )
+  const bootLogoDisabledReason = describeFeatureSupport(
+    backendCapabilities?.bootLogo,
+    'Boot-logo apply requires the AeroForge service and an unambiguous EFI System Partition.',
+  )
+  const smartChargeWritable = !smartChargeDisabledReason
+  const usbPowerVisible = backendCapabilities?.usbPower.available ?? false
+  const usbPowerWritable = !usbPowerDisabledReason
+  const blueLightWritable = !blueLightDisabledReason
+  const bootLogoWritable = !bootLogoDisabledReason
+  const bootLogoStatusText = bootLogoWritable
     ? null
-    : 'Boot-logo firmware apply is disabled until AeroForge has a verified direct hardware path.'
+    : bootLogoDisabledReason
   const runtimeCustomOcSlot =
     activeOcSlot === customOcSlot.id
       ? {
@@ -1203,6 +1428,13 @@ function App() {
     setBlueLightFilterEnabled(enabled)
   }
 
+  function commitAutoRefreshRateSettings(enabled: boolean, restoreHz: number | null) {
+    autoRefreshRateOnBatteryEnabledRef.current = enabled
+    autoRefreshRateRestoreHzRef.current = restoreHz
+    setAutoRefreshRateOnBatteryEnabled(enabled)
+    setAutoRefreshRateRestoreHz(restoreHz)
+  }
+
   function updateSerializedState<T>(
     ref: { current: string | null },
     value: T | null,
@@ -1248,6 +1480,11 @@ function App() {
     const nextFanSyncLockEnabled = overrides?.fanSyncLockEnabled ?? fanSyncLockEnabled
     const nextSmartChargingEnabled =
       overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
+    const nextAutoRefreshRateOnBatteryEnabled =
+      overrides?.autoRefreshRateOnBatteryEnabled ??
+      autoRefreshRateOnBatteryEnabledRef.current
+    const nextAutoRefreshRateRestoreHz =
+      overrides?.autoRefreshRateRestoreHz ?? autoRefreshRateRestoreHzRef.current
     const nextBlueLightFilterEnabled =
       overrides?.blueLightFilterEnabled ?? blueLightFilterEnabledRef.current
     const nextSelectedBootArt = overrides?.selectedBootArt ?? selectedBootArt
@@ -1271,6 +1508,8 @@ function App() {
           customCurves: nextCustomCurves,
           fanSyncLockEnabled: nextFanSyncLockEnabled,
           smartChargingEnabled: nextSmartChargingEnabled,
+          autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
+          autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
           usbPowerEnabled,
           blueLightFilterEnabled: nextBlueLightFilterEnabled,
           selectedBootArt: nextSelectedBootArt,
@@ -1298,6 +1537,8 @@ function App() {
     customProcessorState.max,
     customPowerBase,
     smartChargingEnabled,
+    autoRefreshRateOnBatteryEnabled,
+    autoRefreshRateRestoreHz,
     usbPowerEnabled,
     blueLightFilterEnabled,
     selectedBootArt,
@@ -1471,6 +1712,56 @@ function App() {
   }
   pushTransportDebugEventRef.current = pushTransportDebugEvent
   pushPollHeartbeatEventRef.current = pushPollHeartbeat
+
+  async function syncAutoRefreshRateState(
+    enabled: boolean,
+    onBattery: boolean,
+    announce: boolean,
+  ) {
+    const result = await applyAutoRefreshRate(enabled, onBattery)
+    commitAutoRefreshRateSettings(
+      result.controls.personalSettings.autoRefreshRateOnBatteryEnabled,
+      result.controls.personalSettings.autoRefreshRateRestoreHz,
+    )
+    autoRefreshRateSyncKeyRef.current = `${result.enabled}:${result.onBattery}:${
+      result.restoreHz ?? 'none'
+    }`
+
+    if (announce || result.appliedHz !== null) {
+      setStatusMessage(result.detail)
+    }
+    if (result.appliedHz !== null) {
+      pushDebugEvent(result.detail)
+    }
+
+    return result
+  }
+
+  useEffect(() => {
+    if (displayedAcPluggedIn === null) {
+      return
+    }
+    if (!autoRefreshRateOnBatteryEnabled && autoRefreshRateRestoreHz === null) {
+      return
+    }
+
+    const onBattery = displayedAcPluggedIn === false
+    const syncKey = `${autoRefreshRateOnBatteryEnabled}:${onBattery}:${
+      autoRefreshRateRestoreHz ?? 'none'
+    }`
+
+    if (autoRefreshRateSyncKeyRef.current === syncKey) {
+      return
+    }
+
+    autoRefreshRateSyncKeyRef.current = syncKey
+    void syncAutoRefreshRateState(autoRefreshRateOnBatteryEnabled, onBattery, false).catch(
+      (error) => {
+        autoRefreshRateSyncKeyRef.current = null
+        pushDebugEvent(`auto refresh-rate sync failed: ${describeError(error)}`)
+      },
+    )
+  }, [autoRefreshRateOnBatteryEnabled, autoRefreshRateRestoreHz, displayedAcPluggedIn])
 
   useEffect(() => {
     if (displayedAcPluggedIn === true) {
@@ -1734,6 +2025,7 @@ function App() {
             setCustomBootFilename,
             setUpdateChannel,
             setCheckForUpdatesOnLaunch,
+            commitAutoRefreshRateSettings,
           )
           setBackendVersion(runtime.backendVersion)
           setUpdateStatus(updater)
@@ -2308,7 +2600,7 @@ function App() {
 
     try {
       const prepared = await prepareBootLogoUpload(file)
-      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64)
+      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, 'custom')
       applyBackendControlSnapshot(
         result.controls,
         setActivePowerProfile,
@@ -2340,6 +2632,57 @@ function App() {
     } finally {
       setSettingsActionPending((current) => (current === 'boot-logo' ? null : current))
       event.target.value = ''
+    }
+  }
+
+  async function handleBootArtworkApply(art: BootArt) {
+    if (!bootLogoWritable || settingsActionPending) {
+      setStatusMessage(bootLogoDisabledReason ?? 'Boot-logo replacement is disabled.')
+      return
+    }
+
+    setSelectedBootArt(art.id)
+    pulseControl('boot-upload')
+    setSettingsActionPending('boot-logo')
+    setStatusMessage(`Preparing ${art.name} for boot-logo apply...`)
+
+    try {
+      const prepared = await preparePresetBootLogo(art)
+      const result = await applyBootLogo(
+        prepared.fileName,
+        prepared.imageBase64,
+        art.id as BootArtId,
+      )
+      applyBackendControlSnapshot(
+        result.controls,
+        setActivePowerProfile,
+        setCustomProcessorState,
+        setCustomPowerBase,
+        setGpuOverclock,
+        setCustomOcSlot,
+        setActiveOcSlot,
+        setOcApplyState,
+        setOcTuningLocked,
+        setActiveFanProfile,
+        commitCustomCurves,
+        setFanSyncLockEnabled,
+        commitSmartChargingEnabled,
+        setUsbPowerEnabled,
+        commitBlueLightFilterEnabled,
+        setSelectedBootArt,
+        setCustomBootFilename,
+        setUpdateChannel,
+        setCheckForUpdatesOnLaunch,
+      )
+      await persistStagedControls({
+        selectedBootArt: art.id,
+        customBootFilename: prepared.fileName,
+      })
+      setStatusMessage(result.detail)
+    } catch (error) {
+      setStatusMessage(`Boot-logo apply failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'boot-logo' ? null : current))
     }
   }
 
@@ -2405,7 +2748,10 @@ function App() {
   }
 
   async function handleBlueLightFilterToggle() {
-    if (settingsActionPending) {
+    if (settingsActionPending || !blueLightWritable) {
+      if (!blueLightWritable && blueLightDisabledReason) {
+        setStatusMessage(blueLightDisabledReason)
+      }
       return
     }
 
@@ -2432,8 +2778,46 @@ function App() {
     }
   }
 
+  async function handleAutoRefreshRateToggle() {
+    if (settingsActionPending) {
+      return
+    }
+
+    const previousEnabled = autoRefreshRateOnBatteryEnabledRef.current
+    const previousRestoreHz = autoRefreshRateRestoreHzRef.current
+    const nextEnabled = !previousEnabled
+    const onBattery = displayedAcPluggedIn === false
+
+    setSettingsActionPending('refresh-rate')
+    commitAutoRefreshRateSettings(nextEnabled, previousRestoreHz)
+    autoRefreshRateSyncKeyRef.current = `${nextEnabled}:${onBattery}:${
+      previousRestoreHz ?? 'none'
+    }`
+    setStatusMessage(
+      nextEnabled
+        ? 'Arming automatic 60 Hz display mode for battery power...'
+        : 'Disabling automatic 60 Hz display mode and restoring the saved refresh rate...',
+    )
+
+    try {
+      const result = await syncAutoRefreshRateState(nextEnabled, onBattery, true)
+      autoRefreshRateSyncKeyRef.current = `${result.enabled}:${result.onBattery}:${
+        result.restoreHz ?? 'none'
+      }`
+    } catch (error) {
+      commitAutoRefreshRateSettings(previousEnabled, previousRestoreHz)
+      autoRefreshRateSyncKeyRef.current = null
+      setStatusMessage(`Auto 60 Hz apply failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'refresh-rate' ? null : current))
+    }
+  }
+
   async function handleSmartChargingMode(nextEnabled: boolean) {
-    if (settingsActionPending || nextEnabled === smartChargingEnabled) {
+    if (settingsActionPending || nextEnabled === smartChargingEnabled || !smartChargeWritable) {
+      if (!smartChargeWritable && smartChargeDisabledReason) {
+        setStatusMessage(smartChargeDisabledReason)
+      }
       return
     }
 
@@ -2443,7 +2827,7 @@ function App() {
     commitSmartChargingEnabled(nextEnabled)
     setStatusMessage(
       nextEnabled
-        ? 'Applying optimized battery charging through Acer Care Center...'
+        ? 'Applying optimized battery charging through Acer battery control...'
         : 'Clearing the battery-health cap for full charging...',
     )
 
@@ -2615,6 +2999,8 @@ function App() {
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
+          autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
+          autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -2657,6 +3043,8 @@ function App() {
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
+          autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
+          autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -3391,7 +3779,7 @@ function App() {
                             className={`charge-mode-card ${
                               smartChargingEnabled ? 'is-selected' : ''
                             }`}
-                            disabled={settingsActionPending !== null}
+                            disabled={settingsActionPending !== null || !smartChargeWritable}
                             onClick={() => void handleSmartChargingMode(true)}
                             type="button"
                           >
@@ -3410,7 +3798,7 @@ function App() {
                             className={`charge-mode-card ${
                               !smartChargingEnabled ? 'is-selected' : ''
                             }`}
-                            disabled={settingsActionPending !== null}
+                            disabled={settingsActionPending !== null || !smartChargeWritable}
                             onClick={() => void handleSmartChargingMode(false)}
                             type="button"
                           >
@@ -3428,26 +3816,70 @@ function App() {
                           </button>
                         </div>
 
+                        {smartChargeDisabledReason && (
+                          <div className="settings-note">
+                            <div>
+                              <span className="eyebrow">Charge Control Unavailable</span>
+                              <strong>Battery-health switching is disabled</strong>
+                              <p>{smartChargeDisabledReason}</p>
+                            </div>
+                          </div>
+                        )}
+
+                        {usbPowerVisible && (
+                          <div className="personal-setting-block">
+                            <div>
+                              <strong>Power-off USB Charger</strong>
+                              <p>
+                                Keep the designated USB port powered for accessories even when the
+                                laptop is sleeping or shut down.
+                              </p>
+                              {usbPowerDisabledReason && <small>{usbPowerDisabledReason}</small>}
+                            </div>
+
+                            <button
+                              className={`toggle ${usbPowerEnabled ? 'is-on' : ''}`}
+                              disabled={!usbPowerWritable}
+                              onClick={() => {
+                                if (usbPowerDisabledReason) {
+                                  setStatusMessage(usbPowerDisabledReason)
+                                  return
+                                }
+
+                                setUsbPowerEnabled((current) => !current)
+                                setStatusMessage(
+                                  usbPowerEnabled
+                                    ? 'Power-off USB charging disabled in the preview.'
+                                    : 'Power-off USB charging enabled in the preview.',
+                                )
+                              }}
+                              aria-pressed={usbPowerEnabled}
+                              type="button"
+                            >
+                              <span />
+                            </button>
+                          </div>
+                        )}
+
                         <div className="personal-setting-block">
                           <div>
-                            <strong>Power-off USB Charger</strong>
+                            <strong>Auto 60 Hz on Battery</strong>
                             <p>
-                              Keep the designated USB port powered for accessories even when the
-                              laptop is sleeping or shut down.
+                              {refreshRatePending
+                                ? 'Applying the display refresh-rate rule now.'
+                                : autoRefreshRateOnBatteryEnabled
+                                  ? autoRefreshRateRestoreHz
+                                    ? `Battery mode will use 60 Hz, then restore ${autoRefreshRateRestoreHz} Hz on AC power.`
+                                    : 'Battery mode will use 60 Hz when AeroForge detects unplugged power.'
+                                  : 'Switches the display to 60 Hz on battery and restores the previous refresh rate on AC power.'}
                             </p>
                           </div>
 
                           <button
-                            className={`toggle ${usbPowerEnabled ? 'is-on' : ''}`}
-                            onClick={() => {
-                              setUsbPowerEnabled((current) => !current)
-                              setStatusMessage(
-                                usbPowerEnabled
-                                  ? 'Power-off USB charging disabled in the preview.'
-                                  : 'Power-off USB charging enabled in the preview.',
-                              )
-                            }}
-                            aria-pressed={usbPowerEnabled}
+                            className={`toggle ${autoRefreshRateOnBatteryEnabled ? 'is-on' : ''}`}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleAutoRefreshRateToggle()}
+                            aria-pressed={autoRefreshRateOnBatteryEnabled}
                             type="button"
                           >
                             <span />
@@ -3458,7 +3890,7 @@ function App() {
                           <div>
                             <strong>Charge Limit While Plugged In</strong>
                             <p>
-                              Uses Acer Care Center&apos;s battery-health path directly. Optimized
+                              Uses Acer battery-health control directly when available. Optimized
                               mode keeps the 80% ceiling, while full mode clears the cap and allows
                               charging to 100%.
                             </p>
@@ -3494,11 +3926,12 @@ function App() {
                               Applies the Acer-style eye-care gamma ramp directly to the display for
                               lower blue output during long sessions.
                             </p>
+                            {blueLightDisabledReason && <small>{blueLightDisabledReason}</small>}
                           </div>
 
                           <button
                             className={`toggle ${blueLightFilterEnabled ? 'is-on' : ''}`}
-                            disabled={settingsActionPending !== null}
+                            disabled={settingsActionPending !== null || !blueLightWritable}
                             onClick={() => void handleBlueLightFilterToggle()}
                             aria-pressed={blueLightFilterEnabled}
                             type="button"
@@ -3537,14 +3970,14 @@ function App() {
                       </div>
 
                       <div className="personal-frame__body personal-frame__body--boot">
-                        <div className="boot-setting-copy">
-                          <strong>Boot Logo Customization</strong>
-                          <p>
-                            {bootLogoWritable
-                              ? 'Upload an image and AeroForge will convert it to a firmware-safe JPEG before firmware apply.'
-                              : bootLogoDisabledReason}
-                          </p>
-                        </div>
+                          <div className="boot-setting-copy">
+                            <strong>Boot Logo Customization</strong>
+                            <p>
+                              {bootLogoWritable
+                                ? 'Click a built-in AeroForge splash to apply it, or upload an image. AeroForge preserves GIF files and converts static images to firmware-safe JPEG before apply.'
+                                : bootLogoStatusText}
+                            </p>
+                          </div>
 
                         <div className="boot-preview-panel">
                           <div className="boot-preview-panel__canvas">
@@ -3572,8 +4005,10 @@ function App() {
                                   ? bootLogoPending
                                     ? 'Applying custom splash through AeroForge'
                                     : 'Custom splash applied through AeroForge'
-                                  : 'Preset preview only. Upload an image file to apply a firmware logo.'
-                                : bootLogoDisabledReason}
+                                  : bootLogoPending
+                                    ? 'Applying bundled AeroForge splash through AeroForge'
+                                    : 'Click any AeroForge preset tile below to write it as the firmware splash.'
+                                : bootLogoStatusText}
                             </small>
                           </div>
                         </div>
@@ -3596,8 +4031,8 @@ function App() {
                             <strong>{bootLogoPending ? 'Applying splash' : 'Upload custom splash'}</strong>
                             <span>
                               {bootLogoWritable
-                                ? 'PNG, JPG, WEBP, or GIF. AeroForge writes a converted JPG.'
-                                : bootLogoDisabledReason}
+                                ? 'PNG, JPG, WEBP, or GIF. GIF stays GIF; static images become JPG.'
+                                : bootLogoStatusText}
                             </span>
                           </label>
 
@@ -3615,12 +4050,7 @@ function App() {
                                     selectedBootArt === art.id ? 'is-selected' : ''
                                   }`}
                                   disabled={settingsActionPending !== null}
-                                  onClick={() => {
-                                    setSelectedBootArt(art.id)
-                                    setStatusMessage(
-                                      `${art.name} selected as a preview. Upload an image file to apply a firmware logo.`,
-                                    )
-                                  }}
+                                  onClick={() => void handleBootArtworkApply(art)}
                                 >
                                   <div className="art-tile__swatch art-tile__swatch--boot">
                                     <BootSplashPreview art={art} compact />

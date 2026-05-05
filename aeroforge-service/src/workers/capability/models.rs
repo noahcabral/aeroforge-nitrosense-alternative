@@ -23,8 +23,12 @@ pub struct CapabilitySnapshot {
 }
 
 pub fn feature(writable: bool, requires_elevation: bool) -> FeatureSupport {
+    feature_with(true, writable, requires_elevation)
+}
+
+pub fn feature_with(available: bool, writable: bool, requires_elevation: bool) -> FeatureSupport {
     FeatureSupport {
-        available: true,
+        available,
         writable,
         requires_elevation,
     }

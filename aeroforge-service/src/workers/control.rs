@@ -1,4 +1,4 @@
-mod acer_wmi;
+pub(crate) mod acer_wmi;
 mod boot_logo;
 mod fan;
 mod gpu_tuning;
@@ -6,6 +6,7 @@ mod models;
 mod nvapi_whisper;
 mod nvml;
 mod power;
+mod smart_charge;
 mod state;
 
 use crate::{
@@ -15,8 +16,9 @@ use crate::{
 
 pub use models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
-    AppliedPowerProfileSnapshot, ApplyBootLogoRequest, ApplyCustomFanCurvesRequest,
-    ApplyFanProfileRequest, ApplyGpuTuningRequest, ApplyPowerProfileRequest, FanProfileId,
+    AppliedPowerProfileSnapshot, AppliedSmartChargeSnapshot, ApplyBootLogoRequest,
+    ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
+    ApplyPowerProfileRequest, ApplySmartChargeRequest, FanProfileId,
 };
 
 const WORKER_NAME: &str = "control-worker";
@@ -108,6 +110,31 @@ pub fn apply_boot_logo(
     }
 }
 
+pub fn apply_smart_charging(
+    paths: &ServicePaths,
+    request: ApplySmartChargeRequest,
+) -> Result<AppliedSmartChargeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    match smart_charge::apply_smart_charging(request) {
+        Ok(applied) => {
+            let _ = write_log_line(
+                &paths.component_log("control-smart-charge"),
+                "INFO",
+                &applied.detail,
+            );
+            Ok(applied)
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            let _ = write_log_line(
+                &paths.component_log("control-smart-charge"),
+                "ERROR",
+                &detail,
+            );
+            Err(error)
+        }
+    }
+}
+
 pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
@@ -131,6 +158,9 @@ fn run(
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    state::persist_default_snapshot(&paths)?;
+    restore_startup_state(&paths)?;
+
     run_periodic_worker(
         WORKER_NAME,
         SAMPLE_INTERVAL,
@@ -163,4 +193,125 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     }
 
     Ok(())
+}
+
+fn restore_startup_state(
+    paths: &ServicePaths,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let snapshot = state::load_snapshot(paths)?;
+    let power_profile = snapshot
+        .active_power_profile
+        .clone()
+        .unwrap_or(models::PowerProfileId::Turbo);
+    let processor_state = snapshot
+        .processor_state
+        .clone()
+        .unwrap_or_else(|| default_processor_state_for_profile(&power_profile));
+
+    write_log_line(
+        &paths.component_log("control-power"),
+        "INFO",
+        &format!(
+            "Restoring startup power profile {:?} with processor state min {} / max {}.",
+            power_profile, processor_state.min_percent, processor_state.max_percent
+        ),
+    )?;
+
+    match apply_power_profile(
+        paths,
+        ApplyPowerProfileRequest {
+            profile_id: power_profile,
+            processor_state,
+            custom_base_profile: snapshot.custom_base_profile.clone(),
+        },
+    ) {
+        Ok(applied) => {
+            let _ = write_log_line(
+                &paths.component_log("control-power"),
+                "INFO",
+                &format!("Startup power restore succeeded: {}", applied.detail),
+            );
+        }
+        Err(error) => {
+            let detail = format!("Startup power restore failed: {error}");
+            let _ = write_log_line(&paths.component_log("control-power"), "ERROR", &detail);
+        }
+    }
+
+    let fan_profile = snapshot
+        .active_fan_profile
+        .clone()
+        .unwrap_or(FanProfileId::Auto);
+
+    match fan_profile {
+        FanProfileId::Custom => {
+            if let Some(curves) = snapshot.active_fan_curves.clone() {
+                match apply_custom_fan_curves(paths, ApplyCustomFanCurvesRequest { curves }) {
+                    Ok(applied) => {
+                        let _ = write_log_line(
+                            &paths.component_log("control-fan"),
+                            "INFO",
+                            &format!("Startup custom fan restore succeeded: {}", applied.detail),
+                        );
+                    }
+                    Err(error) => {
+                        let detail = format!("Startup custom fan restore failed: {error}");
+                        let _ =
+                            write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
+                    }
+                }
+            } else {
+                let _ = write_log_line(
+                    &paths.component_log("control-fan"),
+                    "WARN",
+                    "Startup fan restore skipped: Custom was active but no saved curve was present.",
+                );
+            }
+        }
+        _ => match apply_fan_profile(
+            paths,
+            ApplyFanProfileRequest {
+                profile_id: fan_profile,
+            },
+        ) {
+            Ok(applied) => {
+                let _ = write_log_line(
+                    &paths.component_log("control-fan"),
+                    "INFO",
+                    &format!("Startup fan restore succeeded: {}", applied.detail),
+                );
+            }
+            Err(error) => {
+                let detail = format!("Startup fan restore failed: {error}");
+                let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
+            }
+        },
+    }
+
+    Ok(())
+}
+
+fn default_processor_state_for_profile(
+    profile_id: &models::PowerProfileId,
+) -> models::ProcessorStateSettings {
+    match profile_id {
+        models::PowerProfileId::BatteryGuard => models::ProcessorStateSettings {
+            min_percent: 5,
+            max_percent: 45,
+        },
+        models::PowerProfileId::Balanced => models::ProcessorStateSettings {
+            min_percent: 35,
+            max_percent: 88,
+        },
+        models::PowerProfileId::Performance | models::PowerProfileId::Turbo => {
+            models::ProcessorStateSettings {
+                min_percent: 100,
+                max_percent: 100,
+            }
+        }
+        models::PowerProfileId::Custom => models::ProcessorStateSettings {
+            min_percent: 35,
+            max_percent: 88,
+        },
+    }
 }

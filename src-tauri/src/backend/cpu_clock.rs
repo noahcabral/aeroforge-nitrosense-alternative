@@ -1,9 +1,9 @@
+use std::os::windows::process::CommandExt;
 use std::{
     process::Command,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

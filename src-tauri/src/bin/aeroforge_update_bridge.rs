@@ -15,7 +15,10 @@ fn main() {
     let current_exe = match env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            write_log(&log_path, &format!("failed to resolve current exe: {error}"));
+            write_log(
+                &log_path,
+                &format!("failed to resolve current exe: {error}"),
+            );
             return;
         }
     };
@@ -29,12 +32,19 @@ fn main() {
             Ok(child) => {
                 write_log(
                     &log_path,
-                    &format!("launched installed app {} pid={}", installed_app.display(), child.id()),
+                    &format!(
+                        "launched installed app {} pid={}",
+                        installed_app.display(),
+                        child.id()
+                    ),
                 );
             }
             Err(error) => write_log(
                 &log_path,
-                &format!("failed to launch installed app {}: {error}", installed_app.display()),
+                &format!(
+                    "failed to launch installed app {}: {error}",
+                    installed_app.display()
+                ),
             ),
         }
         return;
@@ -43,7 +53,10 @@ fn main() {
     let Some(setup_exe) = find_setup_exe(&current_dir) else {
         write_log(
             &log_path,
-            &format!("no installed app or setup exe found from {}", current_dir.display()),
+            &format!(
+                "no installed app or setup exe found from {}",
+                current_dir.display()
+            ),
         );
         return;
     };

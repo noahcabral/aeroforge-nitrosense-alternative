@@ -102,6 +102,8 @@ export type PersonalSettings = {
   smartChargingEnabled: boolean
   usbPowerEnabled: boolean
   blueLightFilterEnabled: boolean
+  autoRefreshRateOnBatteryEnabled: boolean
+  autoRefreshRateRestoreHz: number | null
   selectedBootArt: BootArtId
   customBootFilename: string
   updateChannel: 'stable' | 'preview'
@@ -206,6 +208,17 @@ export type SmartChargeApplyResult = {
   detail: string
 }
 
+export type DisplayRefreshApplyResult = {
+  controls: ControlSnapshot
+  appliedAtUnix: number
+  enabled: boolean
+  onBattery: boolean
+  currentHz: number
+  appliedHz: number | null
+  restoreHz: number | null
+  detail: string
+}
+
 export type BackendBootstrap = {
   shell: ShellStatus
   service: ServiceStatus
@@ -290,6 +303,10 @@ export async function applySmartCharging(enabled: boolean) {
   return invoke<SmartChargeApplyResult>('apply_smart_charging', { enabled })
 }
 
+export async function applyAutoRefreshRate(enabled: boolean, onBattery: boolean) {
+  return invoke<DisplayRefreshApplyResult>('apply_auto_refresh_rate', { enabled, onBattery })
+}
+
 export async function saveControlSnapshot(snapshot: ControlSnapshot) {
   return invoke<ControlSnapshot>('save_control_snapshot', { snapshot })
 }
@@ -322,6 +339,14 @@ export async function applyCustomFanCurves(curves: FanCurveSet) {
   return invoke<FanControlApplyResult>('apply_custom_fan_curves', { curves })
 }
 
-export async function applyBootLogo(fileName: string, imageBase64: string) {
-  return invoke<BootLogoApplyResult>('apply_boot_logo', { fileName, imageBase64 })
+export async function applyBootLogo(
+  fileName: string,
+  imageBase64: string,
+  selectedBootArt?: BootArtId,
+) {
+  return invoke<BootLogoApplyResult>('apply_boot_logo', {
+    fileName,
+    imageBase64,
+    selectedBootArt,
+  })
 }

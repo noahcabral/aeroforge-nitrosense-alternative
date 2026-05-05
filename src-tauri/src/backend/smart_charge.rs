@@ -1,6 +1,8 @@
 use std::{
     fs, io,
+    os::windows::process::CommandExt,
     path::Path,
+    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,6 +21,7 @@ const CARE_CENTER_URL: &str = "wss://127.0.0.1:4343/";
 const CARE_CENTER_AUTH_DATA: &str = "OO24T5iPpUKxfxjPZW4ddo3uGeIJXC+ZbJPzCNGMBenvnZ7J9xQjpykAdgAL1a9HocmZsOHxisitF9B0t7msCayFnVDZA79rADTRjUNWQaLEQA6wSpLrLo/Fu/gHH7BM";
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\CC\settings.json";
 const CARE_CENTER_TIMEOUT: Duration = Duration::from_secs(5);
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct SmartChargeApplyPayload {
     pub enabled: bool,
@@ -32,6 +35,126 @@ pub async fn sync_saved_state(enabled: bool) -> Result<SmartChargeApplyPayload, 
 }
 
 pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
+    match apply_battery_control_direct(enabled) {
+        Ok(payload) => return Ok(payload),
+        Err(direct_error) => {
+            let fallback = apply_care_center_smart_charging(enabled).await;
+            match fallback {
+                Ok(mut payload) => {
+                    payload.detail = format!(
+                        "Direct BatteryControl path was unavailable: {direct_error}. {}",
+                        payload.detail
+                    );
+                    return Ok(payload);
+                }
+                Err(fallback_error) => {
+                    return Err(io::Error::other(format!(
+                        "Direct BatteryControl path failed: {direct_error}. Acer Care Center fallback failed: {fallback_error}"
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+}
+
+fn apply_battery_control_direct(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
+    let requested_health_status = if enabled { 1u8 } else { 0u8 };
+    let script = r#"
+$status = [byte]$args[0]
+$battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
+if (-not $battery) { throw 'BatteryControl instance was not found.' }
+$set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments @{
+  uBatteryNo = [byte]1
+  uFunctionMask = [byte]1
+  uFunctionStatus = $status
+  uReservedIn = ([byte[]](0,0,0,0,0))
+} -ErrorAction Stop
+$get = Invoke-CimMethod -InputObject $battery -MethodName GetBatteryHealthControlStatus -Arguments @{
+  uBatteryNo = [byte]1
+  uFunctionQuery = [byte]1
+  uReserved = ([byte[]](0,0))
+} -ErrorAction Stop
+$health = [int]$get.uFunctionStatus[0]
+[ordered]@{
+  requestedHealthStatus = [int]$status
+  healthStatus = $health
+  functionList = [int]$get.uFunctionList
+  getReturn = @($get.uReturn)
+  setReturn = $set.uReturn
+  setReservedOut = $set.uReservedOut
+} | ConvertTo-Json -Compress
+"#;
+
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            &requested_health_status.to_string(),
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("PowerShell exited with status {}", output.status)
+        };
+        return Err(
+            io::Error::other(format!("BatteryControl direct apply failed: {detail}")).into(),
+        );
+    }
+
+    let parsed = serde_json::from_slice::<Value>(&output.stdout)?;
+    let verified_health_status = parsed
+        .get("healthStatus")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "BatteryControl response did not include healthStatus: {parsed}"
+            ))
+        })?;
+    if verified_health_status != requested_health_status {
+        return Err(io::Error::other(format!(
+            "BatteryControl returned healthStatus {} after requesting {}.",
+            verified_health_status, requested_health_status
+        ))
+        .into());
+    }
+
+    let care_center_battery_healthy_semantic = if verified_health_status == 1 { 0 } else { 1 };
+    let detail = if enabled {
+        format!(
+            "Applied optimized charging through direct BatteryControl WMI health mode. Health limiter status {} keeps the 80% ceiling active.",
+            verified_health_status
+        )
+    } else {
+        format!(
+            "Applied full battery charging through direct BatteryControl WMI health mode. Health limiter status {} allows full charge.",
+            verified_health_status
+        )
+    };
+
+    Ok(SmartChargeApplyPayload {
+        enabled,
+        battery_healthy: care_center_battery_healthy_semantic,
+        applied_at_unix: now_unix(),
+        detail,
+    })
+}
+
+async fn apply_care_center_smart_charging(
+    enabled: bool,
+) -> Result<SmartChargeApplyPayload, DynError> {
     let requested_battery_healthy = if enabled { 0 } else { 1 };
     let mut client =
         with_timeout("connect to Acer Care Center", CareCenterClient::connect()).await?;

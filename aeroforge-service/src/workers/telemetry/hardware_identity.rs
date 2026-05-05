@@ -1,4 +1,5 @@
 use std::{
+    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -10,6 +11,7 @@ use super::{
 use crate::paths::ServicePaths;
 
 static HARDWARE_IDENTITY_CACHE: OnceLock<Arc<Mutex<HardwareIdentityCache>>> = OnceLock::new();
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct HardwareIdentityCache {
     last_refresh: Option<Instant>,
@@ -77,7 +79,10 @@ fn query_hardware_identity_snapshot(
     let script = r#"
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, Manufacturer
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.PNPDeviceID -notmatch '^ROOT\\' }
-$gpu = $gpus | Where-Object { $_.Name -match 'NVIDIA|GeForce|RTX|GTX|AMD Radeon|Radeon' } | Select-Object -First 1
+$gpu = $gpus | Where-Object { $_.Name -match 'NVIDIA|GeForce|RTX|GTX' -or $_.AdapterCompatibility -match 'NVIDIA' } | Select-Object -First 1
+if (-not $gpu) {
+  $gpu = $gpus | Where-Object { $_.Name -match 'AMD Radeon|Radeon' -or $_.AdapterCompatibility -match 'AMD|Advanced Micro Devices' } | Select-Object -First 1
+}
 if (-not $gpu) {
   $gpu = $gpus | Where-Object { $_.Name -notmatch '^Intel\(R\)' -and $_.AdapterCompatibility -notmatch '^Intel' } | Select-Object -First 1
 }
@@ -96,6 +101,7 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 "#;
 
     let output = std::process::Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;
 

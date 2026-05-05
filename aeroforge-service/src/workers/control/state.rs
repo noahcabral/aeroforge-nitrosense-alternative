@@ -22,14 +22,6 @@ pub fn persist_default_snapshot(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = paths.worker_snapshot("control");
     if path.exists() {
-        let mut snapshot = load_snapshot(paths)?;
-        if snapshot.boot_logo_apply_supported {
-            snapshot.boot_logo_apply_supported = false;
-            snapshot.last_boot_logo_apply_detail =
-                "Boot-logo firmware apply is disabled until a direct hardware path is implemented."
-                    .into();
-            persist_snapshot(paths, &snapshot)?;
-        }
         return Ok(());
     }
 
@@ -43,6 +35,7 @@ pub fn persist_apply_success(
     let mut snapshot = load_snapshot(paths)?;
     snapshot.active_power_profile = Some(applied.profile_id.clone());
     snapshot.processor_state = Some(applied.processor_state.clone());
+    snapshot.custom_base_profile = applied.custom_base_profile.clone();
     snapshot.processor_state_readback = Some(applied.readback.clone());
     snapshot.processor_state_drift_detected = applied.drift_detected;
     snapshot.last_applied_at_unix = Some(applied.applied_at_unix);
@@ -101,7 +94,8 @@ pub fn persist_apply_error(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
     snapshot.last_error = Some(detail.into());
-    snapshot.last_apply_detail = "The most recent power-profile apply attempt failed.".into();
+    snapshot.last_apply_detail =
+        format!("The most recent power-profile apply attempt failed. {detail}");
     snapshot.processor_state_drift_detected = false;
     persist_snapshot(paths, &snapshot)
 }
@@ -112,7 +106,8 @@ pub fn persist_gpu_tuning_apply_error(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
     snapshot.last_gpu_tuning_error = Some(detail.into());
-    snapshot.last_gpu_tuning_detail = "The most recent GPU tuning apply attempt failed.".into();
+    snapshot.last_gpu_tuning_detail =
+        format!("The most recent GPU tuning apply attempt failed. {detail}");
     persist_snapshot(paths, &snapshot)
 }
 
@@ -122,7 +117,8 @@ pub fn persist_fan_apply_error(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
     snapshot.last_fan_error = Some(detail.into());
-    snapshot.last_fan_apply_detail = "The most recent fan-control apply attempt failed.".into();
+    snapshot.last_fan_apply_detail =
+        format!("The most recent fan-control apply attempt failed. {detail}");
     persist_snapshot(paths, &snapshot)
 }
 
@@ -131,10 +127,11 @@ pub fn persist_boot_logo_apply_error(
     detail: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
-    snapshot.boot_logo_apply_supported = false;
+    snapshot.boot_logo_apply_supported = true;
     snapshot.last_boot_logo_error = Some(detail.into());
-    snapshot.last_boot_logo_apply_detail =
-        "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into();
+    snapshot.last_boot_logo_apply_detail = format!(
+        "The most recent boot-logo apply attempt failed before AeroForge completed the EFI write. {detail}"
+    );
     persist_snapshot(paths, &snapshot)
 }
 

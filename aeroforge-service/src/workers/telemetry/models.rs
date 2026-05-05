@@ -64,8 +64,13 @@ pub struct LowLevelSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareSensorSnapshot {
     pub thermal_zone_temp_c: Option<u8>,
+    pub cpu_temp_c: Option<u8>,
+    pub gpu_temp_c: Option<u8>,
+    pub system_temp_c: Option<u8>,
     pub cpu_fan_rpm: Option<u16>,
     pub gpu_fan_rpm: Option<u16>,
+    pub supported_sensor_mask: Option<u16>,
+    pub acer_battery_status_raw: Option<u64>,
     pub has_acer_firmware: bool,
     pub has_thermal_zone: bool,
 }

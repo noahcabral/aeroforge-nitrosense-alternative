@@ -186,6 +186,10 @@ pub struct PersonalSettings {
     pub usb_power_enabled: bool,
     #[serde(default)]
     pub blue_light_filter_enabled: bool,
+    #[serde(default)]
+    pub auto_refresh_rate_on_battery_enabled: bool,
+    #[serde(default)]
+    pub auto_refresh_rate_restore_hz: Option<u32>,
     #[serde(default = "default_boot_art")]
     pub selected_boot_art: BootArtId,
     #[serde(default = "default_custom_boot_filename")]
@@ -250,7 +254,7 @@ pub struct LiveControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<serde_json::Value>,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub boot_logo_apply_supported: bool,
     #[serde(default)]
     pub last_boot_logo_applied_at_unix: Option<u64>,
@@ -264,10 +268,6 @@ pub struct LiveControlSnapshot {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_boot_art() -> BootArtId {
@@ -295,7 +295,7 @@ fn default_waiting_fan_apply_detail() -> String {
 }
 
 fn default_waiting_boot_logo_apply_detail() -> String {
-    "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into()
+    "Boot-logo apply is ready. AeroForge will write only after EFI partition preflight, backup, and verification pass.".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,6 +364,19 @@ pub struct SmartChargeApplyResult {
     pub controls: ControlSnapshot,
     pub applied_at_unix: u64,
     pub battery_healthy: u8,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayRefreshApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub enabled: bool,
+    pub on_battery: bool,
+    pub current_hz: u32,
+    pub applied_hz: Option<u32>,
+    pub restore_hz: Option<u32>,
     pub detail: String,
 }
 

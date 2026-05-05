@@ -1,4 +1,5 @@
 use std::{
+    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -8,8 +9,10 @@ use super::{
     models::FirmwareSensorSnapshot,
 };
 use crate::paths::ServicePaths;
+use crate::workers::control::acer_wmi;
 
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct FirmwareSensorCache {
     last_refresh: Option<Instant>,
@@ -74,12 +77,43 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
 
 fn query_firmware_sensor_snapshot(
 ) -> Result<FirmwareSensorSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(acer) = acer_wmi::read_firmware_sensor_snapshot() {
+        let thermal_zone_temp_c = query_windows_thermal_zone_temp_c().ok().flatten();
+        return Ok(FirmwareSensorSnapshot {
+            thermal_zone_temp_c,
+            cpu_temp_c: to_u8(acer.cpu_temp_c),
+            gpu_temp_c: to_u8(acer.gpu_temp_c),
+            system_temp_c: to_u8(acer.system_temp_c),
+            cpu_fan_rpm: acer.cpu_fan_rpm,
+            gpu_fan_rpm: acer.gpu_fan_rpm,
+            supported_sensor_mask: acer.supported_sensors,
+            acer_battery_status_raw: acer.battery_status,
+            has_acer_firmware: true,
+            has_thermal_zone: thermal_zone_temp_c.is_some(),
+        });
+    }
+
+    let thermal_zone_temp_c = query_windows_thermal_zone_temp_c()?;
+    Ok(FirmwareSensorSnapshot {
+        thermal_zone_temp_c,
+        cpu_temp_c: None,
+        gpu_temp_c: None,
+        system_temp_c: None,
+        cpu_fan_rpm: None,
+        gpu_fan_rpm: None,
+        supported_sensor_mask: None,
+        acer_battery_status_raw: None,
+        has_acer_firmware: false,
+        has_thermal_zone: thermal_zone_temp_c.is_some(),
+    })
+}
+
+fn query_windows_thermal_zone_temp_c(
+) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let script = r#"
 $thermalZone = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1
 $result = [ordered]@{
   thermalZoneTempC = $null
-  cpuFanRpm = $null
-  gpuFanRpm = $null
 }
 if ($thermalZone -and $thermalZone.CurrentTemperature) {
   $result.thermalZoneTempC = [math]::Round(($thermalZone.CurrentTemperature / 10) - 273.15)
@@ -88,6 +122,7 @@ $result | ConvertTo-Json -Compress
 "#;
 
     let output = std::process::Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;
 
@@ -97,20 +132,12 @@ $result | ConvertTo-Json -Compress
     }
 
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
-    Ok(FirmwareSensorSnapshot {
-        thermal_zone_temp_c: parsed
-            .get("thermalZoneTempC")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as u8),
-        cpu_fan_rpm: parsed
-            .get("cpuFanRpm")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as u16),
-        gpu_fan_rpm: parsed
-            .get("gpuFanRpm")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as u16),
-        has_acer_firmware: false,
-        has_thermal_zone: parsed.get("thermalZoneTempC").is_some(),
-    })
+    Ok(parsed
+        .get("thermalZoneTempC")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u8::try_from(value).ok()))
+}
+
+fn to_u8(value: Option<u16>) -> Option<u8> {
+    value.and_then(|value| u8::try_from(value).ok())
 }

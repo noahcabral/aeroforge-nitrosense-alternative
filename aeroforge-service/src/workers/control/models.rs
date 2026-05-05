@@ -113,9 +113,17 @@ pub struct ApplyBootLogoRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplySmartChargeRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppliedPowerProfileSnapshot {
     pub profile_id: PowerProfileId,
     pub processor_state: ProcessorStateSettings,
+    #[serde(default)]
+    pub custom_base_profile: Option<CustomPowerBaseId>,
     pub readback: ProcessorStateReadback,
     pub drift_detected: bool,
     pub applied_at_unix: u64,
@@ -155,6 +163,16 @@ pub struct AppliedBootLogoSnapshot {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppliedSmartChargeSnapshot {
+    pub enabled: bool,
+    pub health_status: u8,
+    pub battery_healthy: u8,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlSnapshot {
     pub service: String,
     pub power_apply_supported: bool,
@@ -166,6 +184,8 @@ pub struct ControlSnapshot {
     pub fan_curve_apply_supported: bool,
     pub active_power_profile: Option<PowerProfileId>,
     pub processor_state: Option<ProcessorStateSettings>,
+    #[serde(default)]
+    pub custom_base_profile: Option<CustomPowerBaseId>,
     #[serde(default)]
     pub processor_state_readback: Option<ProcessorStateReadback>,
     #[serde(default)]
@@ -193,7 +213,7 @@ pub struct ControlSnapshot {
     pub last_fan_error: Option<String>,
     #[serde(default)]
     pub last_fan_readback: Option<Value>,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub boot_logo_apply_supported: bool,
     #[serde(default)]
     pub last_boot_logo_applied_at_unix: Option<u64>,
@@ -209,16 +229,12 @@ fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
-    false
-}
-
 fn default_waiting_fan_apply_detail() -> String {
     "Waiting for the first fan-control apply.".into()
 }
 
 fn default_waiting_boot_logo_apply_detail() -> String {
-    "Boot-logo firmware apply is disabled until a direct hardware path is implemented.".into()
+    "Boot-logo apply is ready. AeroForge will write only after EFI partition preflight, backup, and verification pass.".into()
 }
 
 impl ControlSnapshot {
@@ -229,8 +245,12 @@ impl ControlSnapshot {
             gpu_tuning_apply_supported: true,
             fan_apply_supported: true,
             fan_curve_apply_supported: true,
-            active_power_profile: None,
-            processor_state: None,
+            active_power_profile: Some(PowerProfileId::Turbo),
+            processor_state: Some(ProcessorStateSettings {
+                min_percent: 100,
+                max_percent: 100,
+            }),
+            custom_base_profile: None,
             processor_state_readback: None,
             processor_state_drift_detected: false,
             last_applied_at_unix: None,
@@ -240,13 +260,13 @@ impl ControlSnapshot {
             last_gpu_tuning_applied_at_unix: None,
             last_gpu_tuning_detail: "Waiting for the first GPU tuning apply.".into(),
             last_gpu_tuning_error: None,
-            active_fan_profile: None,
+            active_fan_profile: Some(FanProfileId::Auto),
             active_fan_curves: None,
             last_fan_applied_at_unix: None,
             last_fan_apply_detail: default_waiting_fan_apply_detail(),
             last_fan_error: None,
             last_fan_readback: None,
-            boot_logo_apply_supported: false,
+            boot_logo_apply_supported: true,
             last_boot_logo_applied_at_unix: None,
             last_boot_logo_apply_detail: default_waiting_boot_logo_apply_detail(),
             last_boot_logo_error: None,

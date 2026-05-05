@@ -1,4 +1,4 @@
-use std::{ffi::c_void, ptr::null_mut};
+use std::{ffi::c_void, os::windows::process::CommandExt, process::Command, ptr::null_mut};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -23,6 +23,7 @@ const VT_I8: u16 = 20;
 const VT_UI8: u16 = 21;
 const CIM_UINT64: i32 = 21;
 const WBEM_E_NOT_FOUND: i32 = 0x8004_1002u32 as i32;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const CLSID_WBEM_LOCATOR: Guid = Guid::new(
     0x4590_f811,
@@ -47,14 +48,18 @@ const GM_OUTPUT: &str = "gmOutput";
 pub const GAMING_PROFILE_BALANCED: u64 = 0x0000_0001;
 pub const GAMING_PROFILE_PERFORMANCE: u64 = 0x0000_0004;
 pub const GAMING_PROFILE_TURBO: u64 = 0x0000_0005;
+pub const GAMING_PROFILE_QUIET: u8 = 0x00;
 
 pub const FAN_BEHAVIOR_AUTO: u64 = 0x0041_0009;
-pub const FAN_BEHAVIOR_CUSTOM: u64 = 0x0082_0009;
-pub const FAN_BEHAVIOR_MAX: u64 = 0x00C3_0009;
+pub const FAN_BEHAVIOR_MAX: u64 = 0x0082_0009;
+pub const FAN_BEHAVIOR_CUSTOM_MIXED: u64 = 0x00C3_0009;
 
 pub const FAN_SELECTOR_CPU: u8 = 0x01;
 pub const FAN_SELECTOR_GPU: u8 = 0x04;
 pub const MIN_MANUAL_FAN_PERCENT: u8 = 2;
+
+pub const MISC_SETTING_SUPPORTED_PROFILES: u8 = 0x0A;
+pub const MISC_SETTING_PLATFORM_PROFILE: u8 = 0x0B;
 
 pub fn clamp_manual_fan_percent(percent: u8) -> u8 {
     percent.clamp(MIN_MANUAL_FAN_PERCENT, 100)
@@ -64,6 +69,20 @@ pub fn apply_gaming_profile(
     input: u64,
 ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
     invoke_acer_gaming_u64_method("SetGamingProfile", input)
+}
+
+pub fn apply_gaming_misc_setting(
+    setting: u8,
+    value: u8,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    let input = u64::from(setting) | (u64::from(value) << 8);
+    invoke_acer_gaming_u64_method("SetGamingMiscSetting", input)
+}
+
+pub fn read_gaming_misc_setting(
+    setting: u8,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    invoke_acer_gaming_read_method_via_powershell("GetGamingMiscSetting", u64::from(setting))
 }
 
 pub fn apply_fan_behavior(
@@ -81,12 +100,68 @@ pub fn apply_fan_speed(
     invoke_acer_gaming_u64_method("SetGamingFanSpeed", input)
 }
 
+pub fn read_firmware_sensor_snapshot(
+) -> Result<AcerFirmwareSensorReadback, Box<dyn std::error::Error + Send + Sync>> {
+    let script = r#"
+$gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
+if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
+function Invoke-AfSysInfo([uint64]$input) {
+  $result = Invoke-CimMethod -InputObject $gaming -MethodName GetGamingSysInfo -Arguments @{ gmInput = $input } -ErrorAction Stop
+  if ($null -eq $result.gmOutput) { return $null }
+  return [uint64]$result.gmOutput
+}
+[ordered]@{
+  supportedSensors = Invoke-AfSysInfo([uint64]0x0000)
+  batteryStatus = Invoke-AfSysInfo([uint64]0x0002)
+  cpuTemp = Invoke-AfSysInfo([uint64]0x0101)
+  cpuFan = Invoke-AfSysInfo([uint64]0x0201)
+  systemTemp = Invoke-AfSysInfo([uint64]0x0301)
+  gpuFan = Invoke-AfSysInfo([uint64]0x0601)
+  gpuTemp = Invoke-AfSysInfo([uint64]0x0A01)
+} | ConvertTo-Json -Compress
+"#;
+
+    let parsed = run_hidden_powershell_json(script, &[])?;
+
+    Ok(AcerFirmwareSensorReadback {
+        supported_sensors: parsed
+            .get("supportedSensors")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| ((value >> 24) & 0xFFFF) as u16),
+        battery_status: parsed
+            .get("batteryStatus")
+            .and_then(serde_json::Value::as_u64),
+        cpu_temp_c: decode_sysinfo_sensor(parsed.get("cpuTemp")),
+        gpu_temp_c: decode_sysinfo_sensor(parsed.get("gpuTemp")),
+        system_temp_c: decode_sysinfo_sensor(parsed.get("systemTemp")),
+        cpu_fan_rpm: decode_sysinfo_sensor(parsed.get("cpuFan")),
+        gpu_fan_rpm: decode_sysinfo_sensor(parsed.get("gpuFan")),
+    })
+}
+
+pub fn read_gaming_sys_info(
+    input: u32,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    invoke_acer_gaming_read_method_via_powershell("GetGamingSysInfo", u64::from(input))
+}
+
 #[derive(Debug, Clone)]
 pub struct AcerWmiMethodResult {
     pub method: &'static str,
     pub input: u64,
     pub hresult: i32,
     pub output: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AcerFirmwareSensorReadback {
+    pub supported_sensors: Option<u16>,
+    pub battery_status: Option<u64>,
+    pub cpu_temp_c: Option<u16>,
+    pub gpu_temp_c: Option<u16>,
+    pub system_temp_c: Option<u16>,
+    pub cpu_fan_rpm: Option<u16>,
+    pub gpu_fan_rpm: Option<u16>,
 }
 
 struct ComApartment {
@@ -165,6 +240,80 @@ fn invoke_acer_gaming_u64_method(
         hresult: execution.hresult,
         output,
     })
+}
+
+fn invoke_acer_gaming_read_method_via_powershell(
+    method: &'static str,
+    input: u64,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    let script = r#"
+$methodName = $env:AF_METHOD
+$inputValue = [uint64]$env:AF_INPUT
+$gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
+if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
+$result = Invoke-CimMethod -InputObject $gaming -MethodName $methodName -Arguments @{ gmInput = $inputValue } -ErrorAction Stop
+[ordered]@{
+  gmOutput = if ($null -eq $result.gmOutput) { $null } else { [uint64]$result.gmOutput }
+  returnValue = [bool]$result.ReturnValue
+} | ConvertTo-Json -Compress
+"#;
+
+    let input_text = input.to_string();
+    let parsed =
+        run_hidden_powershell_json(script, &[("AF_METHOD", method), ("AF_INPUT", &input_text)])?;
+    let return_value = parsed
+        .get("returnValue")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    if !return_value {
+        return Err(format!("{method}({input}) returned ReturnValue=false.").into());
+    }
+
+    Ok(AcerWmiMethodResult {
+        method,
+        input,
+        hresult: S_OK,
+        output: parsed.get("gmOutput").and_then(serde_json::Value::as_u64),
+    })
+}
+
+fn run_hidden_powershell_json(
+    script: &str,
+    env_pairs: &[(&str, &str)],
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut command = Command::new("powershell");
+    command.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    for (key, value) in env_pairs {
+        command.env(key, value);
+    }
+    let output = command.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("PowerShell exited with status {}", output.status)
+        };
+        return Err(detail.into());
+    }
+
+    Ok(serde_json::from_slice::<serde_json::Value>(&output.stdout)?)
+}
+
+fn decode_sysinfo_sensor(value: Option<&serde_json::Value>) -> Option<u16> {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| ((value >> 8) & 0xFFFF) as u16)
 }
 
 struct BStr(*mut u16);

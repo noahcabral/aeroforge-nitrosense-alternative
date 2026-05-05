@@ -54,10 +54,11 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         cpu_temp_average_c: cpu_thermal.average_temp_c.or(acer_hid_status.cpu_temp_c),
         cpu_temp_lowest_core_c: cpu_thermal.lowest_core_temp_c,
         cpu_temp_highest_core_c: cpu_thermal.highest_core_temp_c,
-        gpu_temp_c: gpu.temp_c.unwrap_or(0),
+        gpu_temp_c: gpu.temp_c.or(firmware.gpu_temp_c).unwrap_or(0),
         system_temp_c: system::select_system_temp_c(
             firmware
-                .thermal_zone_temp_c
+                .system_temp_c
+                .or(firmware.thermal_zone_temp_c)
                 .or(acer_hid_status.system_temp_c),
         )
         .unwrap_or(0),

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::workers::control::{
-    ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
-    ApplyPowerProfileRequest,
+    ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
+    ApplyGpuTuningRequest, ApplyPowerProfileRequest, ApplySmartChargeRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +27,9 @@ pub enum PipeRequest {
     },
     ApplyBootLogo {
         payload: ApplyBootLogoRequest,
+    },
+    ApplySmartCharging {
+        payload: ApplySmartChargeRequest,
     },
 }
 

@@ -1,14 +1,13 @@
 use tauri::State;
 
 use super::{
-    blue_light, boot_logo, cpu_clock,
+    blue_light, boot_logo, cpu_clock, display_refresh,
     models::{
         ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, BootLogoApplyResult,
         CapabilitySnapshot, ControlSnapshot, CustomPowerBaseId, FanCurveSet, FanProfileId,
         GpuTuningState, LiveControlSnapshot, PersistenceStatus, PowerProfileId,
-        ProcessorStateSettings,
-        ServiceStatus, ShellStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId,
-        UpdateStatus,
+        ProcessorStateSettings, ServiceStatus, ShellStatus, SmartChargeApplyResult,
+        TelemetrySnapshot, UpdateChannelId, UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
@@ -38,7 +37,10 @@ pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
 
 #[tauri::command]
 pub fn get_capability_snapshot(state: State<'_, BackendState>) -> CapabilitySnapshot {
-    service_pipe::fetch_capabilities().unwrap_or_else(|_| state.capabilities())
+    let desktop = state.capabilities();
+    service_pipe::fetch_capabilities()
+        .map(|service| merge_capabilities(desktop.clone(), service))
+        .unwrap_or(desktop)
 }
 
 #[tauri::command]
@@ -142,9 +144,21 @@ pub async fn apply_smart_charging(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<SmartChargeApplyResult, String> {
-    let applied = smart_charge::apply_smart_charging(enabled)
-        .await
-        .map_err(|error| error.to_string())?;
+    let applied = match service_pipe::apply_smart_charging(enabled) {
+        Ok(applied) => smart_charge::SmartChargeApplyPayload {
+            enabled: applied.enabled,
+            battery_healthy: applied.battery_healthy,
+            applied_at_unix: applied.applied_at_unix,
+            detail: applied.detail,
+        },
+        Err(service_error) => smart_charge::apply_smart_charging(enabled)
+            .await
+            .map_err(|desktop_error| {
+                format!(
+                    "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
+                )
+            })?,
+    };
 
     let mut controls = state.controls();
     controls.personal_settings.smart_charging_enabled = applied.enabled;
@@ -159,6 +173,65 @@ pub async fn apply_smart_charging(
         battery_healthy: applied.battery_healthy,
         detail: applied.detail,
     })
+}
+
+#[tauri::command]
+pub fn apply_auto_refresh_rate(
+    enabled: bool,
+    on_battery: bool,
+    state: State<'_, BackendState>,
+) -> Result<super::models::DisplayRefreshApplyResult, String> {
+    let mut controls = state.controls();
+    let applied = display_refresh::sync_auto_refresh_rate(
+        enabled,
+        on_battery,
+        controls.personal_settings.auto_refresh_rate_restore_hz,
+    )
+    .map_err(|error| error.to_string())?;
+
+    controls
+        .personal_settings
+        .auto_refresh_rate_on_battery_enabled = applied.enabled;
+    controls.personal_settings.auto_refresh_rate_restore_hz = applied.restore_hz;
+
+    let controls = state
+        .save_controls(controls)
+        .map_err(|error| error.to_string())?;
+
+    Ok(super::models::DisplayRefreshApplyResult {
+        controls,
+        applied_at_unix: applied.applied_at_unix,
+        enabled: applied.enabled,
+        on_battery: applied.on_battery,
+        current_hz: applied.current_hz,
+        applied_hz: applied.applied_hz,
+        restore_hz: applied.restore_hz,
+        detail: applied.detail,
+    })
+}
+
+fn merge_capabilities(
+    desktop: CapabilitySnapshot,
+    service: CapabilitySnapshot,
+) -> CapabilitySnapshot {
+    let mut notes = service.notes;
+    for note in desktop.notes {
+        if !notes.iter().any(|existing| existing == &note) {
+            notes.push(note);
+        }
+    }
+
+    CapabilitySnapshot {
+        power_profiles: service.power_profiles,
+        fan_profiles: service.fan_profiles,
+        fan_curves: service.fan_curves,
+        smart_charging: desktop.smart_charging,
+        usb_power: desktop.usb_power,
+        blue_light_filter: desktop.blue_light_filter,
+        gpu_tuning: service.gpu_tuning,
+        boot_logo: service.boot_logo,
+        notes,
+    }
 }
 
 #[tauri::command]
@@ -277,6 +350,7 @@ pub fn apply_custom_fan_curves(
 pub fn apply_boot_logo(
     file_name: String,
     image_base64: String,
+    selected_boot_art: Option<String>,
     state: State<'_, BackendState>,
 ) -> Result<BootLogoApplyResult, String> {
     let image_path =
@@ -287,7 +361,10 @@ pub fn apply_boot_logo(
         .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
-    controls.personal_settings.selected_boot_art = super::models::BootArtId::Custom;
+    controls.personal_settings.selected_boot_art = selected_boot_art
+        .as_deref()
+        .map(parse_boot_art_id)
+        .unwrap_or(super::models::BootArtId::Custom);
     controls.personal_settings.custom_boot_filename = file_name;
 
     let controls = state
@@ -299,4 +376,13 @@ pub fn apply_boot_logo(
         applied_at_unix: applied.applied_at_unix,
         detail: applied.detail,
     })
+}
+
+fn parse_boot_art_id(value: &str) -> super::models::BootArtId {
+    match value {
+        "ember" => super::models::BootArtId::Ember,
+        "arc" => super::models::BootArtId::Arc,
+        "slate" => super::models::BootArtId::Slate,
+        _ => super::models::BootArtId::Custom,
+    }
 }
