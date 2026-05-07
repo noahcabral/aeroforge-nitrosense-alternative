@@ -1,6 +1,5 @@
 use regex::Regex;
-use std::process::Command;
-use std::sync::OnceLock;
+use std::{process::Command, sync::OnceLock, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -18,6 +17,7 @@ use super::{
         ProcessorStateReadback, ProcessorStateSettings,
     },
     nvapi_whisper::{set_whisper_mode, NvApiWhisperResult},
+    nvidia_power,
 };
 
 const SUB_PROCESSOR: &str = "SUB_PROCESSOR";
@@ -25,12 +25,19 @@ const PROCTHROTTLEMIN: &str = "PROCTHROTTLEMIN";
 const PROCTHROTTLEMAX: &str = "PROCTHROTTLEMAX";
 const SCHEME_CURRENT: &str = "SCHEME_CURRENT";
 
+#[derive(Clone, Copy)]
+enum PowercfgCurrentIndex {
+    Ac,
+    Dc,
+}
+
 pub fn apply_power_profile(
     paths: &ServicePaths,
     request: ApplyPowerProfileRequest,
 ) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let profile_id = request.profile_id.clone();
     let processor_state = sanitize_processor_state(request.processor_state)?;
+    let power_before = nvidia_power::read_power_readback();
     let operating_mode = apply_operating_mode(&profile_id, request.custom_base_profile.as_ref())?;
     let profile_label = profile_label(&profile_id);
 
@@ -70,8 +77,12 @@ pub fn apply_power_profile(
         || readback.dc.min_percent != processor_state.min_percent
         || readback.dc.max_percent != processor_state.max_percent;
 
+    thread::sleep(Duration::from_millis(500));
+    let power_after = nvidia_power::read_power_readback();
+    let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
+
     let detail = format!(
-        "{} Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{}",
+        "{} Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{} {}",
         operating_mode.detail,
         processor_state.min_percent,
         processor_state.max_percent,
@@ -83,7 +94,8 @@ pub fn apply_power_profile(
             " Windows reported a different processor policy than the requested values."
         } else {
             ""
-        }
+        },
+        power_detail
     );
 
     write_log_line(&paths.component_log("control-power"), "INFO", &detail)?;
@@ -485,12 +497,28 @@ fn read_processor_state_readback(
 ) -> Result<ProcessorStateReadback, Box<dyn std::error::Error + Send + Sync>> {
     Ok(ProcessorStateReadback {
         ac: ProcessorStateSettings {
-            min_percent: query_scheme_value(PROCTHROTTLEMIN, "Current AC Power Setting Index")?,
-            max_percent: query_scheme_value(PROCTHROTTLEMAX, "Current AC Power Setting Index")?,
+            min_percent: query_scheme_value(
+                PROCTHROTTLEMIN,
+                "Current AC Power Setting Index",
+                PowercfgCurrentIndex::Ac,
+            )?,
+            max_percent: query_scheme_value(
+                PROCTHROTTLEMAX,
+                "Current AC Power Setting Index",
+                PowercfgCurrentIndex::Ac,
+            )?,
         },
         dc: ProcessorStateSettings {
-            min_percent: query_scheme_value(PROCTHROTTLEMIN, "Current DC Power Setting Index")?,
-            max_percent: query_scheme_value(PROCTHROTTLEMAX, "Current DC Power Setting Index")?,
+            min_percent: query_scheme_value(
+                PROCTHROTTLEMIN,
+                "Current DC Power Setting Index",
+                PowercfgCurrentIndex::Dc,
+            )?,
+            max_percent: query_scheme_value(
+                PROCTHROTTLEMAX,
+                "Current DC Power Setting Index",
+                PowercfgCurrentIndex::Dc,
+            )?,
         },
     })
 }
@@ -498,6 +526,7 @@ fn read_processor_state_readback(
 fn query_scheme_value(
     setting: &str,
     label: &str,
+    current_index: PowercfgCurrentIndex,
 ) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
     let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
     if !output.status.success() {
@@ -514,6 +543,26 @@ fn query_scheme_value(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(value) = parse_labeled_powercfg_value(&stdout, setting, label)? {
+        return Ok(value);
+    }
+
+    if let Some(value) = parse_scoped_powercfg_value(&stdout, setting, current_index)? {
+        return Ok(value);
+    }
+
+    Err(format!(
+        "Could not find {} in powercfg readback for {}. The output did not contain enough numeric indexes for locale-neutral fallback parsing.",
+        label, setting
+    )
+    .into())
+}
+
+fn parse_labeled_powercfg_value(
+    stdout: &str,
+    setting: &str,
+    label: &str,
+) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let regex = current_index_regex();
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -527,20 +576,115 @@ fn query_scheme_value(
                 .map(|value| value.as_str())
                 .unwrap_or_default();
             let parsed = u32::from_str_radix(raw, 16)?;
-            return u8::try_from(parsed).map_err(|_| {
-                format!("Readback value {} for {} exceeds u8 range", parsed, setting).into()
-            });
+            return Ok(Some(percent_from_powercfg_hex(parsed, setting)?));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_scoped_powercfg_value(
+    stdout: &str,
+    setting: &str,
+    current_index: PowercfgCurrentIndex,
+) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let regex = current_index_regex();
+    let mut all_values = Vec::new();
+    let mut setting_values = Vec::new();
+    let mut in_target_setting = false;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("Alias GUID:") {
+            if in_target_setting && !setting_values.is_empty() && !trimmed.contains(setting) {
+                break;
+            }
+            if trimmed.contains(setting) {
+                in_target_setting = true;
+                setting_values.clear();
+                continue;
+            }
+        }
+
+        if in_target_setting && trimmed.is_empty() && !setting_values.is_empty() {
+            break;
+        }
+
+        for captures in regex.captures_iter(trimmed) {
+            let raw = captures
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
+            let parsed = u32::from_str_radix(raw, 16)?;
+            all_values.push(parsed);
+            if in_target_setting {
+                setting_values.push(parsed);
+            }
         }
     }
 
-    Err(format!(
-        "Could not find {} in powercfg readback for {}",
-        label, setting
-    )
-    .into())
+    let values = if setting_values.len() >= 2 {
+        &setting_values
+    } else {
+        &all_values
+    };
+    if values.len() < 2 {
+        return Ok(None);
+    }
+
+    let parsed = match current_index {
+        PowercfgCurrentIndex::Ac => values[values.len() - 2],
+        PowercfgCurrentIndex::Dc => values[values.len() - 1],
+    };
+    Ok(Some(percent_from_powercfg_hex(parsed, setting)?))
+}
+
+fn percent_from_powercfg_hex(
+    parsed: u32,
+    setting: &str,
+) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    u8::try_from(parsed)
+        .map_err(|_| format!("Readback value {} for {} exceeds u8 range", parsed, setting).into())
 }
 
 fn current_index_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| Regex::new(r"0x([0-9A-Fa-f]+)").expect("valid powercfg regex"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_localized_processor_state_indexes() {
+        let output = r#"
+    GUID de Configuração de Energia: 893dee8e-2bef-41e0-89c6-b55d0929964c  (Estado de desempenho mínimo)
+      Alias GUID: PROCTHROTTLEMIN
+      Configuração Mínima Possível: 0x00000000
+      Configuração Máxima Possível: 0x00000064
+      Incremento de Configurações Possíveis: 0x00000001
+      Unidades de Configurações Possíveis: %
+    Índice de Configurações de Correntes Alternadas Atuais: 0x00000023
+    Índice de Configurações de Correntes Contínuas Atuais: 0x0000002D
+"#;
+
+        assert_eq!(
+            parse_scoped_powercfg_value(output, PROCTHROTTLEMIN, PowercfgCurrentIndex::Ac).unwrap(),
+            Some(35)
+        );
+        assert_eq!(
+            parse_scoped_powercfg_value(output, PROCTHROTTLEMIN, PowercfgCurrentIndex::Dc).unwrap(),
+            Some(45)
+        );
+    }
+
+    #[test]
+    fn keeps_english_label_fast_path() {
+        let output = "Current AC Power Setting Index: 0x00000058";
+        assert_eq!(
+            parse_labeled_powercfg_value(output, PROCTHROTTLEMAX, "Current AC Power Setting Index")
+                .unwrap(),
+            Some(88)
+        );
+    }
 }

@@ -22,6 +22,11 @@ type NvmlDeviceGetTemperature = unsafe extern "C" fn(NvmlDevice, u32, *mut u32) 
 type NvmlDeviceGetClockInfo = unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> i32;
 type NvmlDeviceGetUtilizationRates = unsafe extern "C" fn(NvmlDevice, *mut NvmlUtilization) -> i32;
 type NvmlDeviceGetMemoryInfo = unsafe extern "C" fn(NvmlDevice, *mut NvmlMemory) -> i32;
+type NvmlDeviceGetPowerUsage = unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32;
+type NvmlDeviceGetEnforcedPowerLimit = unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32;
+type NvmlDeviceGetPowerManagementDefaultLimit = unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32;
+type NvmlDeviceGetPowerManagementLimitConstraints =
+    unsafe extern "C" fn(NvmlDevice, *mut u32, *mut u32) -> i32;
 
 #[repr(C)]
 struct NvmlUtilization {
@@ -46,6 +51,11 @@ struct NvmlApi {
     device_get_clock_info: NvmlDeviceGetClockInfo,
     device_get_utilization_rates: NvmlDeviceGetUtilizationRates,
     device_get_memory_info: NvmlDeviceGetMemoryInfo,
+    device_get_power_usage: Option<NvmlDeviceGetPowerUsage>,
+    device_get_enforced_power_limit: Option<NvmlDeviceGetEnforcedPowerLimit>,
+    device_get_power_management_default_limit: Option<NvmlDeviceGetPowerManagementDefaultLimit>,
+    device_get_power_management_limit_constraints:
+        Option<NvmlDeviceGetPowerManagementLimitConstraints>,
 }
 
 static NVML_API: OnceLock<Option<NvmlApi>> = OnceLock::new();
@@ -91,6 +101,26 @@ fn load_nvml_api() -> Option<NvmlApi> {
         let device_get_memory_info: NvmlDeviceGetMemoryInfo = **library
             .get::<Symbol<NvmlDeviceGetMemoryInfo>>(b"nvmlDeviceGetMemoryInfo\0")
             .ok()?;
+        let device_get_power_usage = library
+            .get::<Symbol<NvmlDeviceGetPowerUsage>>(b"nvmlDeviceGetPowerUsage\0")
+            .ok()
+            .map(|symbol| **symbol);
+        let device_get_enforced_power_limit = library
+            .get::<Symbol<NvmlDeviceGetEnforcedPowerLimit>>(b"nvmlDeviceGetEnforcedPowerLimit\0")
+            .ok()
+            .map(|symbol| **symbol);
+        let device_get_power_management_default_limit = library
+            .get::<Symbol<NvmlDeviceGetPowerManagementDefaultLimit>>(
+                b"nvmlDeviceGetPowerManagementDefaultLimit\0",
+            )
+            .ok()
+            .map(|symbol| **symbol);
+        let device_get_power_management_limit_constraints = library
+            .get::<Symbol<NvmlDeviceGetPowerManagementLimitConstraints>>(
+                b"nvmlDeviceGetPowerManagementLimitConstraints\0",
+            )
+            .ok()
+            .map(|symbol| **symbol);
 
         Some(NvmlApi {
             _library: library,
@@ -102,6 +132,10 @@ fn load_nvml_api() -> Option<NvmlApi> {
             device_get_clock_info,
             device_get_utilization_rates,
             device_get_memory_info,
+            device_get_power_usage,
+            device_get_enforced_power_limit,
+            device_get_power_management_default_limit,
+            device_get_power_management_limit_constraints,
         })
     }
 }
@@ -164,17 +198,67 @@ fn read_nvml_snapshot(
         } else {
             None
         };
+        let power_draw_w =
+            read_nvml_power_mw(api.device_get_power_usage, device).map(milliwatts_to_watts);
+        let power_limit_w = read_nvml_power_mw(api.device_get_enforced_power_limit, device)
+            .map(milliwatts_to_watts);
+        let power_default_limit_w =
+            read_nvml_power_mw(api.device_get_power_management_default_limit, device)
+                .map(milliwatts_to_watts);
+        let (power_min_limit_w, power_max_limit_w) =
+            read_nvml_power_limit_constraints(api, device).unwrap_or((None, None));
 
         Ok(GpuSnapshot {
             usage_percent: Some(utilization.gpu.clamp(0, 100) as u8),
             memory_usage_percent,
             temp_c: Some(temperature.clamp(0, 255) as u8),
             clock_mhz: Some(clock_mhz.clamp(0, u16::MAX as u32) as u16),
+            power_draw_w,
+            power_limit_w,
+            power_default_limit_w,
+            power_min_limit_w,
+            power_max_limit_w,
         })
     })();
 
     let _ = unsafe { (api.shutdown)() };
     result
+}
+
+fn read_nvml_power_mw(
+    function: Option<unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32>,
+    device: NvmlDevice,
+) -> Option<u32> {
+    let function = function?;
+    let mut value = 0u32;
+    let status = unsafe { function(device, &mut value) };
+    if status == NVML_SUCCESS {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn read_nvml_power_limit_constraints(
+    api: &NvmlApi,
+    device: NvmlDevice,
+) -> Option<(Option<f32>, Option<f32>)> {
+    let function = api.device_get_power_management_limit_constraints?;
+    let mut min_limit = 0u32;
+    let mut max_limit = 0u32;
+    let status = unsafe { function(device, &mut min_limit, &mut max_limit) };
+    if status == NVML_SUCCESS {
+        Some((
+            Some(milliwatts_to_watts(min_limit)),
+            Some(milliwatts_to_watts(max_limit)),
+        ))
+    } else {
+        None
+    }
+}
+
+fn milliwatts_to_watts(value: u32) -> f32 {
+    ((value as f32 / 1000.0) * 100.0).round() / 100.0
 }
 
 fn nvml_call(code: i32, call_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -188,7 +272,7 @@ fn nvml_call(code: i32, call_name: &str) -> Result<(), Box<dyn std::error::Error
 fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let output = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total",
+            "--query-gpu=temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit",
             "--format=csv,noheader,nounits",
         ])
         .output()?;
@@ -238,5 +322,22 @@ fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error 
         memory_usage_percent,
         temp_c,
         clock_mhz,
+        power_draw_w: parse_optional_watts(fields.get(5).copied()),
+        power_limit_w: parse_optional_watts(fields.get(6).copied()),
+        power_default_limit_w: parse_optional_watts(fields.get(7).copied()),
+        power_min_limit_w: parse_optional_watts(fields.get(8).copied()),
+        power_max_limit_w: parse_optional_watts(fields.get(9).copied()),
     })
+}
+
+fn parse_optional_watts(value: Option<&str>) -> Option<f32> {
+    let value = value?.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("N/A") || value == "[N/A]" {
+        return None;
+    }
+
+    value
+        .parse::<f32>()
+        .ok()
+        .map(|watts| (watts * 100.0).round() / 100.0)
 }

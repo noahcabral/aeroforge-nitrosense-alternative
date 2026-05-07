@@ -4,6 +4,7 @@ mod fan;
 mod gpu_tuning;
 mod models;
 mod nvapi_whisper;
+mod nvidia_power;
 mod nvml;
 mod power;
 mod smart_charge;

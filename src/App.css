@@ -1813,7 +1813,7 @@
     linear-gradient(135deg, rgba(31, 57, 87, 0.35), rgba(12, 18, 28, 0.92)),
     radial-gradient(circle at 20% 20%, rgba(134, 198, 255, 0.28), transparent 32%);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: filter 180ms ease, background 180ms ease;
+  transition: background 180ms ease;
 }
 
 .screen-preview.is-filtered {
@@ -1854,7 +1854,7 @@
     rgba(9, 13, 19, 0.78);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow:
-    0 22px 70px rgba(0, 0, 0, 0.35),
+    0 18px 36px rgba(0, 0, 0, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
@@ -1986,7 +1986,6 @@
   display: flex;
   flex-direction: column;
   gap: 0.22rem;
-  animation: rise-in 700ms ease both;
 }
 
 .metric-card span,
@@ -2523,7 +2522,6 @@
   height: 70%;
   border-radius: 50%;
   background: radial-gradient(circle, rgba(255, 170, 92, 0.34), rgba(255, 170, 92, 0) 72%);
-  filter: blur(12px);
 }
 
 .boot-splash__mark {
@@ -2532,7 +2530,6 @@
   height: auto;
   top: 14%;
   left: 12%;
-  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.32));
 }
 
 .boot-splash__copy {

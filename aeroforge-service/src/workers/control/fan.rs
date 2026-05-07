@@ -15,6 +15,7 @@ use super::{
         AppliedFanControlSnapshot, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
         FanCurvePoint, FanCurveSet, FanProfileId,
     },
+    nvidia_power::{format_power_limit_delta, read_power_readback},
 };
 
 pub fn apply_fan_profile(
@@ -80,6 +81,7 @@ fn apply_firmware_wmi_fan_control(
         &format!("Applying fan profile {}. {}", profile_id.as_str(), context),
     )?;
 
+    let power_before = read_power_readback();
     let behavior_input = behavior_input_for_profile(&profile_id);
     let behavior_result = apply_fan_behavior(behavior_input)?;
 
@@ -90,6 +92,10 @@ fn apply_firmware_wmi_fan_control(
     if let Some(gpu_speed) = gpu_speed_percent {
         speed_results.push(apply_fan_speed(FAN_SELECTOR_GPU, gpu_speed)?);
     }
+
+    thread::sleep(Duration::from_millis(500));
+    let power_after = read_power_readback();
+    let power_detail = format_power_limit_delta(&power_before, &power_after);
 
     let readback = Some(json!({
         "backend": "acer-gaming-wmi",
@@ -113,16 +119,24 @@ fn apply_firmware_wmi_fan_control(
             })
         }).collect::<Vec<_>>(),
         "verification": build_fan_verification(),
+        "nvidiaPower": {
+            "before": power_before.clone(),
+            "after": power_after.clone(),
+        },
     }));
 
     let verification = build_fan_verification_detail();
-    let detail = build_apply_detail(
-        profile_id.as_str(),
-        context,
-        behavior_input,
-        cpu_speed_percent,
-        gpu_speed_percent,
-        &verification,
+    let detail = format!(
+        "{} {}",
+        build_apply_detail(
+            profile_id.as_str(),
+            context,
+            behavior_input,
+            cpu_speed_percent,
+            gpu_speed_percent,
+            &verification,
+        ),
+        power_detail
     );
     write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
 

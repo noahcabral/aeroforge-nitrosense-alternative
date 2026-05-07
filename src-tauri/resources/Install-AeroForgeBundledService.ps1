@@ -73,6 +73,64 @@ function Invoke-Sc {
   return $output
 }
 
+function Get-AeroForgeServicePid {
+  try {
+    $output = & sc.exe queryex $serviceName 2>&1
+    foreach ($line in $output) {
+      if ($line -match 'PID\s*:\s*(\d+)') {
+        return [int]$Matches[1]
+      }
+    }
+  } catch {
+    Write-InstallLog "Unable to query $serviceName PID: $($_.Exception.Message)"
+  }
+
+  return 0
+}
+
+function Stop-AeroForgeServiceProcesses {
+  param([string]$Reason = 'service binary update')
+
+  $pids = @()
+  $servicePid = Get-AeroForgeServicePid
+  if ($servicePid -gt 0) {
+    $pids += $servicePid
+  }
+
+  $namedProcesses = Get-Process aeroforge-service -ErrorAction SilentlyContinue
+  foreach ($process in $namedProcesses) {
+    if ($pids -notcontains $process.Id) {
+      $pids += $process.Id
+    }
+  }
+
+  foreach ($targetPid in $pids | Select-Object -Unique) {
+    try {
+      Write-InstallLog "Terminating aeroforge-service PID $targetPid for $Reason."
+      Stop-Process -Id $targetPid -Force -ErrorAction Stop
+    } catch {
+      Write-InstallLog "Stop-Process failed for PID ${targetPid}: $($_.Exception.Message)"
+      & taskkill.exe /PID $targetPid /F /T 2>&1 | ForEach-Object {
+        Write-InstallLog "  taskkill: $_"
+      }
+    }
+  }
+
+  $deadline = (Get-Date).AddSeconds(15)
+  do {
+    $remaining = Get-Process aeroforge-service -ErrorAction SilentlyContinue
+    if (-not $remaining) {
+      return
+    }
+
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+
+  $remainingIds = (Get-Process aeroforge-service -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty Id) -join ', '
+  throw "aeroforge-service process still running after termination wait. Remaining PID(s): $remainingIds"
+}
+
 function Copy-WithRetry {
   param(
     [Parameter(Mandatory = $true)]
@@ -92,6 +150,7 @@ function Copy-WithRetry {
         throw "Could not copy $Source to $Destination after retrying: $($_.Exception.Message)"
       }
       Write-InstallLog "Copy retry after error: $($_.Exception.Message)"
+      Stop-AeroForgeServiceProcesses -Reason 'locked service binary copy retry'
       Start-Sleep -Milliseconds 500
     }
   } while ($true)
@@ -132,10 +191,9 @@ function Stop-AeroForgeService {
     } while ((Get-Date) -lt $deadline)
 
     Write-InstallLog "$serviceName did not stop cleanly; terminating service process if still present."
-    Get-Process aeroforge-service -ErrorAction SilentlyContinue |
-      Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 750
   }
+
+  Stop-AeroForgeServiceProcesses -Reason 'service stop'
 }
 
 function Wait-ServiceRunning {
@@ -162,8 +220,6 @@ function Install-AeroForgeService {
 
   New-Item -ItemType Directory -Force -Path $serviceBinDir | Out-Null
   Stop-AeroForgeService
-  Get-Process aeroforge-service -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
   Copy-WithRetry -Source $resolvedSource -Destination $installedExe
 
   $existingService = Get-AeroForgeService
@@ -207,8 +263,7 @@ function Uninstall-AeroForgeService {
     Invoke-Sc -Arguments @('delete', $serviceName) -AllowedExitCodes @(0, 1060) | Out-Null
     Wait-ServiceDeleted
   }
-  Get-Process aeroforge-service -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+  Stop-AeroForgeServiceProcesses -Reason 'uninstall'
   if (Test-Path -LiteralPath $installedExe) {
     Remove-Item -LiteralPath $installedExe -Force -ErrorAction SilentlyContinue
   }

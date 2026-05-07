@@ -138,10 +138,13 @@ FunctionEnd
   Call DetectNitroSense
   StrCmp $NitroSenseUninstallString "" nitro_preinstall_done
 
-  IfSilent 0 +3
+  IfSilent 0 nitro_prompt_user
+    IfFileExists "$INSTDIR\uninstall.exe" nitro_preinstall_done 0
+    IfFileExists "$INSTDIR\aeroforge-control.exe" nitro_preinstall_done 0
     MessageBox MB_ICONSTOP|MB_OK "AeroForge Control cannot continue in silent mode while $NitroSenseDisplayName is installed."
     Abort
 
+  nitro_prompt_user:
   MessageBox MB_ICONEXCLAMATION|MB_YESNO "$NitroSenseDisplayName is installed.$\r$\n$\r$\nInstalling AeroForge Control will uninstall $NitroSenseDisplayName before setup continues.$\r$\n$\r$\nSelect Yes to uninstall NitroSense and continue, or No to cancel AeroForge setup." IDYES nitro_continue IDNO nitro_cancel
 
   nitro_cancel:

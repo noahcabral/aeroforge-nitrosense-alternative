@@ -161,6 +161,11 @@ export type TelemetrySnapshot = {
   cpuUsagePercent: number
   gpuUsagePercent: number
   gpuMemoryUsagePercent: number | null
+  gpuPowerDrawW: number | null
+  gpuPowerLimitW: number | null
+  gpuPowerDefaultLimitW: number | null
+  gpuPowerMinLimitW: number | null
+  gpuPowerMaxLimitW: number | null
   cpuName: string | null
   cpuBrand: string | null
   gpuName: string | null

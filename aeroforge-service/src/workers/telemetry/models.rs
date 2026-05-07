@@ -12,6 +12,11 @@ pub struct TelemetrySnapshot {
     pub cpu_usage_percent: u8,
     pub gpu_usage_percent: u8,
     pub gpu_memory_usage_percent: Option<u8>,
+    pub gpu_power_draw_w: Option<f32>,
+    pub gpu_power_limit_w: Option<f32>,
+    pub gpu_power_default_limit_w: Option<f32>,
+    pub gpu_power_min_limit_w: Option<f32>,
+    pub gpu_power_max_limit_w: Option<f32>,
     pub cpu_name: Option<String>,
     pub cpu_brand: Option<String>,
     pub gpu_name: Option<String>,
@@ -41,6 +46,11 @@ pub struct GpuSnapshot {
     pub memory_usage_percent: Option<u8>,
     pub temp_c: Option<u8>,
     pub clock_mhz: Option<u16>,
+    pub power_draw_w: Option<f32>,
+    pub power_limit_w: Option<f32>,
+    pub power_default_limit_w: Option<f32>,
+    pub power_min_limit_w: Option<f32>,
+    pub power_max_limit_w: Option<f32>,
 }
 
 #[derive(Default, Clone, Copy)]

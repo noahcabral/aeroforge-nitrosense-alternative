@@ -63,6 +63,21 @@ type FrameStats = {
   updatedAt: string
 }
 
+type StageFitTarget = 'home' | 'power' | 'fans'
+
+type StageFitSnapshot = {
+  tab: StageFitTarget
+  scale: number
+  scaledHeight: number
+  naturalWidth: number
+  naturalHeight: number
+  availableWidth: number
+  availableHeight: number
+  windowWidth: number
+  windowHeight: number
+  updatedAt: string
+}
+
 type CurveSet = Record<CurveTarget, CurvePoint[]>
 
 type PowerProfile = {
@@ -767,6 +782,14 @@ function formatTelemetryValue(value: number | null | undefined, suffix = '') {
   return `${value}${suffix}`
 }
 
+function formatWattValue(value: number | null | undefined, maximumFractionDigits = 0) {
+  if (value == null || Number.isNaN(value)) {
+    return null
+  }
+
+  return `${value.toLocaleString(undefined, { maximumFractionDigits })}W`
+}
+
 function sanitizeIdentityText(value: string | null | undefined) {
   if (!value) {
     return null
@@ -838,6 +861,26 @@ function formatFrameTime(value: number) {
   return `${value.toFixed(1)} ms`
 }
 
+function formatStageFitValue(snapshot: StageFitSnapshot | undefined) {
+  if (!snapshot) {
+    return null
+  }
+
+  return `${snapshot.tab} ${snapshot.scale.toFixed(3)} / ${Math.round(snapshot.scaledHeight)}px`
+}
+
+function formatStageFitDetail(snapshot: StageFitSnapshot | undefined) {
+  if (!snapshot) {
+    return null
+  }
+
+  return `natural ${Math.round(snapshot.naturalWidth)}x${Math.round(
+    snapshot.naturalHeight,
+  )}, available ${Math.round(snapshot.availableWidth)}x${Math.round(
+    snapshot.availableHeight,
+  )}, window ${snapshot.windowWidth}x${snapshot.windowHeight} at ${snapshot.updatedAt}`
+}
+
 function presentPositive(value: number | null | undefined) {
   if (value == null || value <= 0) {
     return null
@@ -867,6 +910,8 @@ function hasUsableTelemetry(snapshot: TelemetrySnapshot | null | undefined) {
       snapshot.cpuUsagePercent > 0 ||
       snapshot.gpuUsagePercent > 0 ||
       snapshot.gpuMemoryUsagePercent != null ||
+      snapshot.gpuPowerLimitW != null ||
+      snapshot.gpuPowerDrawW != null ||
       snapshot.cpuClockMhz > 0 ||
       snapshot.gpuClockMhz > 0 ||
       snapshot.cpuFanRpm > 0 ||
@@ -931,6 +976,25 @@ function buildPowerDashboardSummary(
   const usageLabel = usagePercent != null ? `Usage ${usagePercent}%` : null
 
   return [temperatureLabel, usageLabel].filter(Boolean).join(' • ')
+}
+
+function buildGpuPowerDashboardSummary(
+  temperatureC: number | null | undefined,
+  usagePercent: number | null | undefined,
+  powerDrawW: number | null | undefined,
+  powerLimitW: number | null | undefined,
+) {
+  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
+  const powerLabel =
+    powerDrawW != null && powerLimitW != null
+      ? `Power ${formatWattValue(powerDrawW, 1)} / ${formatWattValue(powerLimitW)}`
+      : powerLimitW != null
+        ? `Limit ${formatWattValue(powerLimitW)}`
+        : powerDrawW != null
+          ? `Power ${formatWattValue(powerDrawW, 1)}`
+          : null
+
+  return [baseSummary, powerLabel].filter(Boolean).join(' • ')
 }
 
 function getProcessorStateForPowerProfile(
@@ -1216,7 +1280,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.2')
+  const [backendVersion, setBackendVersion] = useState('0.12.6')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
@@ -1251,10 +1315,14 @@ function App() {
   const [fansScaledHeight, setFansScaledHeight] = useState<number | null>(null)
   const [powerScale, setPowerScale] = useState(1)
   const [powerScaledHeight, setPowerScaledHeight] = useState<number | null>(null)
+  const [stageFitSnapshots, setStageFitSnapshots] = useState<
+    Partial<Record<StageFitTarget, StageFitSnapshot>>
+  >({})
   const [runtimeEstimateCountdownSec, setRuntimeEstimateCountdownSec] = useState(0)
   const initializedPersistenceRef = useRef(false)
   const activeTabRef = useRef(activeTab)
   const debugEventsRef = useRef<string[]>([])
+  const stageFitSignatureRef = useRef<Partial<Record<StageFitTarget, string>>>({})
   const telemetrySnapshotRef = useRef<string | null>(null)
   const liveControlSnapshotStateRef = useRef<string | null>(null)
   const liveControlSnapshotRef = useRef<LiveControlSnapshot | null>(null)
@@ -1336,6 +1404,10 @@ function App() {
   const displayedCpuUsage = activeTelemetry?.cpuUsagePercent ?? null
   const displayedGpuUsage = activeTelemetry?.gpuUsagePercent ?? null
   const displayedGpuMemoryUsage = activeTelemetry?.gpuMemoryUsagePercent ?? null
+  const displayedGpuPowerDraw = activeTelemetry?.gpuPowerDrawW ?? null
+  const displayedGpuPowerLimit = activeTelemetry?.gpuPowerLimitW ?? null
+  const displayedGpuPowerDefaultLimit = activeTelemetry?.gpuPowerDefaultLimitW ?? null
+  const displayedGpuPowerMaxLimit = activeTelemetry?.gpuPowerMaxLimitW ?? null
   const displayedGpuClock = presentPositive(activeTelemetry?.gpuClockMhz ?? null)
   const displayedCpuClock = presentPositive(activeTelemetry?.cpuClockMhz ?? null)
   const displayedCpuFanRpm = presentPositive(activeTelemetry?.cpuFanRpm ?? null)
@@ -1356,8 +1428,24 @@ function App() {
     activeTelemetry?.systemModel,
     'System sensor',
   )
+  const liveGpuPowerLimitLabel = formatWattValue(displayedGpuPowerLimit, 1)
+  const liveGpuPowerDrawLabel = formatWattValue(displayedGpuPowerDraw, 1)
+  const liveGpuPowerCeilingDetail =
+    liveGpuPowerDrawLabel != null && liveGpuPowerLimitLabel != null
+      ? `Draw ${liveGpuPowerDrawLabel} / Limit ${liveGpuPowerLimitLabel}`
+      : liveGpuPowerLimitLabel != null
+        ? `Limit ${liveGpuPowerLimitLabel}`
+        : liveGpuPowerDrawLabel != null
+          ? `Draw ${liveGpuPowerDrawLabel}`
+          : displayedGpuPowerDefaultLimit != null && displayedGpuPowerMaxLimit != null
+            ? `Default ${formatWattValue(displayedGpuPowerDefaultLimit, 1)} / Max ${formatWattValue(displayedGpuPowerMaxLimit, 1)}`
+            : displayedGpuPowerMaxLimit != null
+              ? `Driver max ${formatWattValue(displayedGpuPowerMaxLimit, 1)}`
+              : null
   const currentPowerWattage =
-    activePowerProfile === 'custom'
+    liveGpuPowerLimitLabel != null
+      ? `GPU ${liveGpuPowerLimitLabel} limit`
+      : activePowerProfile === 'custom'
       ? `${customPowerBaseCeilingLabels[customPowerBase]} • ${Math.round(18 + customProcessorState.max * 0.57)}W target`
       : currentPowerProfile.wattage
   const currentPowerRuntime = formatRemainingRuntime(displayedBatteryLifeRemainingSec)
@@ -1587,18 +1675,21 @@ function App() {
     const activeStage =
       activeTab === 'home'
         ? {
+            id: 'home' as const,
             ref: homeStageRef,
             setScale: setHomeScale,
             setScaledHeight: setHomeScaledHeight,
           }
         : activeTab === 'fans'
           ? {
+              id: 'fans' as const,
               ref: fansStageRef,
               setScale: setFansScale,
               setScaledHeight: setFansScaledHeight,
             }
           : activeTab === 'power'
             ? {
+                id: 'power' as const,
                 ref: powerStageRef,
                 setScale: setPowerScale,
                 setScaledHeight: setPowerScaledHeight,
@@ -1653,6 +1744,46 @@ function App() {
       const nextScale = Math.min(1, availableHeight / naturalHeight, availableWidth / naturalWidth)
       const clampedScale = Number.isFinite(nextScale) ? Math.max(0.78, nextScale) : 1
       const nextScaledHeight = naturalHeight * clampedScale
+      const signature = [
+        clampedScale.toFixed(3),
+        Math.round(nextScaledHeight),
+        Math.round(naturalWidth),
+        Math.round(naturalHeight),
+        Math.round(availableWidth),
+        Math.round(availableHeight),
+        window.innerWidth,
+        window.innerHeight,
+      ].join('|')
+
+      if (stageFitSignatureRef.current[activeStage.id] !== signature) {
+        const snapshot: StageFitSnapshot = {
+          tab: activeStage.id,
+          scale: clampedScale,
+          scaledHeight: nextScaledHeight,
+          naturalWidth,
+          naturalHeight,
+          availableWidth,
+          availableHeight,
+          windowWidth: window.innerWidth,
+          windowHeight: window.innerHeight,
+          updatedAt: formatDebugClock(new Date()),
+        }
+
+        stageFitSignatureRef.current[activeStage.id] = signature
+        setStageFitSnapshots((current) => ({
+          ...current,
+          [activeStage.id]: snapshot,
+        }))
+        pushDebugEvent(
+          `stage fit ${activeStage.id}: scale ${snapshot.scale.toFixed(3)}, height ${Math.round(
+            snapshot.scaledHeight,
+          )}px, natural ${Math.round(snapshot.naturalWidth)}x${Math.round(
+            snapshot.naturalHeight,
+          )}, available ${Math.round(snapshot.availableWidth)}x${Math.round(
+            snapshot.availableHeight,
+          )}`,
+        )
+      }
 
       if (Math.abs(lastScale - clampedScale) > 0.001) {
         activeStage.setScale(clampedScale)
@@ -3105,6 +3236,17 @@ function App() {
     pulseControl('daily')
   }
 
+  const activeStageFitSnapshot =
+    activeTab === 'home' || activeTab === 'power' || activeTab === 'fans'
+      ? stageFitSnapshots[activeTab]
+      : stageFitSnapshots.home ?? stageFitSnapshots.power ?? stageFitSnapshots.fans
+  const stageFitDetail =
+    (['home', 'power', 'fans'] as const)
+      .map((tab) => formatStageFitValue(stageFitSnapshots[tab]))
+      .filter(Boolean)
+      .join(' | ') || 'Switch Home, Power, or Fans to capture scale data.'
+  const activeStageFitDetail = formatStageFitDetail(activeStageFitSnapshot)
+
   return (
     <div className="shell">
       <main className="dashboard" ref={dashboardRef}>
@@ -3457,7 +3599,7 @@ function App() {
                   <span className="eyebrow">Power Manager</span>
                   <div className="power-mode__meta-card">
                     <strong>{currentPowerWattage}</strong>
-                    <small>{currentPowerRuntime || currentPowerRuntimeDetail}</small>
+                    <small>{liveGpuPowerCeilingDetail || currentPowerRuntime || currentPowerRuntimeDetail}</small>
                   </div>
                 </div>
               </div>
@@ -3494,7 +3636,14 @@ function App() {
                       <span className="eyebrow">GPU</span>
                       <strong>{formatTelemetryValue(displayedGpuClock)}</strong>
                       <small>{displayedGpuClock == null ? '' : 'MHz'}</small>
-                      <p>{buildPowerDashboardSummary(displayedGpuTemp, displayedGpuUsage)}</p>
+                      <p>
+                        {buildGpuPowerDashboardSummary(
+                          displayedGpuTemp,
+                          displayedGpuUsage,
+                          displayedGpuPowerDraw,
+                          displayedGpuPowerLimit,
+                        )}
+                      </p>
                     </div>
                   </div>
 
@@ -4223,6 +4372,12 @@ function App() {
                       {Math.round(frameStats.fps) || 0} fps, {frameStats.longFrameCount} long
                       frames. Sampled at {frameStats.updatedAt}.
                     </small>
+                  </div>
+
+                  <div className="debug-card">
+                    <span>Stage Fit</span>
+                    <strong>{formatStageFitValue(activeStageFitSnapshot) ?? 'Waiting'}</strong>
+                    <small>{activeStageFitDetail ?? stageFitDetail}</small>
                   </div>
                 </div>
 
