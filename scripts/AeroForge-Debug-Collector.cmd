@@ -33,7 +33,8 @@ param(
   [switch]$NoPause,
   [switch]$NoElevate,
   [int]$SampleSeconds = 0,
-  [int]$SampleIntervalSeconds = 3
+  [int]$SampleIntervalSeconds = 3,
+  [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -157,6 +158,10 @@ function Start-ElevatedCollectorIfNeeded {
     $argumentList.Add("-SampleIntervalSeconds")
     $argumentList.Add([string]$SampleIntervalSeconds)
   }
+  if (-not [string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $argumentList.Add("-OutputRoot")
+    $argumentList.Add($OutputRoot)
+  }
 
   try {
     $quotedArgs = New-Object System.Collections.Generic.List[string]
@@ -229,6 +234,24 @@ function Invoke-NamedPipeJsonRequest {
     if ($reader) { $reader.Dispose() }
     if ($writer) { $writer.Dispose() }
     if ($pipe) { $pipe.Dispose() }
+  }
+}
+
+function ConvertFrom-PipeJsonReply {
+  param([AllowNull()][string]$Text)
+
+  if ([string]::IsNullOrWhiteSpace($Text)) {
+    return $null
+  }
+
+  try {
+    $parsed = $Text | ConvertFrom-Json -ErrorAction Stop
+    if ($parsed.kind -eq "ok" -and $null -ne $parsed.payload) {
+      return $parsed.payload
+    }
+    return $parsed
+  } catch {
+    return $null
   }
 }
 
@@ -346,11 +369,41 @@ function Write-DebugSummaryJson {
   $pipeTelemetryJson = $null
   $pipeControlsJson = $null
   $pipeCapabilitiesJson = $null
+  $pipeStatusPayload = $null
+  $pipeTelemetryPayload = $null
+  $pipeControlsPayload = $null
+  $pipeCapabilitiesPayload = $null
   try { $pipeStatusJson = $pipeStatus | ConvertFrom-Json -ErrorAction Stop } catch {}
   try { $pipeTelemetryJson = $pipeTelemetry | ConvertFrom-Json -ErrorAction Stop } catch {}
   try { $pipeControlsJson = $pipeControls | ConvertFrom-Json -ErrorAction Stop } catch {}
   try { $pipeCapabilitiesJson = $pipeCapabilities | ConvertFrom-Json -ErrorAction Stop } catch {}
+  $pipeStatusPayload = ConvertFrom-PipeJsonReply -Text $pipeStatus
+  $pipeTelemetryPayload = ConvertFrom-PipeJsonReply -Text $pipeTelemetry
+  $pipeControlsPayload = ConvertFrom-PipeJsonReply -Text $pipeControls
+  $pipeCapabilitiesPayload = ConvertFrom-PipeJsonReply -Text $pipeCapabilities
   $powerScheme = (powercfg.exe /getactivescheme 2>&1 | Out-String).Trim()
+  $fileFacts = @(Get-AeroForgeExecutableFacts -Roots $script:InstallRoots)
+  $installerLogFacts = @(Get-InstallerLogFacts)
+
+  $serviceBinary = Get-ServiceBinaryPath
+  if ($service -and $serviceBinary -and -not (Test-Path -LiteralPath $serviceBinary)) {
+    $flags.Add("AeroForgeService points at a missing executable: $serviceBinary")
+  }
+
+  $serviceFact = $fileFacts | Where-Object { $_.path -eq $serviceBinary -or $_.path -like "*\AeroForge\Service\bin\aeroforge-service.exe" } | Select-Object -First 1
+  $controlVersions = @(
+    $fileFacts |
+      Where-Object { $_.name -eq "aeroforge-control.exe" -and -not [string]::IsNullOrWhiteSpace($_.productVersion) } |
+      Select-Object -ExpandProperty productVersion -Unique
+  )
+  if (
+    $serviceFact -and
+    -not [string]::IsNullOrWhiteSpace($serviceFact.productVersion) -and
+    $controlVersions.Count -gt 0 -and
+    $controlVersions -notcontains $serviceFact.productVersion
+  ) {
+    $flags.Add("AeroForge app/service version mismatch: service $($serviceFact.productVersion), app versions $($controlVersions -join ', ').")
+  }
 
   if ($processor -and $processor.Manufacturer -match 'AMD') {
     $flags.Add("AMD CPU detected; inspect cpu-and-amd-diagnostics and sampling output for frequency/power-state behavior.")
@@ -370,6 +423,25 @@ function Write-DebugSummaryJson {
   ) {
     $flags.Add("AeroForge service pipe probe failed or reported unavailable.")
   }
+  if ($pipeTelemetryPayload) {
+    if (($pipeTelemetryPayload.cpuFanRpm -as [int]) -eq 0 -and ($pipeTelemetryPayload.gpuFanRpm -as [int]) -eq 0) {
+      $flags.Add("AeroForge telemetry reported no fan RPM values.")
+    }
+    if ($processor -and $processor.Manufacturer -match 'Intel' -and $null -eq $pipeTelemetryPayload.cpuPl1W -and $null -eq $pipeTelemetryPayload.cpuPl2W) {
+      $flags.Add("Intel CPU detected but AeroForge telemetry did not report PL1/PL2 values.")
+    }
+  }
+  if ($pipeControlsPayload) {
+    if ($pipeControlsPayload.powerApplySupported -eq $false) {
+      $flags.Add("AeroForge control snapshot reports power apply unsupported.")
+    }
+    if ($pipeControlsPayload.fanApplySupported -eq $false) {
+      $flags.Add("AeroForge control snapshot reports fan apply unsupported.")
+    }
+    if ($pipeControlsPayload.fanCurveApplySupported -eq $false) {
+      $flags.Add("AeroForge control snapshot reports custom fan curves unsupported.")
+    }
+  }
 
   $summary = [ordered]@{
     generatedAt = (Get-Date -Format o)
@@ -388,6 +460,12 @@ function Write-DebugSummaryJson {
     parsedPipeTelemetry = $pipeTelemetryJson
     parsedPipeControls = $pipeControlsJson
     parsedPipeCapabilities = $pipeCapabilitiesJson
+    pipeStatusPayload = $pipeStatusPayload
+    pipeTelemetryPayload = $pipeTelemetryPayload
+    pipeControlsPayload = $pipeControlsPayload
+    pipeCapabilitiesPayload = $pipeCapabilitiesPayload
+    aeroForgeExecutableFacts = $fileFacts
+    installerLogs = $installerLogFacts
     flags = @($flags)
   }
 
@@ -481,7 +559,7 @@ function Copy-SafeTextTree {
     $sensitiveName = $file.Name -match '(?i)(token|secret|credential|password|private[-_ ]?key)'
     $privacyHeavyPath = $file.FullName -match '(?i)\\(EBWebView|Cache|Code Cache|GPUCache|Local Storage|Session Storage|IndexedDB|Service Worker|blob_storage|DawnCache|GrShaderCache|ShaderCache)\\'
     $stagedUpdatePath = $file.FullName -match '(?i)\\updates\\(install|stage|staged|downloads?)\\'
-    $textLike = $extension -in @(".json", ".log", ".txt", ".csv", ".xml", ".yaml", ".yml", ".toml", ".ini", ".nfo", ".ps1", ".cmd", ".bat", ".nsh")
+    $textLike = $extension -in @(".json", ".jsonl", ".log", ".txt", ".csv", ".xml", ".yaml", ".yml", ".toml", ".ini", ".nfo", ".ps1", ".cmd", ".bat", ".nsh")
 
     if ($sensitiveName -or $privacyHeavyPath -or $stagedUpdatePath -or -not $textLike -or $file.Length -gt $MaxBytes) {
       $manifest += [pscustomobject]@{
@@ -561,6 +639,150 @@ function Get-ServiceBinaryPath {
   }
 }
 
+function Get-ExecutableFact {
+  param([string]$Path)
+
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+    return $null
+  }
+
+  try {
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $hash = $null
+    try {
+      $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch {
+      $hash = "hash failed: $($_.Exception.Message)"
+    }
+
+    return [pscustomobject]@{
+      name = $item.Name
+      path = $item.FullName
+      length = $item.Length
+      modifiedUtc = $item.LastWriteTimeUtc.ToString("o")
+      fileVersion = $item.VersionInfo.FileVersion
+      productVersion = $item.VersionInfo.ProductVersion
+      productName = $item.VersionInfo.ProductName
+      companyName = $item.VersionInfo.CompanyName
+      sha256 = $hash
+    }
+  } catch {
+    return [pscustomobject]@{
+      name = Split-Path -Leaf $Path
+      path = $Path
+      error = $_.Exception.Message
+    }
+  }
+}
+
+function Get-AeroForgeExecutableFacts {
+  param([string[]]$Roots)
+
+  $paths = New-Object System.Collections.Generic.List[string]
+  foreach ($root in $Roots | Where-Object { $_ } | Select-Object -Unique) {
+    if (Test-Path -LiteralPath $root) {
+      Get-ChildItem -LiteralPath $root -Recurse -Force -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @("aeroforge-control.exe", "aeroforge-service.exe", "aeroforge-hotkey-helper.exe") } |
+        ForEach-Object { $paths.Add($_.FullName) }
+    }
+  }
+
+  $servicePath = Get-ServiceBinaryPath
+  if ($servicePath) {
+    $paths.Add($servicePath)
+  }
+
+  $programDataServiceBinary = Join-Path $env:ProgramData "AeroForge\Service\bin\aeroforge-service.exe"
+  $paths.Add($programDataServiceBinary)
+
+  foreach ($path in $paths | Where-Object { $_ } | Select-Object -Unique) {
+    Get-ExecutableFact -Path $path
+  }
+}
+
+function Get-AeroForgeShortcutTargets {
+  $folders = @(
+    [Environment]::GetFolderPath("Desktop"),
+    [Environment]::GetFolderPath("CommonDesktopDirectory"),
+    [Environment]::GetFolderPath("StartMenu"),
+    [Environment]::GetFolderPath("CommonStartMenu"),
+    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"),
+    (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs")
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+
+  $shell = $null
+  try {
+    $shell = New-Object -ComObject WScript.Shell
+  } catch {
+    "WScript.Shell unavailable: $($_.Exception.Message)"
+    return
+  }
+
+  foreach ($folder in $folders) {
+    Get-ChildItem -LiteralPath $folder -Recurse -Force -Filter "*.lnk" -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match 'AeroForge|Nitro|Acer|Predator' } |
+      ForEach-Object {
+        try {
+          $shortcut = $shell.CreateShortcut($_.FullName)
+          [pscustomobject]@{
+            shortcut = $_.FullName
+            target = $shortcut.TargetPath
+            arguments = $shortcut.Arguments
+            workingDirectory = $shortcut.WorkingDirectory
+            iconLocation = $shortcut.IconLocation
+            modifiedUtc = $_.LastWriteTimeUtc.ToString("o")
+          }
+        } catch {
+          [pscustomobject]@{
+            shortcut = $_.FullName
+            error = $_.Exception.Message
+          }
+        }
+      }
+  }
+}
+
+function Get-InstallerLogFacts {
+  $paths = @(
+    (Join-Path $env:ProgramData "AeroForge\Service\logs\installer-service.log"),
+    (Join-Path $env:TEMP "AeroForge\Service\logs\installer-service.log")
+  )
+
+  foreach ($path in $paths | Select-Object -Unique) {
+    if (Test-Path -LiteralPath $path) {
+      $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+      [pscustomobject]@{
+        path = $path
+        length = $item.Length
+        modifiedUtc = $item.LastWriteTimeUtc.ToString("o")
+      }
+    } else {
+      [pscustomobject]@{
+        path = $path
+        missing = $true
+      }
+    }
+  }
+}
+
+function Get-RecentTextTail {
+  param(
+    [string]$Path,
+    [int]$LineCount = 120
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    "Missing: $Path"
+    return
+  }
+
+  "===== $Path ====="
+  Get-Item -LiteralPath $Path | Select-Object FullName, Length, LastWriteTimeUtc | Format-List
+  ""
+  Get-Content -LiteralPath $Path -Tail $LineCount -ErrorAction SilentlyContinue
+  ""
+}
+
 function Get-RecentEventsMatching {
   param(
     [string]$LogName,
@@ -576,9 +798,16 @@ function Get-RecentEventsMatching {
 }
 
 $stamp = Get-TimeStamp
-$desktop = [Environment]::GetFolderPath("Desktop")
-if ([string]::IsNullOrWhiteSpace($desktop) -or -not (Test-Path -LiteralPath $desktop)) {
+$desktop = if (-not [string]::IsNullOrWhiteSpace($OutputRoot)) {
+  $OutputRoot
+} else {
+  [Environment]::GetFolderPath("Desktop")
+}
+if ([string]::IsNullOrWhiteSpace($desktop)) {
   $desktop = $env:TEMP
+}
+if (-not (Test-Path -LiteralPath $desktop)) {
+  New-Item -ItemType Directory -Force -Path $desktop | Out-Null
 }
 
 $script:BundleRoot = Join-Path $desktop "AeroForge-Debug-$stamp"
@@ -623,15 +852,17 @@ Privacy notes:
 - Review the ZIP before posting it publicly.
 
 Most useful files:
-- summary.json: one-page machine, service, Acer WMI, and failure-flag summary.
-- commands\*.txt: system, service, WMI, pipe, hardware, event-log, and updater probes.
+- summary.json: one-page machine, service, app/service version, Acer WMI, telemetry, and failure-flag summary.
+- commands\*.txt: system, service, WMI, pipe, hardware, TDP/PL, shortcut, event-log, and updater probes.
 - sampling.json: optional timed telemetry capture when launched with -SampleSeconds 60.
 - runtime-files\ProgramData-AeroForge-Service: AeroForge service logs and state snapshots.
-- runtime-files\AppData-*: AeroForge app-owned state files.
+- runtime-files\Temp-AeroForge-Service: fallback service-installer logs, if Windows wrote them under Temp.
+- runtime-files\AppData-*: AeroForge app-owned state files, including performance.jsonl when present.
 - collector.log and collector-transcript.txt: collector progress and errors.
 
 Optional deeper capture:
 - Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer sensor, and AeroForge pipe samples for intermittent AMD, power, or fan issues.
+- Maintainers can use -OutputRoot "C:\Some\Temp\Folder" to write the bundle somewhere other than the Desktop.
 "@
 Write-TextFile -Path (Join-Path $script:BundleRoot "README.txt") -Text $readme
 
@@ -647,6 +878,7 @@ $installRoots = @(
   $cmdRoot,
   $(if ($serviceBinary) { Split-Path -Parent $serviceBinary })
 ) | Where-Object { $_ }
+$script:InstallRoots = $installRoots
 
 Invoke-DiagCommand "collector context" {
   [pscustomobject]@{
@@ -707,7 +939,14 @@ Invoke-DiagCommand "installed apps filtered" {
 }
 
 Invoke-DiagCommand "appx packages filtered" {
-  Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+  $appxPackages = if ($script:IsAdmin) {
+    Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+  } else {
+    "Collector is not elevated; collecting current-user AppX packages only. Re-run without -NoElevate for all-user AppX package inventory."
+    Get-AppxPackage -ErrorAction SilentlyContinue
+  }
+
+  $appxPackages |
     Where-Object { ($_.Name + " " + $_.PackageFullName + " " + $_.Publisher) -match 'Acer|Nitro|Predator|Quick|AeroForge|WebView' } |
     Select-Object Name, PackageFullName, Publisher, InstallLocation, Status, SignatureKind |
     Format-List
@@ -719,9 +958,42 @@ Invoke-DiagCommand "aeroforge service sc" {
   sc.exe sdshow AeroForgeService
 }
 
+Invoke-DiagCommand "aeroforge executable versions" {
+  Get-AeroForgeExecutableFacts -Roots $installRoots | Format-List
+}
+
+Invoke-DiagCommand "aeroforge installer logs" {
+  Get-InstallerLogFacts | Format-List
+  ""
+  Get-RecentTextTail -Path (Join-Path $env:ProgramData "AeroForge\Service\logs\installer-service.log")
+  Get-RecentTextTail -Path (Join-Path $env:TEMP "AeroForge\Service\logs\installer-service.log")
+}
+
+Invoke-DiagCommand "aeroforge shortcuts and launch targets" {
+  Get-AeroForgeShortcutTargets | Sort-Object shortcut | Format-List
+}
+
+Invoke-DiagCommand "aeroforge service state snapshots" {
+  $stateRoot = Join-Path $env:ProgramData "AeroForge\Service\state"
+  if (-not (Test-Path -LiteralPath $stateRoot)) {
+    "Missing: $stateRoot"
+    return
+  }
+
+  Get-ChildItem -LiteralPath $stateRoot -Recurse -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @(".json", ".jsonl", ".log") } |
+    Sort-Object FullName |
+    ForEach-Object {
+      "===== $($_.FullName) ====="
+      $_ | Select-Object FullName, Length, LastWriteTimeUtc | Format-List
+      Get-Content -LiteralPath $_.FullName -Tail 160 -ErrorAction SilentlyContinue
+      ""
+    }
+}
+
 Invoke-DiagCommand "services filtered" {
   Get-CimInstance Win32_Service |
-    Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName) -match 'AeroForge|Acer|Nitro|Predator|Quick Access|QuickAccess|NVIDIA|NVDisplay|NVContainer|WebView' } |
+    Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName) -match 'AeroForge|Acer|Nitro|Predator|Quick Access|QuickAccess|NVIDIA|NVDisplay|NVContainer|WebView|WinRing|OpenLibSys' } |
     Select-Object Name, DisplayName, State, Status, StartMode, StartName, ProcessId, PathName |
     Sort-Object Name |
     Format-List
@@ -729,7 +1001,7 @@ Invoke-DiagCommand "services filtered" {
 
 Invoke-DiagCommand "processes filtered" {
   Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProcessName -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick' } |
+    Where-Object { $_.ProcessName -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys' } |
     Select-Object ProcessName, Id, CPU, WorkingSet64, PrivateMemorySize64, StartTime, Path |
     Sort-Object ProcessName, Id |
     Format-Table -AutoSize -Wrap
@@ -737,7 +1009,7 @@ Invoke-DiagCommand "processes filtered" {
 
 Invoke-DiagCommand "process command lines filtered" {
   Get-CimInstance Win32_Process |
-    Where-Object { ($_.Name + " " + $_.ExecutablePath + " " + $_.CommandLine) -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick' } |
+    Where-Object { ($_.Name + " " + $_.ExecutablePath + " " + $_.CommandLine) -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys' } |
     Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine |
     Sort-Object Name, ProcessId |
     Format-List
@@ -804,6 +1076,19 @@ Invoke-DiagCommand "nvidia smi" {
   }
 }
 
+Invoke-DiagCommand "nvidia power limits" {
+  $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+  if ($nvidiaSmi) {
+    "===== nvidia-smi -q -d POWER ====="
+    & $nvidiaSmi.Source -q -d POWER
+    ""
+    "===== nvidia-smi query-gpu power ====="
+    & $nvidiaSmi.Source --query-gpu=name,pci.bus_id,power.draw,power.limit,power.default_limit,power.min_limit,power.max_limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu --format=csv,noheader,nounits
+  } else {
+    "nvidia-smi.exe not found in PATH."
+  }
+}
+
 Invoke-DiagCommand "acer wmi classes" {
   "===== Acer classes under ROOT\WMI ====="
   Get-CimClass -Namespace root\wmi -ErrorAction SilentlyContinue |
@@ -820,7 +1105,7 @@ Invoke-DiagCommand "acer direct wmi read-only probes" {
 
 Invoke-DiagCommand "pnp devices filtered" {
   Get-PnpDevice -ErrorAction SilentlyContinue |
-    Where-Object { ($_.FriendlyName + " " + $_.InstanceId + " " + $_.Class) -match 'Acer|Nitro|Predator|NVIDIA|HID|Battery|Display|Monitor|ACPI|WMI|Thermal' } |
+    Where-Object { ($_.FriendlyName + " " + $_.InstanceId + " " + $_.Class) -match 'Acer|Nitro|Predator|NVIDIA|HID|Battery|Display|Monitor|ACPI|WMI|Thermal|WinRing|OpenLibSys' } |
     Select-Object Class, FriendlyName, InstanceId, Status, Problem |
     Sort-Object Class, FriendlyName |
     Format-Table -AutoSize -Wrap
@@ -879,7 +1164,11 @@ Invoke-DiagCommand "volumes boot and efi read-only" {
   Get-Volume | Select-Object DriveLetter, FileSystemLabel, FileSystem, DriveType, HealthStatus, OperationalStatus, SizeRemaining, Size | Format-Table -AutoSize -Wrap
   Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, Type, GptType, IsBoot, IsSystem, Size | Format-Table -AutoSize -Wrap
   mountvol.exe
-  bcdedit.exe /enum firmware
+  if ($script:IsAdmin) {
+    bcdedit.exe /enum firmware
+  } else {
+    "Collector is not elevated; skipped bcdedit /enum firmware because Windows usually denies firmware BCD reads without administrator rights."
+  }
 }
 
 $batteryReport = Join-Path $script:CommandsDir "battery-report.html"
@@ -891,6 +1180,7 @@ Invoke-DiagCommand "battery report" {
 }
 
 $programDataService = Join-Path $env:ProgramData "AeroForge\Service"
+$tempService = Join-Path $env:TEMP "AeroForge\Service"
 $appDataCandidates = @(
   (Join-Path $env:APPDATA "com.noah.aeroforgecontrol"),
   (Join-Path $env:LOCALAPPDATA "com.noah.aeroforgecontrol"),
@@ -900,6 +1190,8 @@ $appDataCandidates = @(
 
 Write-LogLine "Copying safe AeroForge service runtime files."
 Copy-SafeTextTree -Source $programDataService -Destination (Join-Path $script:RuntimeDir "ProgramData-AeroForge-Service")
+Write-LogLine "Copying safe fallback service installer files."
+Copy-SafeTextTree -Source $tempService -Destination (Join-Path $script:RuntimeDir "Temp-AeroForge-Service")
 
 foreach ($candidate in $appDataCandidates) {
   $leaf = Split-Path -Leaf $candidate

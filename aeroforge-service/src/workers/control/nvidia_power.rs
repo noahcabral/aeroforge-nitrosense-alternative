@@ -1,5 +1,9 @@
 use serde::Serialize;
+use std::env;
 use std::process::Command;
+
+const NVIDIA_POWER_READBACK_ENV: &str = "AEROFORGE_ENABLE_NVIDIA_TELEMETRY";
+const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +18,16 @@ pub(crate) struct NvidiaPowerReadback {
 }
 
 pub(crate) fn read_power_readback() -> NvidiaPowerReadback {
+    if !env_flag_enabled(NVIDIA_POWER_READBACK_ENV) {
+        return NvidiaPowerReadback {
+            source: "disabled",
+            error: Some(
+                "NVIDIA power readback disabled by default to avoid waking the dGPU. Set AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1 for diagnostics.".into(),
+            ),
+            ..Default::default()
+        };
+    }
+
     let output = Command::new("nvidia-smi")
         .args([
             "--query-gpu=power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit",
@@ -111,6 +125,26 @@ fn parse_watts(value: Option<&str>) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .filter(|value| value.is_finite())
+        .and_then(sanitize_power_w)
+}
+
+fn sanitize_power_w(watts: f32) -> Option<f32> {
+    if (0.0..=MAX_REASONABLE_GPU_POWER_W).contains(&watts) {
+        Some((watts * 100.0).round() / 100.0)
+    } else {
+        None
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn command_error_detail(output: &std::process::Output) -> String {

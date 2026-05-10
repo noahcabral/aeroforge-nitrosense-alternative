@@ -49,6 +49,17 @@ pub struct BackendContract {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PerformanceLogEvent {
+    pub session_id: String,
+    pub event_type: String,
+    pub occurred_at_unix_ms: u64,
+    pub active_tab: String,
+    pub detail: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FeatureSupport {
     pub available: bool,
     pub writable: bool,
@@ -266,6 +277,24 @@ pub struct LiveControlSnapshot {
     pub last_boot_logo_readback: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendPollTimings {
+    pub total_ms: f64,
+    pub service_ms: f64,
+    pub telemetry_ms: f64,
+    pub live_controls_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendPollSnapshot {
+    pub service: ServiceStatus,
+    pub telemetry: TelemetrySnapshot,
+    pub live_controls: Option<LiveControlSnapshot>,
+    pub timings: BackendPollTimings,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -320,6 +349,18 @@ pub struct TelemetrySnapshot {
     pub gpu_power_min_limit_w: Option<f32>,
     #[serde(default)]
     pub gpu_power_max_limit_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_package_power_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl1_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl1_enabled: Option<bool>,
+    #[serde(default)]
+    pub cpu_pl2_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl2_enabled: Option<bool>,
+    #[serde(default)]
+    pub cpu_power_limit_locked: Option<bool>,
     pub cpu_name: Option<String>,
     pub cpu_brand: Option<String>,
     pub gpu_name: Option<String>,
@@ -399,6 +440,9 @@ pub struct BackendBootstrap {
     pub capabilities: CapabilitySnapshot,
     pub controls: ControlSnapshot,
     pub telemetry: TelemetrySnapshot,
+    pub live_controls: Option<LiveControlSnapshot>,
+    pub persistence: PersistenceStatus,
+    pub update_status: UpdateStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

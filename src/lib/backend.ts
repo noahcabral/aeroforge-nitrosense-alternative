@@ -166,6 +166,12 @@ export type TelemetrySnapshot = {
   gpuPowerDefaultLimitW: number | null
   gpuPowerMinLimitW: number | null
   gpuPowerMaxLimitW: number | null
+  cpuPackagePowerW: number | null
+  cpuPl1W: number | null
+  cpuPl1Enabled: boolean | null
+  cpuPl2W: number | null
+  cpuPl2Enabled: boolean | null
+  cpuPowerLimitLocked: boolean | null
   cpuName: string | null
   cpuBrand: string | null
   gpuName: string | null
@@ -179,6 +185,20 @@ export type TelemetrySnapshot = {
   batteryPercent: number
   batteryLifeRemainingSec: number | null
   acPluggedIn: boolean
+}
+
+export type BackendPollTimings = {
+  totalMs: number
+  serviceMs: number
+  telemetryMs: number
+  liveControlsMs: number
+}
+
+export type BackendPollSnapshot = {
+  service: ServiceStatus
+  telemetry: TelemetrySnapshot
+  liveControls: LiveControlSnapshot | null
+  timings: BackendPollTimings
 }
 
 export type GpuTuningApplyResult = {
@@ -231,6 +251,9 @@ export type BackendBootstrap = {
   capabilities: CapabilitySnapshot
   controls: ControlSnapshot
   telemetry: TelemetrySnapshot
+  liveControls: LiveControlSnapshot | null
+  persistence: PersistenceStatus
+  updateStatus: UpdateStatus
 }
 
 export type PersistenceStatus = {
@@ -260,6 +283,15 @@ export type UpdateStatus = {
   lastError: string | null
 }
 
+export type PerformanceLogEvent = {
+  sessionId: string
+  eventType: string
+  occurredAtUnixMs: number
+  activeTab: string
+  detail: string
+  payload: Record<string, unknown>
+}
+
 export async function getRuntimeShell() {
   return invoke<ShellStatus>('runtime_shell')
 }
@@ -276,6 +308,10 @@ export async function getTelemetrySnapshot() {
   return invoke<TelemetrySnapshot>('get_telemetry_snapshot')
 }
 
+export async function getBackendPollSnapshot() {
+  return invoke<BackendPollSnapshot>('get_backend_poll_snapshot')
+}
+
 export async function getLiveControlSnapshot() {
   return invoke<LiveControlSnapshot>('get_live_control_snapshot')
 }
@@ -286,6 +322,10 @@ export async function getPersistenceStatus() {
 
 export async function getUpdateStatus() {
   return invoke<UpdateStatus>('get_update_status')
+}
+
+export async function appendPerformanceLog(events: PerformanceLogEvent[]) {
+  return invoke<string>('append_performance_log', { events })
 }
 
 export async function checkForUpdates(channel?: PersonalSettings['updateChannel']) {

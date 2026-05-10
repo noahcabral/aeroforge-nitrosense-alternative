@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use super::models::{
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
+const FRESH_SUPERVISOR_MAX_AGE_SECONDS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +143,17 @@ pub struct AppliedSmartChargePayload {
 }
 
 pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
+    build_cached_service_status(pipe_error, false)
+}
+
+pub fn fetch_fast_service_status() -> ServiceStatus {
+    build_cached_service_status(
+        "Using cached service supervisor snapshot for fast UI polling.",
+        true,
+    )
+}
+
+fn build_cached_service_status(detail_seed: &str, trust_fresh_snapshot: bool) -> ServiceStatus {
     let state_dir = service_state_dir();
     let supervisor_file = supervisor_file_path();
     let cached_snapshot = fs::read_to_string(&supervisor_file)
@@ -160,15 +172,23 @@ pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
             (SERVICE_NAME.into(), 0, None, Vec::new())
         };
 
-    let missing_pipe_detail = if pipe_error.contains("os error 2") {
+    let fresh = trust_fresh_snapshot && supervisor_is_fresh(updated_at_unix);
+    let missing_pipe_detail = if fresh {
         format!(
-            "{SERVICE_NAME} is not installed or is not running. Install AeroForge with the setup installer, or start {SERVICE_NAME}. Raw pipe error: {pipe_error}"
+            "Loaded fresh AeroForge service supervisor snapshot from {}.",
+            supervisor_file.display()
+        )
+    } else if detail_seed.contains("os error 2") {
+        format!(
+            "{SERVICE_NAME} is not installed or is not running. Install AeroForge with the setup installer, or start {SERVICE_NAME}. Raw pipe error: {detail_seed}"
         )
     } else {
-        format!("Service unavailable: {pipe_error}")
+        format!("Service unavailable: {detail_seed}")
     };
 
-    let detail = if supervisor_file.exists() {
+    let detail = if fresh {
+        missing_pipe_detail
+    } else if supervisor_file.exists() {
         format!(
             "{missing_pipe_detail}. Loaded cached supervisor snapshot from {}.",
             supervisor_file.display()
@@ -178,7 +198,7 @@ pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
     };
 
     ServiceStatus {
-        connected: false,
+        connected: fresh,
         pipe_name: PIPE_PATH.into(),
         service_name,
         version: None,
@@ -189,6 +209,20 @@ pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
         workers,
         detail,
     }
+}
+
+fn supervisor_is_fresh(updated_at_unix: Option<u64>) -> bool {
+    let Some(updated_at_unix) = updated_at_unix else {
+        return false;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+
+    now.as_secs()
+        .checked_sub(updated_at_unix)
+        .map(|age| age <= FRESH_SUPERVISOR_MAX_AGE_SECONDS)
+        .unwrap_or(false)
 }
 
 pub fn fetch_service_status() -> Result<ServiceStatus, Box<dyn std::error::Error + Send + Sync>> {
@@ -202,6 +236,12 @@ pub fn fetch_capabilities() -> Result<CapabilitySnapshot, Box<dyn std::error::Er
     Ok(serde_json::from_value::<CapabilitySnapshot>(payload)?)
 }
 
+pub fn fetch_cached_capabilities(
+) -> Result<CapabilitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let raw = fs::read_to_string(capabilities_file_path())?;
+    Ok(serde_json::from_str::<CapabilitySnapshot>(&raw)?)
+}
+
 pub fn fetch_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::GetTelemetrySnapshot)?;
     Ok(serde_json::from_value::<TelemetrySnapshot>(payload)?)
@@ -211,6 +251,12 @@ pub fn fetch_cached_telemetry(
 ) -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let raw = fs::read_to_string(telemetry_file_path())?;
     Ok(serde_json::from_str::<TelemetrySnapshot>(&raw)?)
+}
+
+pub fn fetch_cached_live_controls(
+) -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let raw = fs::read_to_string(control_file_path())?;
+    Ok(serde_json::from_str::<LiveControlSnapshot>(&raw)?)
 }
 
 pub fn fetch_live_controls() -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>>
@@ -337,6 +383,14 @@ fn service_state_dir() -> PathBuf {
 
 fn telemetry_file_path() -> PathBuf {
     service_state_dir().join("telemetry.json")
+}
+
+fn control_file_path() -> PathBuf {
+    service_state_dir().join("control.json")
+}
+
+fn capabilities_file_path() -> PathBuf {
+    service_state_dir().join("capabilities.json")
 }
 
 fn supervisor_file_path() -> PathBuf {

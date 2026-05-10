@@ -1,13 +1,21 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::PathBuf,
+    time::Instant,
+};
+
 use tauri::State;
 
 use super::{
     blue_light, boot_logo, cpu_clock, display_refresh,
     models::{
-        ApplyState, BackendBootstrap, BackendContract, BlueLightApplyResult, BootLogoApplyResult,
-        CapabilitySnapshot, ControlSnapshot, CustomPowerBaseId, FanCurveSet, FanProfileId,
-        GpuTuningState, LiveControlSnapshot, PersistenceStatus, PowerProfileId,
-        ProcessorStateSettings, ServiceStatus, ShellStatus, SmartChargeApplyResult,
-        TelemetrySnapshot, UpdateChannelId, UpdateStatus,
+        ApplyState, BackendBootstrap, BackendContract, BackendPollSnapshot, BackendPollTimings,
+        BlueLightApplyResult, BootLogoApplyResult, CapabilitySnapshot, ControlSnapshot,
+        CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
+        PerformanceLogEvent, PersistenceStatus, PowerProfileId, ProcessorStateSettings,
+        ServiceStatus, ShellStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId,
+        UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
@@ -38,7 +46,8 @@ pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
 #[tauri::command]
 pub fn get_capability_snapshot(state: State<'_, BackendState>) -> CapabilitySnapshot {
     let desktop = state.capabilities();
-    service_pipe::fetch_capabilities()
+    service_pipe::fetch_cached_capabilities()
+        .or_else(|_| service_pipe::fetch_capabilities())
         .map(|service| merge_capabilities(desktop.clone(), service))
         .unwrap_or(desktop)
 }
@@ -50,15 +59,60 @@ pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
 
 #[tauri::command]
 pub fn get_telemetry_snapshot(state: State<'_, BackendState>) -> TelemetrySnapshot {
-    let mut telemetry = service_pipe::fetch_telemetry()
-        .or_else(|_| service_pipe::fetch_cached_telemetry())
+    let mut telemetry = service_pipe::fetch_cached_telemetry()
+        .or_else(|_| service_pipe::fetch_telemetry())
         .unwrap_or_else(|_| state.telemetry());
 
-    if let Some(cpu_clock_mhz) = cpu_clock::read_effective_cpu_clock_mhz() {
-        telemetry.cpu_clock_mhz = cpu_clock_mhz;
-    }
+    refresh_cpu_clock_if_missing(&mut telemetry);
 
     telemetry
+}
+
+#[tauri::command]
+pub fn get_backend_poll_snapshot(state: State<'_, BackendState>) -> BackendPollSnapshot {
+    let total_started = Instant::now();
+
+    let service_started = Instant::now();
+    let service = service_pipe::fetch_fast_service_status();
+    let service_ms = elapsed_ms(service_started);
+
+    let telemetry_started = Instant::now();
+    let mut telemetry =
+        service_pipe::fetch_cached_telemetry().unwrap_or_else(|_| state.telemetry());
+    refresh_cpu_clock_if_missing(&mut telemetry);
+    let telemetry_ms = elapsed_ms(telemetry_started);
+
+    let live_controls_started = Instant::now();
+    let live_controls = if service.connected {
+        service_pipe::fetch_cached_live_controls().ok()
+    } else {
+        None
+    };
+    let live_controls_ms = elapsed_ms(live_controls_started);
+
+    BackendPollSnapshot {
+        service,
+        telemetry,
+        live_controls,
+        timings: BackendPollTimings {
+            total_ms: elapsed_ms(total_started),
+            service_ms,
+            telemetry_ms,
+            live_controls_ms,
+        },
+    }
+}
+
+fn refresh_cpu_clock_if_missing(telemetry: &mut TelemetrySnapshot) {
+    if telemetry.cpu_clock_mhz == 0 {
+        if let Some(cpu_clock_mhz) = cpu_clock::read_effective_cpu_clock_mhz() {
+            telemetry.cpu_clock_mhz = cpu_clock_mhz;
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
 }
 
 #[tauri::command]
@@ -70,13 +124,18 @@ pub fn get_live_control_snapshot(
 
 #[tauri::command]
 pub fn get_backend_bootstrap(state: State<'_, BackendState>) -> BackendBootstrap {
+    let poll = get_backend_poll_snapshot(state.clone());
+
     BackendBootstrap {
         shell: shell_status(),
-        service: get_service_status(state.clone()),
+        service: poll.service,
         contract: state.contract(),
         capabilities: get_capability_snapshot(state.clone()),
         controls: state.controls(),
-        telemetry: get_telemetry_snapshot(state),
+        telemetry: poll.telemetry,
+        live_controls: poll.live_controls,
+        persistence: state.persistence_status(),
+        update_status: state.update_status(),
     }
 }
 
@@ -88,6 +147,33 @@ pub fn get_persistence_status(state: State<'_, BackendState>) -> PersistenceStat
 #[tauri::command]
 pub fn get_update_status(state: State<'_, BackendState>) -> UpdateStatus {
     state.update_status()
+}
+
+#[tauri::command]
+pub fn append_performance_log(
+    events: Vec<PerformanceLogEvent>,
+    state: State<'_, BackendState>,
+) -> Result<String, String> {
+    let path = performance_log_path(&state).map_err(|error| error.to_string())?;
+
+    if events.is_empty() {
+        return Ok(path.display().to_string());
+    }
+
+    rotate_performance_log_if_needed(&path).map_err(|error| error.to_string())?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+
+    for event in events.into_iter().take(128) {
+        serde_json::to_writer(&mut file, &event).map_err(|error| error.to_string())?;
+        writeln!(file).map_err(|error| error.to_string())?;
+    }
+
+    Ok(path.display().to_string())
 }
 
 #[tauri::command]
@@ -385,4 +471,26 @@ fn parse_boot_art_id(value: &str) -> super::models::BootArtId {
         "slate" => super::models::BootArtId::Slate,
         _ => super::models::BootArtId::Custom,
     }
+}
+
+fn performance_log_path(state: &BackendState) -> io::Result<PathBuf> {
+    let log_dir = state.config_root().join("logs");
+    fs::create_dir_all(&log_dir)?;
+    Ok(log_dir.join("performance.jsonl"))
+}
+
+fn rotate_performance_log_if_needed(path: &PathBuf) -> io::Result<()> {
+    const MAX_PERFORMANCE_LOG_BYTES: u64 = 2 * 1024 * 1024;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.len() < MAX_PERFORMANCE_LOG_BYTES {
+        return Ok(());
+    }
+
+    let archived_path = path.with_extension("jsonl.old");
+    let _ = fs::remove_file(&archived_path);
+    fs::rename(path, archived_path)
 }

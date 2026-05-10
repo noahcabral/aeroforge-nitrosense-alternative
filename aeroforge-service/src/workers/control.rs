@@ -1,3 +1,4 @@
+mod acer_hid;
 pub(crate) mod acer_wmi;
 mod boot_logo;
 mod fan;
@@ -7,6 +8,7 @@ mod nvapi_whisper;
 mod nvidia_power;
 mod nvml;
 mod power;
+mod rapl_power;
 mod smart_charge;
 mod state;
 

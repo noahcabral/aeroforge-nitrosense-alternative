@@ -204,6 +204,11 @@ fn build_contract() -> BackendContract {
                 purpose: "Return the current telemetry snapshot, preferring the AeroForge service when reachable.".into(),
             },
             CommandDescriptor {
+                command: "get_backend_poll_snapshot".into(),
+                stage: "implemented".into(),
+                purpose: "Return fast cached service, telemetry, and live-control snapshots for routine UI refresh without a named-pipe round trip.".into(),
+            },
+            CommandDescriptor {
                 command: "get_backend_bootstrap".into(),
                 stage: "implemented".into(),
                 purpose: "Return a single payload with shell, contract, capabilities, controls, and telemetry.".into(),
@@ -217,6 +222,11 @@ fn build_contract() -> BackendContract {
                 command: "get_update_status".into(),
                 stage: "implemented".into(),
                 purpose: "Return the cached GitHub updater state and any staged update asset details.".into(),
+            },
+            CommandDescriptor {
+                command: "append_performance_log".into(),
+                stage: "implemented".into(),
+                purpose: "Append batched desktop UI performance events to AeroForge's local JSONL diagnostics log.".into(),
             },
             CommandDescriptor {
                 command: "check_for_updates".into(),
@@ -471,6 +481,12 @@ fn build_default_telemetry() -> TelemetrySnapshot {
         gpu_power_default_limit_w: None,
         gpu_power_min_limit_w: None,
         gpu_power_max_limit_w: None,
+        cpu_package_power_w: None,
+        cpu_pl1_w: None,
+        cpu_pl1_enabled: None,
+        cpu_pl2_w: None,
+        cpu_pl2_enabled: None,
+        cpu_power_limit_locked: None,
         cpu_name: None,
         cpu_brand: None,
         gpu_name: None,

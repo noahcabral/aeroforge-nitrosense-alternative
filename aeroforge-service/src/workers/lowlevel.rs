@@ -1,6 +1,6 @@
 mod models;
 mod topology;
-mod winring;
+pub(crate) mod winring;
 
 use std::{
     sync::{
@@ -11,6 +11,7 @@ use std::{
 };
 
 use models::LowLevelSnapshot;
+use winring::RaplReadback;
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -60,6 +61,7 @@ struct LowLevelSampler {
     context: Option<winring::WinRingContext>,
     last_load_attempt: Option<Instant>,
     last_load_error: Option<String>,
+    last_rapl_energy: Option<RaplEnergySample>,
 }
 
 impl LowLevelSampler {
@@ -68,6 +70,7 @@ impl LowLevelSampler {
             context: None,
             last_load_attempt: None,
             last_load_error: None,
+            last_rapl_energy: None,
         }
     }
 
@@ -90,6 +93,7 @@ impl LowLevelSampler {
 
         let tj_max_c = context.read_tj_max().ok().flatten();
         let package_temp_c = context.read_package_temp(tj_max_c).ok().flatten();
+        let rapl_readback = context.read_rapl_readback().ok().flatten();
 
         let mut core_temps = Vec::with_capacity(core_affinity_masks.len());
         for mask in core_affinity_masks.iter().copied() {
@@ -98,6 +102,9 @@ impl LowLevelSampler {
             }
         }
 
+        let driver_path = context.driver_path.display().to_string();
+        let package_power_w = self.calculate_package_power_w(rapl_readback);
+        let power_limit = rapl_readback.and_then(|readback| readback.package_power_limit);
         let sampled_processor_count = core_temps.len();
         let average_core_temp_c = models::hottest_core_average(&core_temps, 3);
         let lowest_core_temp_c = core_temps.iter().copied().min();
@@ -111,11 +118,11 @@ impl LowLevelSampler {
             transport: "winring0".into(),
             detail: format!(
                 "WinRing0 kernel driver active from {}. Sampled {} physical cores across {} logical processors.",
-                context.driver_path.display(),
+                driver_path,
                 sampled_processor_count,
                 logical_processor_count
             ),
-            driver_path: Some(context.driver_path.display().to_string()),
+            driver_path: Some(driver_path),
             logical_processor_count,
             sampled_processor_count,
             tj_max_c,
@@ -125,7 +132,43 @@ impl LowLevelSampler {
             highest_core_temp_c,
             core_temps_c: core_temps,
             hottest_cores_c,
+            package_power_w,
+            package_power_energy_raw: rapl_readback.map(|readback| readback.package_energy_raw),
+            package_power_unit_w: rapl_readback.map(|readback| readback.power_unit_w as f32),
+            package_energy_unit_j: rapl_readback.map(|readback| readback.energy_unit_j),
+            package_pl1_w: power_limit.and_then(|limit| limit.pl1_w),
+            package_pl1_enabled: power_limit.map(|limit| limit.pl1_enabled),
+            package_pl2_w: power_limit.and_then(|limit| limit.pl2_w),
+            package_pl2_enabled: power_limit.map(|limit| limit.pl2_enabled),
+            package_power_limit_locked: power_limit.map(|limit| limit.locked),
         })
+    }
+
+    fn calculate_package_power_w(&mut self, readback: Option<RaplReadback>) -> Option<f32> {
+        let readback = readback?;
+        let current = RaplEnergySample {
+            raw_counter: readback.package_energy_raw,
+            energy_unit_j: readback.energy_unit_j,
+            sampled_at: Instant::now(),
+        };
+        let previous = self.last_rapl_energy.replace(current)?;
+        if (previous.energy_unit_j - current.energy_unit_j).abs() > f64::EPSILON {
+            return None;
+        }
+
+        let elapsed = current.sampled_at.duration_since(previous.sampled_at);
+        let elapsed_seconds = elapsed.as_secs_f64();
+        if elapsed_seconds <= 0.0 {
+            return None;
+        }
+
+        let delta_raw = current.raw_counter.wrapping_sub(previous.raw_counter) as f64;
+        let watts = (delta_raw * current.energy_unit_j) / elapsed_seconds;
+        if watts.is_finite() && (0.0..=1000.0).contains(&watts) {
+            Some(watts as f32)
+        } else {
+            None
+        }
     }
 
     fn try_load_context(&mut self, paths: &ServicePaths) {
@@ -168,4 +211,11 @@ impl LowLevelSampler {
             .map(|instant| instant.elapsed() >= LOAD_RETRY_INTERVAL)
             .unwrap_or(true)
     }
+}
+
+#[derive(Clone, Copy)]
+struct RaplEnergySample {
+    raw_counter: u32,
+    energy_unit_j: f64,
+    sampled_at: Instant,
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AeroForge Control",
-  "version": "0.12.6",
+  "version": "0.12.7",
   "identifier": "com.noah.aeroforgecontrol",
   "build": {
     "frontendDist": "../dist",
@@ -36,7 +36,8 @@
     "resources": {
       "../aeroforge-service/target/release/aeroforge-service.exe": "aeroforge-service.exe",
       "target/release/aeroforge-hotkey-helper.exe": "aeroforge-hotkey-helper.exe",
-      "resources/Install-AeroForgeBundledService.ps1": "Install-AeroForgeBundledService.ps1"
+      "resources/Install-AeroForgeBundledService.ps1": "Install-AeroForgeBundledService.ps1",
+      "../scripts/AeroForge-Debug-Collector.cmd": "AeroForge-Debug-Collector.cmd"
     },
     "windows": {
       "webviewInstallMode": {

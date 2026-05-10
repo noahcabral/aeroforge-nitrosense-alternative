@@ -7,11 +7,15 @@ $version = $package.version
 $releaseDir = Join-Path $projectRoot 'src-tauri\target\release'
 $releaseExe = Join-Path $releaseDir 'aeroforge-control.exe'
 $hotkeyHelperExe = Join-Path $releaseDir 'aeroforge-hotkey-helper.exe'
+$debugCollectorCmd = Join-Path $projectRoot 'scripts\AeroForge-Debug-Collector.cmd'
 if (-not (Test-Path -LiteralPath $releaseExe)) {
   throw "Release executable not found at $releaseExe. Run 'npm.cmd run tauri:build' first."
 }
 if (-not (Test-Path -LiteralPath $hotkeyHelperExe)) {
   throw "Hotkey helper executable not found at $hotkeyHelperExe. Run 'cargo build --release --manifest-path src-tauri\Cargo.toml --bin aeroforge-hotkey-helper' first."
+}
+if (-not (Test-Path -LiteralPath $debugCollectorCmd)) {
+  throw "Debug collector not found at $debugCollectorCmd."
 }
 
 $portableRoot = Join-Path $projectRoot 'portable'
@@ -27,12 +31,18 @@ if (Test-Path -LiteralPath $portableDir) {
     }
   }
   Get-Process aeroforge-hotkey-helper -ErrorAction SilentlyContinue | Stop-Process -Force
-  Remove-Item -LiteralPath $portableDir -Recurse -Force
+  try {
+    Remove-Item -LiteralPath $portableDir -Recurse -Force
+  } catch {
+    Write-Warning "Could not remove portable root; reusing it after clearing contents. $($_.Exception.Message)"
+    Get-ChildItem -LiteralPath $portableDir -Force | Remove-Item -Recurse -Force
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $portableDir 'aeroforge-control.exe') -Force
 Copy-Item -LiteralPath $hotkeyHelperExe -Destination (Join-Path $portableDir 'aeroforge-hotkey-helper.exe') -Force
+Copy-Item -LiteralPath $debugCollectorCmd -Destination (Join-Path $portableDir 'AeroForge-Debug-Collector.cmd') -Force
 
 $runtimeDlls = Get-ChildItem -LiteralPath $releaseDir -File -Filter '*.dll'
 foreach ($runtimeDll in $runtimeDlls) {
@@ -51,10 +61,13 @@ Notes:
 - aeroforge-hotkey-helper.exe is included beside the app so the Nitro keyboard key can open or focus AeroForge from the logged-in Windows session.
 - The hotkey helper stays resident at logon with --daemon for Nitro key activation without keeping the WebView UI running in the background.
 - Running aeroforge-hotkey-helper.exe without --daemon is a one-shot AeroForge open/focus trigger.
+- AeroForge-Debug-Collector.cmd is included for support bundles when a machine has install, telemetry, fan, battery, power, or Nitro key issues.
 - To start the helper automatically at logon, run scripts\Install-AeroForgeStartup.ps1 from the source tree after building the portable folder.
 - Runtime DLLs from the Tauri release folder are included alongside the executable.
 - WebView2 must be present on the machine. It is already installed on most modern Windows systems.
 - For a first install on a fresh machine, use the Setup EXE so AeroForgeService is installed.
+- Release builds do not bundle or auto-load WinRing0. CPU MSR/RAPL diagnostics require an explicit external driver opt-in.
+- NVIDIA temperature/utilization/VRAM monitoring is gated by Windows dedicated-GPU activity. NVIDIA power readback is opt-in with AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1.
 
 Installer builds:
 - NSIS: src-tauri\target\release\bundle\nsis

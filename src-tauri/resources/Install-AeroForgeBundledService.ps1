@@ -118,7 +118,7 @@ function Stop-AeroForgeServiceProcesses {
 
   $deadline = (Get-Date).AddSeconds(15)
   do {
-    $remaining = Get-Process aeroforge-service -ErrorAction SilentlyContinue
+    $remaining = Get-LiveAeroForgeServiceProcesses
     if (-not $remaining) {
       return
     }
@@ -126,9 +126,41 @@ function Stop-AeroForgeServiceProcesses {
     Start-Sleep -Milliseconds 250
   } while ((Get-Date) -lt $deadline)
 
-  $remainingIds = (Get-Process aeroforge-service -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty Id) -join ', '
+  $remaining = Get-LiveAeroForgeServiceProcesses
+  if (-not $remaining) {
+    return
+  }
+
+  $remainingIds = ($remaining | Select-Object -ExpandProperty ProcessId) -join ', '
   throw "aeroforge-service process still running after termination wait. Remaining PID(s): $remainingIds"
+}
+
+function Get-LiveAeroForgeServiceProcesses {
+  $processes = @(Get-CimInstance Win32_Process -Filter "Name='aeroforge-service.exe'" -ErrorAction SilentlyContinue)
+  if (-not $processes) {
+    return @()
+  }
+
+  $live = @()
+  foreach ($process in $processes) {
+    $threadCount = 0
+    $handleCount = 0
+    if ($null -ne $process.ThreadCount) {
+      $threadCount = [int]$process.ThreadCount
+    }
+    if ($null -ne $process.HandleCount) {
+      $handleCount = [int]$process.HandleCount
+    }
+
+    if ($threadCount -le 0 -and $handleCount -le 0) {
+      Write-InstallLog "Ignoring stale terminated aeroforge-service PID $($process.ProcessId) with 0 threads and 0 handles." | Out-Null
+      continue
+    }
+
+    $live += $process
+  }
+
+  return $live
 }
 
 function Copy-WithRetry {
@@ -161,20 +193,24 @@ function Get-AeroForgeService {
 }
 
 function Wait-ServiceDeleted {
-  $deadline = (Get-Date).AddSeconds(25)
+  param([int]$TimeoutSeconds = 25)
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
     if (-not (Get-AeroForgeService)) {
-      return
+      return $true
     }
+    Stop-AeroForgeServiceProcesses -Reason 'delete wait cleanup' | Out-Null
     Start-Sleep -Milliseconds 500
   } while ((Get-Date) -lt $deadline)
 
-  throw "$serviceName is still present after delete wait. A reboot may be required before reinstalling."
+  return $false
 }
 
 function Stop-AeroForgeService {
   $service = Get-AeroForgeService
   if (-not $service) {
+    Stop-AeroForgeServiceProcesses -Reason 'orphan service process cleanup'
     return
   }
 
@@ -185,15 +221,48 @@ function Stop-AeroForgeService {
     do {
       $service = Get-AeroForgeService
       if (-not $service -or $service.Status -eq 'Stopped') {
-        return
+        break
       }
       Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
 
-    Write-InstallLog "$serviceName did not stop cleanly; terminating service process if still present."
+    $service = Get-AeroForgeService
+    if ($service -and $service.Status -ne 'Stopped') {
+      Write-InstallLog "$serviceName did not stop cleanly; terminating service process if still present."
+    }
   }
 
   Stop-AeroForgeServiceProcesses -Reason 'service stop'
+}
+
+function Disable-AeroForgeServiceForRemoval {
+  if (-not (Get-AeroForgeService)) {
+    return
+  }
+
+  Write-InstallLog "Disabling $serviceName before removal."
+  Invoke-Sc -Arguments @('config', $serviceName, 'start=', 'disabled') -AllowedExitCodes @(0, 1060) | Out-Null
+}
+
+function Remove-AeroForgeServiceRegistration {
+  if (-not (Get-AeroForgeService)) {
+    return
+  }
+
+  $attempts = 0
+  do {
+    $attempts += 1
+    Write-InstallLog "Deleting $serviceName registration, attempt $attempts."
+    Invoke-Sc -Arguments @('delete', $serviceName) -AllowedExitCodes @(0, 1060, 1072) | Out-Null
+    if (Wait-ServiceDeleted -TimeoutSeconds 10) {
+      return
+    }
+    Stop-AeroForgeServiceProcesses -Reason 'service delete retry'
+    Start-Sleep -Seconds 1
+  } while ($attempts -lt 3)
+
+  Invoke-Sc -Arguments @('queryex', $serviceName) -AllowedExitCodes @(0, 1060) | Out-Null
+  throw "$serviceName is still present after delete attempts. A reboot may be required before reinstalling."
 }
 
 function Wait-ServiceRunning {
@@ -258,10 +327,10 @@ function Install-AeroForgeService {
 
 function Uninstall-AeroForgeService {
   Write-InstallLog "Uninstall requested for $serviceName."
+  Disable-AeroForgeServiceForRemoval
   Stop-AeroForgeService
   if (Get-AeroForgeService) {
-    Invoke-Sc -Arguments @('delete', $serviceName) -AllowedExitCodes @(0, 1060) | Out-Null
-    Wait-ServiceDeleted
+    Remove-AeroForgeServiceRegistration
   }
   Stop-AeroForgeServiceProcesses -Reason 'uninstall'
   if (Test-Path -LiteralPath $installedExe) {

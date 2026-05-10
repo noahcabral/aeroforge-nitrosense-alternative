@@ -172,10 +172,26 @@ Function InstallAeroForgeService
 FunctionEnd
 
 Function un.UninstallAeroForgeService
-  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_uninstall_done
+  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_uninstall_fallback
     ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -Uninstall -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+    ${If} $8 = 0
+      Return
+    ${EndIf}
 
-  aeroforge_service_uninstall_done:
+    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not remove AeroForgeService. The service uninstaller exited with code $8.$\r$\n$\r$\nOpen this log for the exact Windows service error:$\r$\n$COMMONAPPDATA\AeroForge\Service\logs\installer-service.log"
+    Abort
+
+  aeroforge_service_uninstall_fallback:
+    ExecWait '"$SYSDIR\sc.exe" stop AeroForgeService' $8
+    ExecWait '"$SYSDIR\sc.exe" delete AeroForgeService' $8
+    ${If} $8 = 0
+    ${OrIf} $8 = 1060
+    ${OrIf} $8 = 1072
+      Return
+    ${EndIf}
+
+    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not remove AeroForgeService because bundled service resources are missing and fallback service deletion failed with code $8."
+    Abort
 FunctionEnd
 
 !macro NSIS_HOOK_POSTINSTALL

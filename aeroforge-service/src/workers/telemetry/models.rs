@@ -17,6 +17,12 @@ pub struct TelemetrySnapshot {
     pub gpu_power_default_limit_w: Option<f32>,
     pub gpu_power_min_limit_w: Option<f32>,
     pub gpu_power_max_limit_w: Option<f32>,
+    pub cpu_package_power_w: Option<f32>,
+    pub cpu_pl1_w: Option<f32>,
+    pub cpu_pl1_enabled: Option<bool>,
+    pub cpu_pl2_w: Option<f32>,
+    pub cpu_pl2_enabled: Option<bool>,
+    pub cpu_power_limit_locked: Option<bool>,
     pub cpu_name: Option<String>,
     pub cpu_brand: Option<String>,
     pub gpu_name: Option<String>,
@@ -68,6 +74,18 @@ pub struct LowLevelSnapshot {
     pub average_core_temp_c: Option<u8>,
     pub lowest_core_temp_c: Option<u8>,
     pub highest_core_temp_c: Option<u8>,
+    #[serde(default)]
+    pub package_power_w: Option<f32>,
+    #[serde(default)]
+    pub package_pl1_w: Option<f32>,
+    #[serde(default)]
+    pub package_pl1_enabled: Option<bool>,
+    #[serde(default)]
+    pub package_pl2_w: Option<f32>,
+    #[serde(default)]
+    pub package_pl2_enabled: Option<bool>,
+    #[serde(default)]
+    pub package_power_limit_locked: Option<bool>,
 }
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]

@@ -16,6 +16,15 @@ pub struct LowLevelSnapshot {
     pub highest_core_temp_c: Option<u8>,
     pub core_temps_c: Vec<u8>,
     pub hottest_cores_c: Vec<u8>,
+    pub package_power_w: Option<f32>,
+    pub package_power_energy_raw: Option<u32>,
+    pub package_power_unit_w: Option<f32>,
+    pub package_energy_unit_j: Option<f64>,
+    pub package_pl1_w: Option<f32>,
+    pub package_pl1_enabled: Option<bool>,
+    pub package_pl2_w: Option<f32>,
+    pub package_pl2_enabled: Option<bool>,
+    pub package_power_limit_locked: Option<bool>,
 }
 
 impl LowLevelSnapshot {
@@ -34,6 +43,15 @@ impl LowLevelSnapshot {
             highest_core_temp_c: None,
             core_temps_c: Vec::new(),
             hottest_cores_c: Vec::new(),
+            package_power_w: None,
+            package_power_energy_raw: None,
+            package_power_unit_w: None,
+            package_energy_unit_j: None,
+            package_pl1_w: None,
+            package_pl1_enabled: None,
+            package_pl2_w: None,
+            package_pl2_enabled: None,
+            package_power_limit_locked: None,
         }
     }
 }

@@ -41,7 +41,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     let cpu_clock_mhz = cpu::read_cpu_clock_mhz(paths);
     let firmware = firmware::read_firmware_sensors(paths);
     let acer_hid_status = acer_hid_status::read_status_snapshot();
-    let gpu = gpu::read_gpu_snapshot().unwrap_or_default();
+    let gpu = gpu::read_gpu_snapshot(paths);
     let hardware_identity = hardware_identity::read_hardware_identity(paths);
     let low_level = read_low_level_snapshot(paths).unwrap_or_default();
     let cpu_thermal = cpu::build_cpu_thermal_snapshot(&low_level, &firmware);
@@ -70,6 +70,12 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         gpu_power_default_limit_w: gpu.power_default_limit_w,
         gpu_power_min_limit_w: gpu.power_min_limit_w,
         gpu_power_max_limit_w: gpu.power_max_limit_w,
+        cpu_package_power_w: low_level.package_power_w,
+        cpu_pl1_w: low_level.package_pl1_w,
+        cpu_pl1_enabled: low_level.package_pl1_enabled,
+        cpu_pl2_w: low_level.package_pl2_w,
+        cpu_pl2_enabled: low_level.package_pl2_enabled,
+        cpu_power_limit_locked: low_level.package_power_limit_locked,
         cpu_name: hardware_identity.cpu_name.clone(),
         cpu_brand: hardware_identity.cpu_brand.clone(),
         gpu_name: hardware_identity.gpu_name.clone(),

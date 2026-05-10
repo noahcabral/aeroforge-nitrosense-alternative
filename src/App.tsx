@@ -1,6 +1,5 @@
 import {
   type ChangeEvent,
-  startTransition,
   useEffect,
   useRef,
   useState,
@@ -18,13 +17,11 @@ import {
   applyGpuTuning,
   applyPowerProfile,
   applySmartCharging,
+  appendPerformanceLog,
   checkForUpdates,
   getBackendBootstrap,
+  getBackendPollSnapshot,
   getLiveControlSnapshot,
-  getPersistenceStatus,
-  getServiceStatus,
-  getTelemetrySnapshot,
-  getUpdateStatus,
   installStagedUpdate,
   saveControlSnapshot,
   stageUpdateDownload,
@@ -34,6 +31,7 @@ import {
   type CustomPowerBaseId,
   type FeatureSupport,
   type LiveControlSnapshot,
+  type PerformanceLogEvent,
   type ServiceStatus,
   type TelemetrySnapshot,
   type UpdateStatus,
@@ -76,6 +74,14 @@ type StageFitSnapshot = {
   windowWidth: number
   windowHeight: number
   updatedAt: string
+}
+
+type PerformanceLogState = {
+  path: string | null
+  lastFlushAt: string
+  pendingCount: number
+  eventCount: number
+  lastError: string | null
 }
 
 type CurveSet = Record<CurveTarget, CurvePoint[]>
@@ -455,6 +461,10 @@ const speedMax = 100
 const BACKEND_POLL_INTERVAL_MS = 1000
 const HIDDEN_BACKEND_POLL_INTERVAL_MS = 5000
 const RUNTIME_ESTIMATE_COUNTDOWN_SEC = 30
+const PERFORMANCE_LOG_BATCH_SIZE = 16
+const PERFORMANCE_LOG_FLUSH_DELAY_MS = 1500
+const PERFORMANCE_LOG_LONG_FRAME_MS = 34
+const PERFORMANCE_LOG_MAX_QUEUE = 200
 
 function pointToChart(point: CurvePoint) {
   const x =
@@ -861,6 +871,23 @@ function formatFrameTime(value: number) {
   return `${value.toFixed(1)} ms`
 }
 
+function isDesktopRuntime() {
+  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
+}
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    if (typeof window.requestAnimationFrame !== 'function') {
+      window.setTimeout(resolve, 0)
+      return
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
 function formatStageFitValue(snapshot: StageFitSnapshot | undefined) {
   if (!snapshot) {
     return null
@@ -912,6 +939,9 @@ function hasUsableTelemetry(snapshot: TelemetrySnapshot | null | undefined) {
       snapshot.gpuMemoryUsagePercent != null ||
       snapshot.gpuPowerLimitW != null ||
       snapshot.gpuPowerDrawW != null ||
+      snapshot.cpuPackagePowerW != null ||
+      snapshot.cpuPl1W != null ||
+      snapshot.cpuPl2W != null ||
       snapshot.cpuClockMhz > 0 ||
       snapshot.gpuClockMhz > 0 ||
       snapshot.cpuFanRpm > 0 ||
@@ -976,6 +1006,27 @@ function buildPowerDashboardSummary(
   const usageLabel = usagePercent != null ? `Usage ${usagePercent}%` : null
 
   return [temperatureLabel, usageLabel].filter(Boolean).join(' • ')
+}
+
+function buildCpuPowerDashboardSummary(
+  temperatureC: number | null | undefined,
+  usagePercent: number | null | undefined,
+  packagePowerW: number | null | undefined,
+  pl1W: number | null | undefined,
+  pl2W: number | null | undefined,
+) {
+  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
+  const packageLabel = packagePowerW != null ? `Package ${formatWattValue(packagePowerW, 1)}` : null
+  const limitLabel =
+    pl1W != null && pl2W != null
+      ? `PL1 ${formatWattValue(pl1W, 1)} / PL2 ${formatWattValue(pl2W, 1)}`
+      : pl1W != null
+        ? `PL1 ${formatWattValue(pl1W, 1)}`
+        : pl2W != null
+          ? `PL2 ${formatWattValue(pl2W, 1)}`
+          : null
+
+  return [baseSummary, packageLabel, limitLabel].filter(Boolean).join(' \u2022 ')
 }
 
 function buildGpuPowerDashboardSummary(
@@ -1231,6 +1282,11 @@ function App() {
     gpu: null,
   })
   const backendPollInFlightRef = useRef(false)
+  const controlApplyInFlightRef = useRef(0)
+  const powerProfileApplyInFlightRef = useRef(false)
+  const queuedPowerProfileRef = useRef<PowerProfile['id'] | null>(null)
+  const fanProfileApplyInFlightRef = useRef(false)
+  const queuedFanProfileRef = useRef<FanProfile['id'] | null>(null)
   const lastTransportDebugRef = useRef<string>('')
   const lastPollHeartbeatRef = useRef(0)
   const runtimeEstimateSessionRef = useRef(false)
@@ -1280,7 +1336,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.6')
+  const [backendVersion, setBackendVersion] = useState('0.12.7')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
@@ -1301,6 +1357,13 @@ function App() {
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
   const [debugEvents, setDebugEvents] = useState<string[]>([])
+  const [performanceLogState, setPerformanceLogState] = useState<PerformanceLogState>({
+    path: null,
+    lastFlushAt: 'Waiting',
+    pendingCount: 0,
+    eventCount: 0,
+    lastError: null,
+  })
   const [frameStats, setFrameStats] = useState<FrameStats>({
     averageMs: 0,
     maxMs: 0,
@@ -1323,10 +1386,25 @@ function App() {
   const activeTabRef = useRef(activeTab)
   const debugEventsRef = useRef<string[]>([])
   const stageFitSignatureRef = useRef<Partial<Record<StageFitTarget, string>>>({})
+  const stageFitSnapshotsRef = useRef<Partial<Record<StageFitTarget, StageFitSnapshot>>>({})
   const telemetrySnapshotRef = useRef<string | null>(null)
   const liveControlSnapshotStateRef = useRef<string | null>(null)
   const liveControlSnapshotRef = useRef<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
+  const performanceLogSessionIdRef = useRef(`af-${Date.now().toString(36)}`)
+  const performanceLogQueueRef = useRef<PerformanceLogEvent[]>([])
+  const performanceLogFlushTimerRef = useRef<number | null>(null)
+  const performanceLogFlushInFlightRef = useRef(false)
+  const performanceLogEventCountRef = useRef(0)
+  const performanceLogPathRef = useRef<string | null>(null)
+  const performanceLogLastErrorRef = useRef<string | null>(null)
+  const queuePerformanceEventRef = useRef<
+    (eventType: string, detail: string, payload?: Record<string, unknown>) => void
+  >(() => {})
+  const flushPerformanceLogRef = useRef<() => Promise<void>>(async () => {})
+  const syncAutoRefreshRateStateRef = useRef<
+    (enabled: boolean, onBattery: boolean, announce: boolean) => Promise<unknown>
+  >(async () => null)
   const persistStagedControlsRef = useRef<
     (overrides?: PersistControlOverrides) => Promise<void>
   >(async () => {})
@@ -1408,6 +1486,12 @@ function App() {
   const displayedGpuPowerLimit = activeTelemetry?.gpuPowerLimitW ?? null
   const displayedGpuPowerDefaultLimit = activeTelemetry?.gpuPowerDefaultLimitW ?? null
   const displayedGpuPowerMaxLimit = activeTelemetry?.gpuPowerMaxLimitW ?? null
+  const displayedCpuPackagePower = activeTelemetry?.cpuPackagePowerW ?? null
+  const displayedCpuPl1 = activeTelemetry?.cpuPl1W ?? null
+  const displayedCpuPl1Enabled = activeTelemetry?.cpuPl1Enabled ?? null
+  const displayedCpuPl2 = activeTelemetry?.cpuPl2W ?? null
+  const displayedCpuPl2Enabled = activeTelemetry?.cpuPl2Enabled ?? null
+  const displayedCpuPowerLimitLocked = activeTelemetry?.cpuPowerLimitLocked ?? null
   const displayedGpuClock = presentPositive(activeTelemetry?.gpuClockMhz ?? null)
   const displayedCpuClock = presentPositive(activeTelemetry?.cpuClockMhz ?? null)
   const displayedCpuFanRpm = presentPositive(activeTelemetry?.cpuFanRpm ?? null)
@@ -1430,6 +1514,29 @@ function App() {
   )
   const liveGpuPowerLimitLabel = formatWattValue(displayedGpuPowerLimit, 1)
   const liveGpuPowerDrawLabel = formatWattValue(displayedGpuPowerDraw, 1)
+  const liveCpuPackagePowerLabel = formatWattValue(displayedCpuPackagePower, 1)
+  const liveCpuPl1Label = formatWattValue(displayedCpuPl1, 1)
+  const liveCpuPl2Label = formatWattValue(displayedCpuPl2, 1)
+  const liveCpuPowerLimitLabel =
+    liveCpuPl1Label != null && liveCpuPl2Label != null
+      ? `CPU PL1 ${liveCpuPl1Label} / PL2 ${liveCpuPl2Label}`
+      : liveCpuPl1Label != null
+        ? `CPU PL1 ${liveCpuPl1Label}`
+        : liveCpuPl2Label != null
+          ? `CPU PL2 ${liveCpuPl2Label}`
+          : null
+  const liveCpuPowerStateDetail =
+    liveCpuPowerLimitLabel != null
+      ? `${liveCpuPackagePowerLabel ? `Package ${liveCpuPackagePowerLabel}. ` : ''}${
+          displayedCpuPowerLimitLocked ? 'Package limits locked.' : 'Package limits unlocked.'
+        }${
+          displayedCpuPl1Enabled === false || displayedCpuPl2Enabled === false
+            ? ' One or more limits are disabled.'
+            : ''
+        }`
+      : liveCpuPackagePowerLabel != null
+        ? `CPU package ${liveCpuPackagePowerLabel}`
+        : null
   const liveGpuPowerCeilingDetail =
     liveGpuPowerDrawLabel != null && liveGpuPowerLimitLabel != null
       ? `Draw ${liveGpuPowerDrawLabel} / Limit ${liveGpuPowerLimitLabel}`
@@ -1442,8 +1549,16 @@ function App() {
             : displayedGpuPowerMaxLimit != null
               ? `Driver max ${formatWattValue(displayedGpuPowerMaxLimit, 1)}`
               : null
+  const livePowerCeilingDetail = [
+    liveCpuPowerStateDetail,
+    liveGpuPowerCeilingDetail ? `GPU ${liveGpuPowerCeilingDetail}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ')
   const currentPowerWattage =
-    liveGpuPowerLimitLabel != null
+    liveCpuPowerLimitLabel != null
+      ? liveCpuPowerLimitLabel
+      : liveGpuPowerLimitLabel != null
       ? `GPU ${liveGpuPowerLimitLabel} limit`
       : activePowerProfile === 'custom'
       ? `${customPowerBaseCeilingLabels[customPowerBase]} • ${Math.round(18 + customProcessorState.max * 0.57)}W target`
@@ -1508,11 +1623,25 @@ function App() {
   const updateInstallButtonLabel =
     updateActionPending === 'install' ? 'Launching...' : 'Install Staged Update'
   useEffect(() => {
+    const previousTab = activeTabRef.current
     activeTabRef.current = activeTab
+    if (previousTab !== activeTab) {
+      queuePerformanceEventRef.current('tab-change', `${previousTab} -> ${activeTab}`, {
+        from: previousTab,
+        to: activeTab,
+        windowWidth: window.innerWidth,
+        windowHeight: window.innerHeight,
+        stageFit: stageFitSnapshotsRef.current[activeTab as StageFitTarget] ?? null,
+      })
+    }
     if (activeTab === 'debug') {
       setDebugEvents([...debugEventsRef.current])
     }
   }, [activeTab])
+
+  useEffect(() => {
+    stageFitSnapshotsRef.current = stageFitSnapshots
+  }, [stageFitSnapshots])
 
   function commitCustomCurves(next: CurveSet | ((current: CurveSet) => CurveSet)) {
     setCustomCurves((current) => {
@@ -1783,6 +1912,17 @@ function App() {
             snapshot.availableHeight,
           )}`,
         )
+        queuePerformanceEventRef.current('stage-fit', `stage fit ${activeStage.id}`, {
+          tab: snapshot.tab,
+          scale: snapshot.scale,
+          scaledHeight: snapshot.scaledHeight,
+          naturalWidth: snapshot.naturalWidth,
+          naturalHeight: snapshot.naturalHeight,
+          availableWidth: snapshot.availableWidth,
+          availableHeight: snapshot.availableHeight,
+          windowWidth: snapshot.windowWidth,
+          windowHeight: snapshot.windowHeight,
+        })
       }
 
       if (Math.abs(lastScale - clampedScale) > 0.001) {
@@ -1796,9 +1936,24 @@ function App() {
       }
     }
 
+    let lastResizeEventLoggedAt = 0
+
     const scheduleMeasure = () => {
       cancelAnimationFrame(frameId)
       frameId = requestAnimationFrame(measureStageFit)
+    }
+
+    const scheduleMeasureFromWindowResize = () => {
+      const now = performance.now()
+      if (now - lastResizeEventLoggedAt >= 500) {
+        lastResizeEventLoggedAt = now
+        queuePerformanceEventRef.current('window-resize', `window ${window.innerWidth}x${window.innerHeight}`, {
+          windowWidth: window.innerWidth,
+          windowHeight: window.innerHeight,
+          tab: activeStage.id,
+        })
+      }
+      scheduleMeasure()
     }
 
     const resizeObserver =
@@ -1807,7 +1962,7 @@ function App() {
         : null
 
     scheduleMeasure()
-    window.addEventListener('resize', scheduleMeasure)
+    window.addEventListener('resize', scheduleMeasureFromWindowResize)
 
     if (resizeObserver) {
       if (dashboardRef.current) {
@@ -1822,11 +1977,113 @@ function App() {
     }
 
     return () => {
-      window.removeEventListener('resize', scheduleMeasure)
+      window.removeEventListener('resize', scheduleMeasureFromWindowResize)
       resizeObserver?.disconnect()
       cancelAnimationFrame(frameId)
     }
   }, [activeTab])
+
+  function schedulePerformanceLogFlush() {
+    if (performanceLogFlushTimerRef.current !== null) {
+      return
+    }
+
+    performanceLogFlushTimerRef.current = window.setTimeout(() => {
+      performanceLogFlushTimerRef.current = null
+      void flushPerformanceLog()
+    }, PERFORMANCE_LOG_FLUSH_DELAY_MS)
+  }
+
+  function queuePerformanceEvent(
+    eventType: string,
+    detail: string,
+    payload: Record<string, unknown> = {},
+  ) {
+    if (!isDesktopRuntime()) {
+      return
+    }
+
+    performanceLogQueueRef.current.push({
+      sessionId: performanceLogSessionIdRef.current,
+      eventType,
+      occurredAtUnixMs: Date.now(),
+      activeTab: activeTabRef.current,
+      detail,
+      payload: {
+        ...payload,
+        visibility: document.visibilityState,
+      },
+    })
+
+    performanceLogEventCountRef.current += 1
+
+    if (performanceLogQueueRef.current.length > PERFORMANCE_LOG_MAX_QUEUE) {
+      performanceLogQueueRef.current.splice(
+        0,
+        performanceLogQueueRef.current.length - PERFORMANCE_LOG_MAX_QUEUE,
+      )
+    }
+
+    if (performanceLogQueueRef.current.length >= PERFORMANCE_LOG_BATCH_SIZE) {
+      void flushPerformanceLog()
+    } else {
+      schedulePerformanceLogFlush()
+    }
+  }
+
+  async function flushPerformanceLog() {
+    if (!isDesktopRuntime() || performanceLogFlushInFlightRef.current) {
+      return
+    }
+
+    if (performanceLogFlushTimerRef.current !== null) {
+      window.clearTimeout(performanceLogFlushTimerRef.current)
+      performanceLogFlushTimerRef.current = null
+    }
+
+    const events = performanceLogQueueRef.current.splice(0)
+    if (events.length === 0) {
+      setPerformanceLogState((current) => ({
+        ...current,
+        pendingCount: 0,
+        eventCount: performanceLogEventCountRef.current,
+      }))
+      return
+    }
+
+    performanceLogFlushInFlightRef.current = true
+
+    try {
+      const path = await appendPerformanceLog(events)
+      performanceLogPathRef.current = path
+      performanceLogLastErrorRef.current = null
+      setPerformanceLogState({
+        path,
+        lastFlushAt: formatDebugClock(new Date()),
+        pendingCount: performanceLogQueueRef.current.length,
+        eventCount: performanceLogEventCountRef.current,
+        lastError: null,
+      })
+    } catch (error) {
+      const message = describeError(error)
+      performanceLogLastErrorRef.current = message
+      setPerformanceLogState({
+        path: performanceLogPathRef.current,
+        lastFlushAt: formatDebugClock(new Date()),
+        pendingCount: performanceLogQueueRef.current.length,
+        eventCount: performanceLogEventCountRef.current,
+        lastError: message,
+      })
+      pushDebugEvent(`performance log write failed: ${message}`)
+    } finally {
+      performanceLogFlushInFlightRef.current = false
+      if (performanceLogQueueRef.current.length > 0) {
+        schedulePerformanceLogFlush()
+      }
+    }
+  }
+  queuePerformanceEventRef.current = queuePerformanceEvent
+  flushPerformanceLogRef.current = flushPerformanceLog
 
   function pushDebugEvent(message: string) {
     const entry = `${formatDebugClock(new Date())} ${message}`
@@ -1862,6 +2119,60 @@ function App() {
   pushTransportDebugEventRef.current = pushTransportDebugEvent
   pushPollHeartbeatEventRef.current = pushPollHeartbeat
 
+  function beginControlApply() {
+    controlApplyInFlightRef.current += 1
+  }
+
+  function endControlApply() {
+    controlApplyInFlightRef.current = Math.max(0, controlApplyInFlightRef.current - 1)
+  }
+
+  async function refreshCachedLiveControlsAfterApply() {
+    const refreshStartedMs = performance.now()
+
+    try {
+      const snapshot = await getBackendPollSnapshot()
+      setServiceConnected(snapshot.service.connected)
+      setTelemetrySourceLabel(describeTelemetrySource(snapshot.service.connected, snapshot.telemetry))
+      setLastBackendError(snapshot.service.connected ? null : snapshot.service.detail)
+      updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
+      updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
+        liveControlSnapshotRef.current = next
+      })
+      if (activeTabRef.current === 'debug') {
+        updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
+        setLastBackendPollAt(formatDebugClock(new Date()))
+      }
+
+      return {
+        liveControls: snapshot.liveControls,
+        refreshMs: performance.now() - refreshStartedMs,
+      }
+    } catch (error) {
+      pushTransportDebugEventRef.current(`post-apply cached refresh failed: ${describeError(error)}`)
+      return {
+        liveControls: null,
+        refreshMs: performance.now() - refreshStartedMs,
+      }
+    }
+  }
+
+  useEffect(() => {
+    queuePerformanceEventRef.current('performance-log-started', 'performance logging started', {
+      windowWidth: window.innerWidth,
+      windowHeight: window.innerHeight,
+      userAgent: navigator.userAgent,
+    })
+
+    return () => {
+      if (performanceLogFlushTimerRef.current !== null) {
+        window.clearTimeout(performanceLogFlushTimerRef.current)
+        performanceLogFlushTimerRef.current = null
+      }
+      void flushPerformanceLogRef.current()
+    }
+  }, [])
+
   async function syncAutoRefreshRateState(
     enabled: boolean,
     onBattery: boolean,
@@ -1885,6 +2196,7 @@ function App() {
 
     return result
   }
+  syncAutoRefreshRateStateRef.current = syncAutoRefreshRateState
 
   useEffect(() => {
     if (displayedAcPluggedIn === null) {
@@ -1904,7 +2216,7 @@ function App() {
     }
 
     autoRefreshRateSyncKeyRef.current = syncKey
-    void syncAutoRefreshRateState(autoRefreshRateOnBatteryEnabled, onBattery, false).catch(
+    void syncAutoRefreshRateStateRef.current(autoRefreshRateOnBatteryEnabled, onBattery, false).catch(
       (error) => {
         autoRefreshRateSyncKeyRef.current = null
         pushDebugEvent(`auto refresh-rate sync failed: ${describeError(error)}`)
@@ -2030,22 +2342,6 @@ function App() {
   }, [customBootPreview])
 
   useEffect(() => {
-    if (!import.meta.env.DEV) {
-      setFrameStats((current) =>
-        current.updatedAt === 'Disabled in release build'
-          ? current
-          : {
-              averageMs: 0,
-              maxMs: 0,
-              fps: 0,
-              longFrameCount: 0,
-              sampleWindowMs: 0,
-              updatedAt: 'Disabled in release build',
-            },
-      )
-      return
-    }
-
     let cancelled = false
     let rafId = 0
     let previousTimestamp = 0
@@ -2074,7 +2370,7 @@ function App() {
       totalDeltaMs += deltaMs
       maxDeltaMs = Math.max(maxDeltaMs, deltaMs)
 
-      if (deltaMs >= 34) {
+      if (deltaMs >= PERFORMANCE_LOG_LONG_FRAME_MS) {
         longFrameCount += 1
       }
 
@@ -2092,6 +2388,23 @@ function App() {
           longFrameCount,
           sampleWindowMs,
           updatedAt,
+        })
+
+        const activeFrameTab = activeTabRef.current
+        const activeFit =
+          activeFrameTab === 'home' || activeFrameTab === 'power' || activeFrameTab === 'fans'
+            ? stageFitSnapshotsRef.current[activeFrameTab]
+            : null
+        queuePerformanceEventRef.current('frame-sample', `frame sample ${activeFrameTab}`, {
+          averageMs,
+          maxMs: maxDeltaMs,
+          fps,
+          longFrameCount,
+          sampleWindowMs,
+          windowWidth: window.innerWidth,
+          windowHeight: window.innerHeight,
+          activeTab: activeFrameTab,
+          stageFit: activeFit,
         })
 
         if (
@@ -2136,21 +2449,25 @@ function App() {
     let cancelled = false
 
     async function detectShell() {
+      const bootstrapStartedAt = performance.now()
+      let backendBootstrapMs = 0
+      let persistenceMs = 0
+      let updaterMs = 0
+      let liveControlsMs = 0
+
       try {
+        const backendBootstrapStartedAt = performance.now()
         const bootstrap = await getBackendBootstrap()
-        const persistence = await getPersistenceStatus()
-        const updater = await getUpdateStatus()
+        backendBootstrapMs = performance.now() - backendBootstrapStartedAt
+        const persistence = bootstrap.persistence
+        const updater = bootstrap.updateStatus
+        persistenceMs = 0
+        updaterMs = 0
         const runtime = bootstrap.shell
         const service = bootstrap.service
         const telemetry = bootstrap.telemetry
-        const liveControls = service.connected
-          ? await getLiveControlSnapshot().catch((error) => {
-              pushTransportDebugEventRef.current(
-                `bootstrap live-controls fallback: ${describeError(error)}`,
-              )
-              return null
-            })
-          : null
+        const liveControls = bootstrap.liveControls
+        liveControlsMs = 0
 
         if (!cancelled) {
           setBackendCapabilities(bootstrap.capabilities)
@@ -2212,6 +2529,20 @@ function App() {
             ? `bootstrap connected: ${service.detail}`
             : `bootstrap fallback: ${service.detail}`,
         )
+        queuePerformanceEventRef.current(
+          'backend-bootstrap',
+          service.connected ? 'bootstrap connected' : 'bootstrap fallback',
+          {
+            totalMs: performance.now() - bootstrapStartedAt,
+            backendBootstrapMs,
+            persistenceMs,
+            updaterMs,
+            liveControlsMs,
+            serviceConnected: service.connected,
+            workerCount: service.workerCount,
+            telemetryUsable: hasUsableTelemetry(telemetry),
+          },
+        )
       } catch (error) {
         const message = describeError(error)
 
@@ -2232,30 +2563,37 @@ function App() {
         }
 
         pushTransportDebugEventRef.current(`bootstrap error: ${message}`)
+        queuePerformanceEventRef.current('backend-bootstrap-error', message, {
+          totalMs: performance.now() - bootstrapStartedAt,
+        })
       }
     }
 
     void detectShell()
 
     async function pollBackend() {
-      if (backendPollInFlightRef.current) {
+      if (backendPollInFlightRef.current || controlApplyInFlightRef.current > 0) {
         return
       }
 
       backendPollInFlightRef.current = true
       const pollStartedAt = new Date()
+      const pollStartedMs = performance.now()
+      let serviceMs = 0
+      let telemetryMs = 0
+      let liveControlsMs = 0
+      let backendCommandMs = 0
 
       try {
-        const service = await getServiceStatus()
-        const telemetry = await getTelemetrySnapshot()
-        const liveControls = service.connected
-          ? await getLiveControlSnapshot().catch((error) => {
-              pushTransportDebugEventRef.current(
-                `poll live-controls fallback: ${describeError(error)}`,
-              )
-              return null
-            })
-          : null
+        const backendCommandStartedMs = performance.now()
+        const pollSnapshot = await getBackendPollSnapshot()
+        backendCommandMs = performance.now() - backendCommandStartedMs
+        const service = pollSnapshot.service
+        const telemetry = pollSnapshot.telemetry
+        const liveControls = pollSnapshot.liveControls
+        serviceMs = pollSnapshot.timings.serviceMs
+        telemetryMs = pollSnapshot.timings.telemetryMs
+        liveControlsMs = pollSnapshot.timings.liveControlsMs
 
         if (!cancelled) {
           setServiceConnected(service.connected)
@@ -2290,6 +2628,22 @@ function App() {
         } else {
           pushTransportDebugEventRef.current(`poll fallback: ${service.detail}`)
         }
+
+        queuePerformanceEventRef.current(
+          'backend-poll',
+          service.connected ? 'poll connected' : hasUsableTelemetry(telemetry) ? 'poll cached' : 'poll fallback',
+          {
+            totalMs: performance.now() - pollStartedMs,
+            serviceMs,
+            telemetryMs,
+            liveControlsMs,
+            backendCommandMs,
+            backendReadMs: pollSnapshot.timings.totalMs,
+            serviceConnected: service.connected,
+            workerCount: service.workerCount,
+            telemetryUsable: hasUsableTelemetry(telemetry),
+          },
+        )
       } catch (error) {
         const message = describeError(error)
 
@@ -2308,6 +2662,13 @@ function App() {
         }
 
         pushTransportDebugEventRef.current(`poll error: ${message}`)
+        queuePerformanceEventRef.current('backend-poll-error', message, {
+          totalMs: performance.now() - pollStartedMs,
+          serviceMs,
+          telemetryMs,
+          liveControlsMs,
+          backendCommandMs,
+        })
       } finally {
         backendPollInFlightRef.current = false
       }
@@ -2391,38 +2752,68 @@ function App() {
       profileId,
       customProcessorStateRef.current,
     )
+    const profileName = powerProfiles.find((profile) => profile.id === profileId)?.name ?? 'Power'
 
     if (profileId === 'custom') {
       customProcessorStateRef.current = nextProcessorState
       setCustomProcessorState(nextProcessorState)
-      await persistStagedControls({
-        activePowerProfile: 'custom',
-        customProcessorState: nextProcessorState,
-      })
     }
 
-    startTransition(() => {
-      setActivePowerProfile(profileId)
-      setStatusMessage(
-        serviceConnected
-          ? `${powerProfiles.find((profile) => profile.id === profileId)?.name} profile apply requested.`
-          : `${powerProfiles.find((profile) => profile.id === profileId)?.name} profile staged in the frontend preview.`,
-      )
-      pulseControl(profileId)
+    const hasService = serviceConnectedRef.current
+
+    setActivePowerProfile(profileId)
+    setStatusMessage(
+      hasService
+        ? `${profileName} profile apply requested.`
+        : `${profileName} profile staged in the frontend preview.`,
+    )
+    pulseControl(profileId)
+    queuePerformanceEvent('power-profile-select', profileId, {
+      serviceConnected: hasService,
     })
 
-    if (!serviceConnected) {
+    if (!hasService) {
+      await waitForNextPaint()
+      await persistStagedControls({
+        activePowerProfile: profileId,
+        ...(profileId === 'custom' ? { customProcessorState: nextProcessorState } : {}),
+      })
       return
     }
 
-    try {
-      const updatedControls = await applyPowerProfile(profileId, {
-        minPercent: nextProcessorState.min,
-        maxPercent: nextProcessorState.max,
-      }, profileId === 'custom' ? customPowerBaseRef.current : null)
-      const liveControls = await getLiveControlSnapshot().catch(() => null)
+    if (powerProfileApplyInFlightRef.current) {
+      queuedPowerProfileRef.current = profileId
+      setStatusMessage(`${profileName} profile queued after the current hardware apply finishes.`)
+      queuePerformanceEvent('power-profile-apply-queued', profileId)
+      await waitForNextPaint()
+      return
+    }
 
-      applyBackendControlSnapshot(
+    powerProfileApplyInFlightRef.current = true
+    const applyStartedMs = performance.now()
+    beginControlApply()
+    queuePerformanceEvent('power-profile-apply-started', profileId, {
+      minPercent: nextProcessorState.min,
+      maxPercent: nextProcessorState.max,
+    })
+
+    try {
+      await waitForNextPaint()
+      const updatedControls = await applyPowerProfile(
+        profileId,
+        {
+          minPercent: nextProcessorState.min,
+          maxPercent: nextProcessorState.max,
+        },
+        profileId === 'custom' ? customPowerBaseRef.current : null,
+      )
+      const refreshed = await refreshCachedLiveControlsAfterApply()
+      const liveControls = refreshed.liveControls
+      const queuedProfile = queuedPowerProfileRef.current
+      const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
+
+      if (!resultSuperseded) {
+        applyBackendControlSnapshot(
         mergeControlsWithLiveSnapshot(updatedControls, liveControls),
         setActivePowerProfile,
         setCustomProcessorState,
@@ -2443,19 +2834,42 @@ function App() {
         setUpdateChannel,
         setCheckForUpdatesOnLaunch,
       )
-      liveControlSnapshotRef.current = liveControls
+      }
+      queuePerformanceEvent('power-profile-apply-finished', profileId, {
+        totalMs: performance.now() - applyStartedMs,
+        refreshMs: refreshed.refreshMs,
+        superseded: resultSuperseded,
+        queuedProfile,
+      })
 
-      setStatusMessage(
-        `${powerProfiles.find((profile) => profile.id === profileId)?.name} profile applied through the AeroForge service${
+      if (!resultSuperseded) {
+        setStatusMessage(
+        `${profileName} profile applied through the AeroForge service${
           liveControls?.processorStateReadback
             ? ` and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} • DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
             : '.'
         }`,
       )
+      }
     } catch (error) {
+      queuePerformanceEvent('power-profile-apply-failed', profileId, {
+        totalMs: performance.now() - applyStartedMs,
+        error: describeError(error),
+      })
       setStatusMessage(
         `Power profile apply failed: ${error instanceof Error ? error.message : String(error)}`,
       )
+    } finally {
+      powerProfileApplyInFlightRef.current = false
+      const queuedProfile = queuedPowerProfileRef.current
+      queuedPowerProfileRef.current = null
+      endControlApply()
+      if (queuedProfile !== null && queuedProfile !== profileId) {
+        queuePerformanceEvent('power-profile-apply-draining-queued', queuedProfile, {
+          previousProfile: profileId,
+        })
+        void handlePowerProfile(queuedProfile)
+      }
     }
   }
 
@@ -2532,7 +2946,7 @@ function App() {
 
       setStatusMessage(
         liveControls?.processorStateReadback
-          ? `Custom processor state applied and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} â€¢ DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
+          ? `Custom processor state applied and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} \u2022 DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
           : `Custom processor state applied as ${nextProcessorState.min}/${nextProcessorState.max}.`,
       )
     } catch (error) {
@@ -2546,32 +2960,52 @@ function App() {
 
   async function handleFanProfile(profileId: FanProfile['id']) {
     const profileName = fanProfiles.find((profile) => profile.id === profileId)?.name ?? 'Fan'
+    const hasService = serviceConnectedRef.current
 
-    startTransition(() => {
-      setActiveFanProfile(profileId)
-      setStatusMessage(
-        serviceConnected
-          ? `${profileName} fan mode apply requested.`
-          : `${profileName} fan mode staged in the frontend preview.`,
-      )
-      pulseControl(profileId)
+    setActiveFanProfile(profileId)
+    setStatusMessage(
+      hasService
+        ? `${profileName} fan mode apply requested.`
+        : `${profileName} fan mode staged in the frontend preview.`,
+    )
+    pulseControl(profileId)
+    queuePerformanceEvent('fan-profile-select', profileId, {
+      serviceConnected: hasService,
     })
 
-    await persistStagedControls({ activeFanProfile: profileId })
-
-    if (!serviceConnected) {
+    if (!hasService) {
+      await waitForNextPaint()
+      await persistStagedControls({ activeFanProfile: profileId })
       return
     }
 
+    if (fanProfileApplyInFlightRef.current) {
+      queuedFanProfileRef.current = profileId
+      setStatusMessage(`${profileName} fan mode queued after the current hardware apply finishes.`)
+      queuePerformanceEvent('fan-profile-apply-queued', profileId)
+      await waitForNextPaint()
+      return
+    }
+
+    fanProfileApplyInFlightRef.current = true
+    const applyStartedMs = performance.now()
+    beginControlApply()
+    queuePerformanceEvent('fan-profile-apply-started', profileId)
+
     try {
+      await waitForNextPaint()
       const result =
         profileId === 'custom'
           ? await applyCustomFanCurves(toBackendCurveSet(customCurvesRef.current))
           : await applyFanProfile(profileId)
-      const liveControls = await getLiveControlSnapshot().catch(() => null)
+      const refreshed = await refreshCachedLiveControlsAfterApply()
+      const liveControls = refreshed.liveControls
+      const queuedProfile = queuedFanProfileRef.current
+      const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
 
-      applyBackendControlSnapshot(
-        result.controls,
+      if (!resultSuperseded) {
+        applyBackendControlSnapshot(
+        mergeControlsWithLiveSnapshot(result.controls, liveControls),
         setActivePowerProfile,
         setCustomProcessorState,
         setCustomPowerBase,
@@ -2591,10 +3025,33 @@ function App() {
         setUpdateChannel,
         setCheckForUpdatesOnLaunch,
       )
-      liveControlSnapshotRef.current = liveControls
-      setStatusMessage(result.detail)
+      }
+      queuePerformanceEvent('fan-profile-apply-finished', profileId, {
+        totalMs: performance.now() - applyStartedMs,
+        refreshMs: refreshed.refreshMs,
+        superseded: resultSuperseded,
+        queuedProfile,
+      })
+      if (!resultSuperseded) {
+        setStatusMessage(result.detail)
+      }
     } catch (error) {
+      queuePerformanceEvent('fan-profile-apply-failed', profileId, {
+        totalMs: performance.now() - applyStartedMs,
+        error: describeError(error),
+      })
       setStatusMessage(`Fan profile apply failed: ${describeError(error)}`)
+    } finally {
+      fanProfileApplyInFlightRef.current = false
+      const queuedProfile = queuedFanProfileRef.current
+      queuedFanProfileRef.current = null
+      endControlApply()
+      if (queuedProfile !== null && queuedProfile !== profileId) {
+        queuePerformanceEvent('fan-profile-apply-draining-queued', queuedProfile, {
+          previousProfile: profileId,
+        })
+        void handleFanProfile(queuedProfile)
+      }
     }
   }
 
@@ -3425,11 +3882,13 @@ function App() {
                   { label: 'Max', value: displayedCpuTempHighest, suffix: ' C' },
                 ]}
               />
-              <HomeTemperatureDial
-                label="System"
-                identity={displayedSystemIdentity}
-                value={displayedSystemTemp}
-              />
+              {displayedSystemTemp != null && (
+                <HomeTemperatureDial
+                  label="System"
+                  identity={displayedSystemIdentity}
+                  value={displayedSystemTemp}
+                />
+              )}
             </aside>
           </section>
           </div>
@@ -3599,7 +4058,7 @@ function App() {
                   <span className="eyebrow">Power Manager</span>
                   <div className="power-mode__meta-card">
                     <strong>{currentPowerWattage}</strong>
-                    <small>{liveGpuPowerCeilingDetail || currentPowerRuntime || currentPowerRuntimeDetail}</small>
+                    <small>{livePowerCeilingDetail || currentPowerRuntime || currentPowerRuntimeDetail}</small>
                   </div>
                 </div>
               </div>
@@ -3653,7 +4112,15 @@ function App() {
                       <span className="eyebrow">CPU</span>
                       <strong>{formatTelemetryValue(displayedCpuClock)}</strong>
                       <small>{displayedCpuClock == null ? '' : 'MHz'}</small>
-                      <p>{buildPowerDashboardSummary(displayedCpuTemp, displayedCpuUsage)}</p>
+                      <p>
+                        {buildCpuPowerDashboardSummary(
+                          displayedCpuTemp,
+                          displayedCpuUsage,
+                          displayedCpuPackagePower,
+                          displayedCpuPl1,
+                          displayedCpuPl2,
+                        )}
+                      </p>
                       <p>
                         {buildCpuThermalSummary(
                           displayedCpuTempLowest,
@@ -4359,7 +4826,9 @@ function App() {
                     </strong>
                     <small>
                       {activeTelemetry
-                        ? `CPU fan ${activeTelemetry.cpuFanRpm} RPM, GPU fan ${activeTelemetry.gpuFanRpm} RPM, battery ${activeTelemetry.batteryPercent}%.`
+                        ? `CPU fan ${activeTelemetry.cpuFanRpm} RPM, GPU fan ${activeTelemetry.gpuFanRpm} RPM, CPU package ${
+                            formatWattValue(activeTelemetry.cpuPackagePowerW, 1) ?? '?'
+                          }, battery ${activeTelemetry.batteryPercent}%.`
                         : ''}
                     </small>
                   </div>
@@ -4378,6 +4847,22 @@ function App() {
                     <span>Stage Fit</span>
                     <strong>{formatStageFitValue(activeStageFitSnapshot) ?? 'Waiting'}</strong>
                     <small>{activeStageFitDetail ?? stageFitDetail}</small>
+                  </div>
+
+                  <div className="debug-card">
+                    <span>Perf Log</span>
+                    <strong>
+                      {performanceLogState.path
+                        ? performanceLogState.path.split(/[\\/]/).pop()
+                        : isDesktopRuntime()
+                          ? 'Waiting'
+                          : 'Browser only'}
+                    </strong>
+                    <small>
+                      {performanceLogState.lastError
+                        ? `Write failed: ${performanceLogState.lastError}`
+                        : `${performanceLogState.eventCount} events, ${performanceLogState.pendingCount} pending. Last flush ${performanceLogState.lastFlushAt}.`}
+                    </small>
                   </div>
                 </div>
 

@@ -63,7 +63,7 @@ npm.cmd run portable:build
 This creates:
 
 - `portable\AeroForge Control Portable\`
-- `portable\AeroForge-Control-Portable-0.12.6.zip`
+- `portable\AeroForge-Control-Portable-0.12.7.zip`
 
 ## Install the Nitro key helper
 
@@ -85,18 +85,23 @@ For users who cannot get AeroForge working, send them:
 scripts\AeroForge-Debug-Collector.cmd
 ```
 
-They can double-click it or run it from Command Prompt. It creates an
+The portable ZIP also includes the same `AeroForge-Debug-Collector.cmd` beside
+`aeroforge-control.exe`. They can double-click it or run it from Command Prompt. It creates an
 `AeroForge-Debug-YYYYMMDD-HHMMSS.zip` on their Desktop with service status,
 named-pipe read-only probes, AeroForge logs and state snapshots, filtered Acer /
 Nitro / NVIDIA / WebView diagnostics, Windows event logs, power/display state,
-driver inventory, Defender status, startup entries, update reachability, AMD/CPU
-power diagnostics, read-only Acer WMI probes, and a root `summary.json`.
+driver inventory, Defender status, startup entries, shortcut targets, update
+reachability, NVIDIA power-limit readback, AMD/CPU power diagnostics, read-only
+Acer WMI probes, app/service version facts, installer logs, UI performance logs,
+and a root `summary.json`.
 
 The collector is read-only. It skips binaries, images, staged update payloads,
 WebView cache/storage folders, and token-like filenames, then redacts common
 token/password/secret strings in copied text files. Launch it with
 `-SampleSeconds 60` when you need a short CPU-frequency, fan-RPM, and AeroForge
-pipe sampling trace for intermittent AMD, power, or fan reports.
+pipe sampling trace for intermittent AMD, power, or fan reports. Maintainers can
+add `-OutputRoot "C:\Temp\AeroForgeDebug"` to place the bundle somewhere other
+than the Desktop.
 
 ## Notes for backend wiring later
 
@@ -137,13 +142,14 @@ Current power control path:
 - Custom layers the requested Windows processor-state policy over the selected firmware base
 - Quiet uses Acer platform profile value `0x00` plus the direct NVIDIA NVAPI Whisper path when available
 - Windows processor-state policy is still applied through `powercfg` and read back afterward for AC/DC verification
+- The legacy WinRing0 CPU MSR/RAPL path is not bundled or enabled in release builds because Windows Defender commonly flags that driver. For diagnostics only, maintainers can set `AEROFORGE_ENABLE_WINRING0=1` and provide a trusted external driver through `AEROFORGE_WINRING0_DRIVER`.
 
 Current read-only telemetry coverage:
 
 - Windows power status for battery percentage and AC state
 - Windows system CPU time sampling for CPU usage
 - standard Windows processor queries for current CPU clock
-- NVIDIA NVML for GPU utilization, temperature, and graphics clock when available
+- NVIDIA GPU temperature, utilization, clocks, and VRAM are read through NVML only while Windows reports active dedicated-GPU memory use, plus a short cooldown window. Windows counters are used only as the wake gate, not as displayed utilization. NVIDIA power draw and power-limit readback remain disabled by default to avoid the more aggressive polling path; maintainers can opt into that diagnostic power telemetry with `AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1`.
 - direct `AcerGamingFunction.GetGamingSysInfo` reads for CPU/GPU/system temperatures and CPU/GPU fan RPMs when available
 - direct HID status reads for CPU and GPU fan speed on supported Nitro hardware
 - ACPI thermal-zone data as fallback platform thermals on supported systems

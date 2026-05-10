@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::{
+    acer_hid::{self, SystemUsageMode},
     acer_wmi::{
         apply_gaming_misc_setting, apply_gaming_profile, read_gaming_misc_setting,
         GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE, GAMING_PROFILE_QUIET,
@@ -17,7 +18,7 @@ use super::{
         ProcessorStateReadback, ProcessorStateSettings,
     },
     nvapi_whisper::{set_whisper_mode, NvApiWhisperResult},
-    nvidia_power,
+    nvidia_power, rapl_power,
 };
 
 const SUB_PROCESSOR: &str = "SUB_PROCESSOR";
@@ -36,9 +37,10 @@ pub fn apply_power_profile(
     request: ApplyPowerProfileRequest,
 ) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let profile_id = request.profile_id.clone();
+    let custom_base_profile = request.custom_base_profile.clone();
     let processor_state = sanitize_processor_state(request.processor_state)?;
     let power_before = nvidia_power::read_power_readback();
-    let operating_mode = apply_operating_mode(&profile_id, request.custom_base_profile.as_ref())?;
+    let operating_mode = apply_operating_mode(&profile_id, custom_base_profile.as_ref())?;
     let profile_label = profile_label(&profile_id);
 
     write_log_line(
@@ -76,13 +78,15 @@ pub fn apply_power_profile(
         || readback.ac.max_percent != processor_state.max_percent
         || readback.dc.min_percent != processor_state.min_percent
         || readback.dc.max_percent != processor_state.max_percent;
+    let cpu_power_limit_detail =
+        rapl_power::apply_profile_package_limit(paths, &profile_id, custom_base_profile.as_ref());
 
     thread::sleep(Duration::from_millis(500));
     let power_after = nvidia_power::read_power_readback();
     let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
 
     let detail = format!(
-        "{} Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{} {}",
+        "{} Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{} {} {}",
         operating_mode.detail,
         processor_state.min_percent,
         processor_state.max_percent,
@@ -95,6 +99,7 @@ pub fn apply_power_profile(
         } else {
             ""
         },
+        cpu_power_limit_detail,
         power_detail
     );
 
@@ -103,7 +108,7 @@ pub fn apply_power_profile(
     Ok(AppliedPowerProfileSnapshot {
         profile_id,
         processor_state,
-        custom_base_profile: request.custom_base_profile.clone(),
+        custom_base_profile,
         readback,
         drift_detected,
         applied_at_unix: unix_timestamp(),
@@ -143,6 +148,7 @@ fn apply_operating_mode(
                 false,
                 None,
             );
+            let direct_hid_detail = apply_direct_hid_mode_detail(SystemUsageMode::Quiet);
             let whisper_detail = match set_whisper_mode(true) {
                 Ok(whisper) => {
                     format_whisper_detail("Applied direct NVIDIA Whisper quiet state", &whisper)
@@ -152,7 +158,7 @@ fn apply_operating_mode(
                 ),
             };
             Ok(AppliedOperatingMode {
-                detail: format!("{firmware_detail} {whisper_detail}"),
+                detail: format!("{firmware_detail} {direct_hid_detail} {whisper_detail}"),
             })
         }
         PowerProfileId::Balanced => {
@@ -203,15 +209,73 @@ fn apply_acer_profile_with_whisper_clear(
         balanced_base_for_custom,
         custom_base_label,
     );
+    let direct_hid_mode = direct_hid_mode_for_profile_input(input);
+    let direct_hid_detail = direct_hid_mode
+        .map(apply_direct_hid_mode_detail)
+        .unwrap_or_else(|| {
+            "Direct Acer HID system-usage mode write skipped: no mode mapping.".into()
+        });
 
     let whisper_detail = match set_whisper_mode(false) {
         Ok(whisper) => format_whisper_detail("Cleared NVIDIA Whisper state", &whisper),
         Err(error) => format!("NVIDIA Whisper clear was unavailable: {error}."),
     };
+    let turbo_oc_detail = if direct_hid_mode == Some(SystemUsageMode::Turbo) {
+        apply_turbo_oc_profile_hint_detail()
+    } else {
+        "Direct Acer HID turbo OC-profile hint skipped for non-turbo mode.".into()
+    };
 
     Ok(AppliedOperatingMode {
-        detail: format!("{firmware_detail} {whisper_detail}"),
+        detail: format!("{firmware_detail} {direct_hid_detail} {whisper_detail} {turbo_oc_detail}"),
     })
+}
+
+fn direct_hid_mode_for_profile_input(input: u64) -> Option<SystemUsageMode> {
+    match input {
+        GAMING_PROFILE_BALANCED => Some(SystemUsageMode::Normal),
+        GAMING_PROFILE_PERFORMANCE => Some(SystemUsageMode::Performance),
+        GAMING_PROFILE_TURBO => Some(SystemUsageMode::Turbo),
+        _ => None,
+    }
+}
+
+fn apply_direct_hid_mode_detail(mode: SystemUsageMode) -> String {
+    match acer_hid::apply_system_usage_mode(mode) {
+        Ok(result) => format!(
+            "Direct Acer HID system-usage mode write applied {} with request {}{}.",
+            result.label,
+            result.request_prefix,
+            result
+                .response_prefix
+                .as_ref()
+                .map(|response| format!(" and response {response}"))
+                .unwrap_or_default()
+        ),
+        Err(error) => format!(
+            "Direct Acer HID system-usage mode write unavailable for {}: {error}.",
+            mode.label()
+        ),
+    }
+}
+
+fn apply_turbo_oc_profile_hint_detail() -> String {
+    match acer_hid::apply_turbo_oc_profile_hint() {
+        Ok(results) => {
+            let details = results
+                .iter()
+                .map(|result| {
+                    format!(
+                        "{} {} request {}",
+                        result.action, result.label, result.request_prefix
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("Direct Acer HID turbo OC-profile hint applied: {details}.")
+        }
+        Err(error) => format!("Direct Acer HID turbo OC-profile hint unavailable: {error}."),
+    }
 }
 
 fn apply_acer_platform_profile_or_fallback(
