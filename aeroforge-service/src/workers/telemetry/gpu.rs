@@ -86,6 +86,14 @@ struct GpuTelemetryCache {
     active_until: Option<Instant>,
     last_gate_error: Option<String>,
     last_gate_allows_nvml: Option<bool>,
+    last_gate_detail: Option<String>,
+}
+
+struct GpuActivitySample {
+    active: bool,
+    adapter_count: usize,
+    max_dedicated_bytes: f64,
+    total_dedicated_bytes: f64,
 }
 
 impl RefreshState for GpuTelemetryCache {
@@ -126,6 +134,7 @@ pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
                 active_until: None,
                 last_gate_error: None,
                 last_gate_allows_nvml: None,
+                last_gate_detail: None,
             }))
         })
         .clone();
@@ -169,13 +178,23 @@ fn gpu_activity_gate_allows_nvml(
         guard.last_activity_check = Some(now);
 
         match activity {
-            Ok(active) => {
-                if active {
+            Ok(sample) => {
+                if sample.active {
                     guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
                 }
-                let allows_nvml = active || gate_cooldown_active(&guard, now);
+                let cooldown_active = gate_cooldown_active(&guard, now);
+                let allows_nvml = sample.active || cooldown_active;
+                let reason = if sample.active {
+                    "dedicated-memory-threshold"
+                } else if cooldown_active {
+                    "recent-dgpu-activity-cooldown"
+                } else {
+                    "idle"
+                };
+                let detail = sample.format_gate_detail(allows_nvml, reason);
                 guard.last_gate_error = None;
-                log_gate_transition(paths, &mut guard, allows_nvml);
+                log_gate_detail(paths, &mut guard, &detail);
+                log_gate_transition(paths, &mut guard, allows_nvml, &detail);
             }
             Err(error) => {
                 let detail = format!("Windows GPU activity gate unavailable: {error}");
@@ -188,7 +207,10 @@ fn gpu_activity_gate_allows_nvml(
                 }
                 guard.last_gate_error = Some(detail);
                 guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
-                log_gate_transition(paths, &mut guard, true);
+                let gate_detail =
+                    "GPU activity gate sample: allowsNvml=true reason=gate-error.".to_string();
+                log_gate_detail(paths, &mut guard, &gate_detail);
+                log_gate_transition(paths, &mut guard, true, &gate_detail);
             }
         }
     }
@@ -204,21 +226,35 @@ fn gate_cooldown_active(cache: &GpuTelemetryCache, now: Instant) -> bool {
         .unwrap_or(false)
 }
 
-fn log_gate_transition(paths: &ServicePaths, cache: &mut GpuTelemetryCache, allows_nvml: bool) {
+fn log_gate_detail(paths: &ServicePaths, cache: &mut GpuTelemetryCache, detail: &str) {
+    if cache.last_gate_detail.as_deref() == Some(detail) {
+        return;
+    }
+
+    cache.last_gate_detail = Some(detail.to_string());
+    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
+}
+
+fn log_gate_transition(
+    paths: &ServicePaths,
+    cache: &mut GpuTelemetryCache,
+    allows_nvml: bool,
+    detail: &str,
+) {
     if cache.last_gate_allows_nvml == Some(allows_nvml) {
         return;
     }
 
     cache.last_gate_allows_nvml = Some(allows_nvml);
     let message = if allows_nvml {
-        "Windows GPU activity gate opened NVML polling."
+        format!("Windows GPU activity gate opened NVML polling. {detail}")
     } else {
-        "Windows GPU activity gate paused NVML polling."
+        format!("Windows GPU activity gate paused NVML polling. {detail}")
     };
     let _ = write_log_line(
         &paths.component_log("telemetry-nvidia-gpu"),
         "INFO",
-        message,
+        &message,
     );
 }
 
@@ -232,11 +268,45 @@ fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send 
     query_nvidia_smi_snapshot()
 }
 
-fn query_windows_discrete_gpu_activity() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+fn query_windows_discrete_gpu_activity(
+) -> Result<GpuActivitySample, Box<dyn std::error::Error + Send + Sync>> {
     let usages = read_gpu_adapter_dedicated_usage_bytes()?;
-    Ok(usages
-        .into_iter()
-        .any(|usage| usage >= DISCRETE_GPU_ACTIVE_DEDICATED_BYTES))
+    Ok(GpuActivitySample::from_dedicated_usages(usages))
+}
+
+impl GpuActivitySample {
+    fn from_dedicated_usages(usages: Vec<f64>) -> Self {
+        let adapter_count = usages.len();
+        let max_dedicated_bytes = usages.iter().copied().fold(0.0, f64::max);
+        let total_dedicated_bytes = usages.iter().sum();
+        let active = usages
+            .iter()
+            .any(|usage| *usage >= DISCRETE_GPU_ACTIVE_DEDICATED_BYTES);
+
+        Self {
+            active,
+            adapter_count,
+            max_dedicated_bytes,
+            total_dedicated_bytes,
+        }
+    }
+
+    fn format_gate_detail(&self, allows_nvml: bool, reason: &str) -> String {
+        format!(
+            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} maxDedicated={:.1}MB totalDedicated={:.1}MB threshold={:.1}MB.",
+            self.active,
+            allows_nvml,
+            reason,
+            self.adapter_count,
+            bytes_to_mib(self.max_dedicated_bytes),
+            bytes_to_mib(self.total_dedicated_bytes),
+            bytes_to_mib(DISCRETE_GPU_ACTIVE_DEDICATED_BYTES),
+        )
+    }
+}
+
+fn bytes_to_mib(bytes: f64) -> f64 {
+    bytes / 1024.0 / 1024.0
 }
 
 fn read_gpu_adapter_dedicated_usage_bytes(

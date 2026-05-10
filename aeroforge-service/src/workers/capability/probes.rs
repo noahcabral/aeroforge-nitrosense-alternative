@@ -11,6 +11,7 @@ pub fn nvml_present() -> bool {
 pub fn acer_gaming_wmi_present() -> bool {
     acer_wmi::read_gaming_sys_info(0).is_ok()
         || acer_wmi::read_gaming_misc_setting(acer_wmi::MISC_SETTING_SUPPORTED_PROFILES).is_ok()
+        || acer_wmi::read_firmware_sensor_snapshot().is_ok()
 }
 
 pub fn acer_fan_telemetry_present() -> bool {

@@ -337,20 +337,202 @@ function Get-AcerDirectWmiReadOnlyProbe {
     "AcerGamingFunction instance not found."
   }
 
-  "===== BatteryControl read-only health status ====="
-  $batteryControl = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($batteryControl) {
-    try {
-      Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
-        uBatteryNo = [byte]1
-        uFunctionQuery = [byte]1
-        uReserved = ([byte[]](0,0))
-      } -ErrorAction Stop | Format-List *
-    } catch {
-      "BatteryControl health status read failed: $($_.Exception.Message)"
+  "===== BatteryControl class and instance raw view ====="
+  try {
+    Get-CimClass -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop |
+      Select-Object CimClassName, CimSuperClassName, CimClassMethods, CimClassProperties |
+      Format-List
+  } catch {
+    "BatteryControl class read failed: $($_.Exception.Message)"
+  }
+
+  $batteryControls = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction SilentlyContinue)
+  if ($batteryControls.Count -gt 0) {
+    $batteryControls | Format-List *
+    $batteryControl = $batteryControls | Select-Object -First 1
+    ""
+    "===== BatteryControl health-status read matrix ====="
+    $batteryRows = foreach ($batteryNo in @(0,1,2,3)) {
+      foreach ($functionQuery in @(0,1,2,3)) {
+        try {
+          $get = Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
+            uBatteryNo = [byte]$batteryNo
+            uFunctionQuery = [byte]$functionQuery
+            uReserved = ([byte[]](0,0))
+          } -ErrorAction Stop
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            functionList = $get.uFunctionList
+            functionStatus = (@($get.uFunctionStatus) -join ",")
+            'return' = (@($get.uReturn) -join ",")
+          }
+        } catch {
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            error = $_.Exception.Message
+          }
+        }
+      }
     }
+    $batteryRows | Format-Table -AutoSize -Wrap
   } else {
     "BatteryControl instance not found."
+    ""
+    "===== BatteryControl health-status read matrix ====="
+    "BatteryControl health-status read matrix skipped: BatteryControl instance not found. Re-run the collector as administrator if this machine is expected to expose BatteryControl."
+  }
+}
+
+function Get-AmdSmuAcpiWmiReadOnlyProbe {
+  "===== AMD probe scope ====="
+  $processor = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($processor) {
+    $processor | Select-Object Name, Manufacturer, Architecture, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, CurrentClockSpeed | Format-List
+    if ($processor.Manufacturer -notmatch 'AMD') {
+      "Processor manufacturer does not report AMD; collecting ACPI/WMI surface anyway for comparison."
+    }
+  } else {
+    "Win32_Processor did not return a processor instance."
+  }
+  ""
+
+  "===== AMD SMU / PSP / PMF / PPM signed drivers ====="
+  Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.DeviceName + " " + $_.Manufacturer + " " + $_.DriverProviderName + " " + $_.InfName + " " + $_.DeviceID) -match 'AMD|Ryzen|SMU|System Management Unit|PSP|Platform Security|PMF|Power Management Framework|PPM|Processor|ACPI|GPIO|I2C|SMBus|Chipset'
+    } |
+    Select-Object DeviceName, Manufacturer, DriverProviderName, DriverVersion, DriverDate, InfName, DeviceID |
+    Sort-Object DeviceName, InfName |
+    Format-Table -AutoSize -Wrap
+  ""
+
+  "===== AMD SMU / PSP / PMF / PPM kernel services ====="
+  Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.Name + " " + $_.DisplayName + " " + $_.PathName + " " + $_.Description) -match 'amd|ryzen|smu|psp|pmf|ppm|processor|acpi|gpio|i2c|smbus|chipset'
+    } |
+    Select-Object Name, DisplayName, State, StartMode, PathName |
+    Sort-Object Name |
+    Format-Table -AutoSize -Wrap
+  ""
+
+  "===== AMD SMU / ACPI / sensor PnP devices ====="
+  $pnpRows = @()
+  try {
+    $pnpRows = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+      Where-Object {
+        ($_.Name + " " + $_.Manufacturer + " " + $_.PNPClass + " " + $_.DeviceID + " " + $_.Service) -match 'AMD|Ryzen|SMU|System Management Unit|PSP|PMF|ACPI|Thermal|Sensor|GPIO|I2C|SMBus|Chipset'
+      } |
+      Select-Object Name, Manufacturer, PNPClass, Status, ConfigManagerErrorCode, Service, DeviceID)
+  } catch {
+    "Win32_PnPEntity query failed: $($_.Exception.Message)"
+  }
+  if ($pnpRows.Count -gt 0) {
+    $pnpRows | Sort-Object PNPClass, Name | Format-Table -AutoSize -Wrap
+  } else {
+    "No AMD SMU / ACPI / sensor PnP rows matched the read-only filter."
+  }
+  ""
+
+  "===== ROOT\WMI AMD / ACPI / thermal / power classes ====="
+  Get-CimClass -Namespace root\wmi -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.CimClassName + " " + $_.CimSuperClassName) -match 'AMD|Ryzen|SMU|ACPI|Thermal|Processor|Power|Battery|Acer|Gaming|Generic'
+    } |
+    Select-Object CimClassName, CimSuperClassName, CimClassMethods, CimClassProperties |
+    Sort-Object CimClassName |
+    Format-List
+  ""
+
+  "===== ROOT\CIMV2 AMD / ACPI / thermal / power classes ====="
+  Get-CimClass -Namespace root\cimv2 -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.CimClassName + " " + $_.CimSuperClassName) -match 'AMD|Ryzen|SMU|ACPI|Thermal|Processor|Power|Battery'
+    } |
+    Select-Object CimClassName, CimSuperClassName, CimClassMethods, CimClassProperties |
+    Sort-Object CimClassName |
+    Format-List
+  ""
+
+  "===== ACPI thermal zone instances ====="
+  $thermalZones = @()
+  try {
+    $thermalZones = @(Get-CimInstance -Namespace root\wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop)
+  } catch {
+    "MSAcpi_ThermalZoneTemperature read failed: $($_.Exception.Message)"
+  }
+  if ($thermalZones.Count -gt 0) {
+    $thermalZones |
+      ForEach-Object {
+        $tempC = $null
+        if ($null -ne $_.CurrentTemperature) {
+          $tempC = [math]::Round((([double]$_.CurrentTemperature) / 10.0) - 273.15, 1)
+        }
+        [pscustomobject]@{
+          InstanceName = $_.InstanceName
+          Active = $_.Active
+          CurrentTemperatureRaw = $_.CurrentTemperature
+          CurrentTemperatureC = $tempC
+          CriticalTripPoint = $_.CriticalTripPoint
+          PassiveTripPoint = $_.PassiveTripPoint
+          ThermalConstant1 = $_.ThermalConstant1
+          ThermalConstant2 = $_.ThermalConstant2
+        }
+      } |
+      Format-Table -AutoSize -Wrap
+  } else {
+    "No MSAcpi_ThermalZoneTemperature instances returned."
+  }
+  ""
+
+  "===== Windows thermal-zone counters ====="
+  Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction SilentlyContinue |
+    Select-Object Name, Temperature |
+    Sort-Object Name |
+    Format-Table -AutoSize -Wrap
+  ""
+
+  "===== Acer GenericMethod class and instance surface ====="
+  try {
+    Get-CimClass -Namespace root\wmi -ClassName AcerGenericMethod -ErrorAction Stop |
+      Select-Object CimClassName, CimSuperClassName, CimClassMethods, CimClassProperties |
+      Format-List
+  } catch {
+    "AcerGenericMethod class read failed: $($_.Exception.Message)"
+  }
+  $genericMethods = @(Get-CimInstance -Namespace root\wmi -ClassName AcerGenericMethod -ErrorAction SilentlyContinue)
+  if ($genericMethods.Count -gt 0) {
+    $genericMethods | Format-List *
+  } else {
+    "AcerGenericMethod instance not found."
+  }
+  ""
+
+  "===== Known AMD/ACPI service registry keys ====="
+  foreach ($serviceName in @(
+    "amdppm",
+    "AmdPPM",
+    "amdfendr",
+    "amdpsp",
+    "AMDPSP",
+    "AmdPspK8",
+    "amdgpio2",
+    "amdi2c",
+    "AmdSfh",
+    "AMDSAFD",
+    "AMDRyzenMasterDriver",
+    "AMDRyzenMasterDriverV20",
+    "AMDRyzenMasterDriverV22",
+    "AMDRyzenMasterDriverV26",
+    "AMDRyzenMasterDriverV27",
+    "AMDRyzenMasterDriverV28"
+  )) {
+    $key = "HKLM\SYSTEM\CurrentControlSet\Services\$serviceName"
+    "===== $key ====="
+    reg.exe query $key /s
+    ""
   }
 }
 
@@ -406,7 +588,7 @@ function Write-DebugSummaryJson {
   }
 
   if ($processor -and $processor.Manufacturer -match 'AMD') {
-    $flags.Add("AMD CPU detected; inspect cpu-and-amd-diagnostics and sampling output for frequency/power-state behavior.")
+    $flags.Add("AMD CPU detected; inspect cpu-and-amd-diagnostics, amd-smu-acpi-wmi-surface, and sampling output for frequency/power-state behavior.")
   }
   if (-not ($acerClasses -contains "AcerGamingFunction")) {
     $flags.Add("AcerGamingFunction WMI class missing.")
@@ -861,7 +1043,7 @@ Most useful files:
 - collector.log and collector-transcript.txt: collector progress and errors.
 
 Optional deeper capture:
-- Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer sensor, and AeroForge pipe samples for intermittent AMD, power, or fan issues.
+- Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer sensor, AeroForge pipe samples, and AMD SMU/ACPI/WMI context for intermittent AMD, power, battery, or fan issues.
 - Maintainers can use -OutputRoot "C:\Some\Temp\Folder" to write the bundle somewhere other than the Desktop.
 "@
 Write-TextFile -Path (Join-Path $script:BundleRoot "README.txt") -Text $readme
@@ -932,6 +1114,10 @@ Invoke-DiagCommand "cpu and amd diagnostics" {
   reg.exe query "HKLM\SYSTEM\CurrentControlSet\Services\amdppm" /s
   reg.exe query "HKLM\SYSTEM\CurrentControlSet\Services\Processor" /s
   reg.exe query "HKLM\SYSTEM\CurrentControlSet\Services\intelppm" /s
+}
+
+Invoke-DiagCommand "amd smu acpi wmi surface" {
+  Get-AmdSmuAcpiWmiReadOnlyProbe
 }
 
 Invoke-DiagCommand "installed apps filtered" {

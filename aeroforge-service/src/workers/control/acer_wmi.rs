@@ -1,4 +1,10 @@
-use std::{ffi::c_void, ptr::null_mut};
+use std::{
+    ffi::c_void,
+    os::windows::process::CommandExt,
+    process::Command,
+    ptr::null_mut,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -44,6 +50,8 @@ const ACER_GAMING_OBJECT_PATH: &str =
     "AcerGamingFunction.InstanceName=\"ACPI\\\\PNP0C14\\\\APGe_0\"";
 const GM_INPUT: &str = "gmInput";
 const GM_OUTPUT: &str = "gmOutput";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+static SYSINFO_CIM_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 pub const GAMING_PROFILE_BALANCED: u64 = 0x0000_0001;
 pub const GAMING_PROFILE_PERFORMANCE: u64 = 0x0000_0004;
@@ -111,14 +119,18 @@ pub fn apply_fan_speed(
 
 pub fn read_firmware_sensor_snapshot(
 ) -> Result<AcerFirmwareSensorReadback, Box<dyn std::error::Error + Send + Sync>> {
+    if SYSINFO_CIM_FALLBACK.load(Ordering::Relaxed) {
+        return read_firmware_sensor_snapshot_cim(Vec::new());
+    }
+
     let mut errors = Vec::new();
-    let supported_sensors = read_sysinfo_raw(0x0000, &mut errors);
-    let battery_status = read_sysinfo_raw(0x0002, &mut errors);
-    let cpu_temp = read_sysinfo_raw(0x0101, &mut errors);
-    let cpu_fan = read_sysinfo_raw(0x0201, &mut errors);
-    let system_temp = read_sysinfo_raw(0x0301, &mut errors);
-    let gpu_fan = read_sysinfo_raw(0x0601, &mut errors);
-    let gpu_temp = read_sysinfo_raw(0x0A01, &mut errors);
+    let supported_sensors = read_sysinfo_raw_com(0x0000, &mut errors);
+    let battery_status = read_sysinfo_raw_com(0x0002, &mut errors);
+    let cpu_temp = read_sysinfo_raw_com(0x0101, &mut errors);
+    let cpu_fan = read_sysinfo_raw_com(0x0201, &mut errors);
+    let system_temp = read_sysinfo_raw_com(0x0301, &mut errors);
+    let gpu_fan = read_sysinfo_raw_com(0x0601, &mut errors);
+    let gpu_temp = read_sysinfo_raw_com(0x0A01, &mut errors);
 
     if [
         supported_sensors,
@@ -132,11 +144,11 @@ pub fn read_firmware_sensor_snapshot(
     .iter()
     .all(Option::is_none)
     {
-        return Err(format!(
-            "AcerGamingFunction GetGamingSysInfo did not return any firmware sensor values. {}",
-            errors.join(" | ")
-        )
-        .into());
+        let fallback = read_firmware_sensor_snapshot_cim(errors);
+        if fallback.is_ok() {
+            SYSINFO_CIM_FALLBACK.store(true, Ordering::Relaxed);
+        }
+        return fallback;
     }
 
     Ok(AcerFirmwareSensorReadback {
@@ -227,6 +239,16 @@ fn invoke_acer_gaming_u64_method(
     method: &'static str,
     input: u64,
 ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    match invoke_acer_gaming_u64_method_com(method, input) {
+        Ok(result) => Ok(result),
+        Err(com_error) => invoke_acer_gaming_u64_method_cim(method, input, com_error.to_string()),
+    }
+}
+
+fn invoke_acer_gaming_u64_method_com(
+    method: &'static str,
+    input: u64,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
     let _com = ComApartment::initialize()?;
 
     let locator = WbemLocator::create()?;
@@ -253,14 +275,196 @@ fn invoke_acer_gaming_u64_method(
     })
 }
 
-fn read_sysinfo_raw(input: u32, errors: &mut Vec<String>) -> Option<u64> {
-    match read_gaming_sys_info(input) {
+fn invoke_acer_gaming_u64_method_cim(
+    method: &'static str,
+    input: u64,
+    com_error: String,
+) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    let script = r#"
+$method = $args[0]
+$inputValue = [UInt64]$args[1]
+$gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
+if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
+if ($inputValue -le [UInt32]::MaxValue) {
+  $gmInput = [UInt32]$inputValue
+} else {
+  $gmInput = [UInt64]$inputValue
+}
+$result = Invoke-CimMethod -InputObject $gaming -MethodName $method -Arguments @{ gmInput = $gmInput } -ErrorAction Stop
+$gmOutput = $null
+if ($null -ne $result.gmOutput) {
+  $gmOutput = [UInt64]$result.gmOutput
+}
+[ordered]@{
+  gmOutput = $gmOutput
+} | ConvertTo-Json -Compress
+"#;
+
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+            method,
+            &input.to_string(),
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("PowerShell exited with status {}", output.status)
+        };
+        return Err(format!(
+            "{method} failed through native COM ({com_error}) and hidden CIM fallback ({detail})"
+        )
+        .into());
+    }
+
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
+    Ok(AcerWmiMethodResult {
+        method,
+        input,
+        hresult: S_OK,
+        output: parsed.get("gmOutput").and_then(serde_json::Value::as_u64),
+    })
+}
+
+fn read_sysinfo_raw_com(input: u32, errors: &mut Vec<String>) -> Option<u64> {
+    match invoke_acer_gaming_u64_method_com("GetGamingSysInfo", u64::from(input)) {
         Ok(result) => result.output,
         Err(error) => {
             errors.push(format!("0x{input:X}: {error}"));
             None
         }
     }
+}
+
+fn read_firmware_sensor_snapshot_cim(
+    com_errors: Vec<String>,
+) -> Result<AcerFirmwareSensorReadback, Box<dyn std::error::Error + Send + Sync>> {
+    let script = r#"
+$gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
+if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
+$values = [ordered]@{}
+$errors = @()
+foreach ($item in @(
+  @{ name = 'supportedSensors'; input = [uint32]0x0000 },
+  @{ name = 'batteryStatus'; input = [uint32]0x0002 },
+  @{ name = 'cpuTemp'; input = [uint32]0x0101 },
+  @{ name = 'cpuFan'; input = [uint32]0x0201 },
+  @{ name = 'systemTemp'; input = [uint32]0x0301 },
+  @{ name = 'gpuFan'; input = [uint32]0x0601 },
+  @{ name = 'gpuTemp'; input = [uint32]0x0A01 }
+)) {
+  try {
+    $read = Invoke-CimMethod -InputObject $gaming -MethodName GetGamingSysInfo -Arguments @{ gmInput = $item.input } -ErrorAction Stop
+    if ($null -ne $read.gmOutput) {
+      $values[$item.name] = [UInt64]$read.gmOutput
+    } else {
+      $values[$item.name] = $null
+    }
+  } catch {
+    $values[$item.name] = $null
+    $errors += ('0x{0:X}: {1}' -f [uint32]$item.input, $_.Exception.Message)
+  }
+}
+[ordered]@{
+  values = $values
+  errors = $errors
+} | ConvertTo-Json -Depth 4 -Compress
+"#;
+
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("PowerShell exited with status {}", output.status)
+        };
+        return Err(format!(
+            "AcerGamingFunction GetGamingSysInfo did not return any firmware sensor values through native COM ({}). Hidden CIM fallback failed: {detail}",
+            com_errors.join(" | ")
+        )
+        .into());
+    }
+
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
+    let values = parsed
+        .get("values")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("AcerGamingFunction CIM fallback did not return a values object.")?;
+    let raw = |name: &str| values.get(name).and_then(serde_json::Value::as_u64);
+
+    let supported_sensors = raw("supportedSensors");
+    let battery_status = raw("batteryStatus");
+    let cpu_temp = raw("cpuTemp");
+    let cpu_fan = raw("cpuFan");
+    let system_temp = raw("systemTemp");
+    let gpu_fan = raw("gpuFan");
+    let gpu_temp = raw("gpuTemp");
+
+    if [
+        supported_sensors,
+        battery_status,
+        cpu_temp,
+        cpu_fan,
+        system_temp,
+        gpu_fan,
+        gpu_temp,
+    ]
+    .iter()
+    .all(Option::is_none)
+    {
+        let cim_errors = parsed
+            .get("errors")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default();
+        return Err(format!(
+            "AcerGamingFunction GetGamingSysInfo did not return any firmware sensor values through native COM ({}) or hidden CIM fallback ({cim_errors}).",
+            com_errors.join(" | ")
+        )
+        .into());
+    }
+
+    Ok(AcerFirmwareSensorReadback {
+        supported_sensors: supported_sensors.map(|value| ((value >> 24) & 0xFFFF) as u16),
+        battery_status,
+        cpu_temp_c: decode_sysinfo_sensor(cpu_temp),
+        gpu_temp_c: decode_sysinfo_sensor(gpu_temp),
+        system_temp_c: decode_sysinfo_sensor(system_temp),
+        cpu_fan_rpm: decode_sysinfo_sensor(cpu_fan),
+        gpu_fan_rpm: decode_sysinfo_sensor(gpu_fan),
+    })
 }
 
 fn decode_sysinfo_sensor(value: Option<u64>) -> Option<u16> {

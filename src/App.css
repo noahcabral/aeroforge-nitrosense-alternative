@@ -120,6 +120,75 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.update-notice {
+  position: fixed;
+  right: max(1rem, calc((100vw - 1320px) / 2 + 1rem));
+  bottom: 1rem;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: center;
+  width: min(460px, calc(100vw - 2rem));
+  padding: 0.85rem;
+  border: 1px solid rgba(236, 120, 46, 0.32);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, rgba(235, 140, 90, 0.18), transparent 42%),
+    linear-gradient(180deg, rgba(17, 20, 27, 0.98), rgba(8, 10, 14, 0.98));
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+  animation: rise-in 180ms ease;
+}
+
+.update-notice__copy {
+  min-width: 0;
+}
+
+.update-notice__copy strong {
+  display: block;
+  margin: 0.18rem 0 0.18rem;
+  font-size: 1.05rem;
+}
+
+.update-notice__copy p {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.35;
+}
+
+.update-notice__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.button--notice {
+  min-width: 6rem;
+}
+
+.update-notice__dismiss {
+  display: grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+}
+
+.update-notice__dismiss:hover,
+.update-notice__dismiss:focus-visible {
+  color: var(--text-bright);
+  border-color: rgba(235, 140, 90, 0.42);
+  background: rgba(235, 140, 90, 0.12);
+  outline: none;
+}
+
 .home-stage {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 280px;
@@ -2883,6 +2952,18 @@
   .home-stage__actions {
     width: 100%;
     flex-direction: column;
+  }
+
+  .update-notice {
+    right: 0.75rem;
+    bottom: 0.75rem;
+    grid-template-columns: 1fr;
+  }
+
+  .update-notice__actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .personal-sidebar,

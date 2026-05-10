@@ -124,7 +124,7 @@ pub fn apply_smart_charging(
     paths: &ServicePaths,
     request: ApplySmartChargeRequest,
 ) -> Result<AppliedSmartChargeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    match smart_charge::apply_smart_charging(request) {
+    match smart_charge::apply_smart_charging(paths, request) {
         Ok(applied) => {
             let _ = write_log_line(
                 &paths.component_log("control-smart-charge"),
