@@ -9,8 +9,11 @@ $serviceName = 'AeroForgeService'
 $displayName = 'AeroForge Service'
 $serviceRoot = Join-Path $env:ProgramData 'AeroForge\Service'
 $serviceBinDir = Join-Path $serviceRoot 'bin'
+$serviceDriverDir = Join-Path $serviceRoot 'drivers'
 $serviceLogDir = Join-Path $serviceRoot 'logs'
 $installedExe = Join-Path $serviceBinDir 'aeroforge-service.exe'
+$pawnIoIntelMsrSource = Join-Path $PSScriptRoot 'IntelMSR.bin'
+$pawnIoIntelMsrInstalled = Join-Path $serviceDriverDir 'IntelMSR.bin'
 $script:LogFile = Join-Path $serviceLogDir 'installer-service.log'
 
 function Initialize-InstallLog {
@@ -288,8 +291,10 @@ function Install-AeroForgeService {
   Write-InstallLog "Installing $serviceName from $resolvedSource."
 
   New-Item -ItemType Directory -Force -Path $serviceBinDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $serviceDriverDir | Out-Null
   Stop-AeroForgeService
   Copy-WithRetry -Source $resolvedSource -Destination $installedExe
+  Install-LowLevelModules
 
   $existingService = Get-AeroForgeService
   if ($existingService) {
@@ -323,6 +328,15 @@ function Install-AeroForgeService {
   Invoke-Sc -Arguments @('start', $serviceName) -AllowedExitCodes @(0, 1056) | Out-Null
   Wait-ServiceRunning
   Write-InstallLog "Installed $serviceName at $installedExe with delayed automatic startup and restart-on-failure actions."
+}
+
+function Install-LowLevelModules {
+  if (Test-Path -LiteralPath $pawnIoIntelMsrSource) {
+    Copy-Item -LiteralPath $pawnIoIntelMsrSource -Destination $pawnIoIntelMsrInstalled -Force
+    Write-InstallLog "Staged optional PawnIO IntelMSR module at $pawnIoIntelMsrInstalled."
+  } else {
+    Write-InstallLog "Optional PawnIO IntelMSR module was not bundled; CPU RAPL through PawnIO will remain unavailable unless AEROFORGE_PAWNIO_MODULE is set."
+  }
 }
 
 function Uninstall-AeroForgeService {

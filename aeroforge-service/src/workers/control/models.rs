@@ -83,6 +83,8 @@ pub struct ApplyPowerProfileRequest {
     pub processor_state: ProcessorStateSettings,
     #[serde(default)]
     pub custom_base_profile: Option<CustomPowerBaseId>,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -124,6 +126,8 @@ pub struct AppliedPowerProfileSnapshot {
     pub processor_state: ProcessorStateSettings,
     #[serde(default)]
     pub custom_base_profile: Option<CustomPowerBaseId>,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
     pub readback: ProcessorStateReadback,
     pub drift_detected: bool,
     pub applied_at_unix: u64,
@@ -186,6 +190,8 @@ pub struct ControlSnapshot {
     pub processor_state: Option<ProcessorStateSettings>,
     #[serde(default)]
     pub custom_base_profile: Option<CustomPowerBaseId>,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
     #[serde(default)]
     pub processor_state_readback: Option<ProcessorStateReadback>,
     #[serde(default)]
@@ -251,6 +257,7 @@ impl ControlSnapshot {
                 max_percent: 100,
             }),
             custom_base_profile: None,
+            processor_state_control_enabled: true,
             processor_state_readback: None,
             processor_state_drift_detected: false,
             last_applied_at_unix: None,

@@ -340,17 +340,21 @@ pub fn apply_power_profile(
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
+    processor_state_control_enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
     let applied = service_pipe::apply_power_profile(
         profile_id.clone(),
         processor_state.clone(),
         custom_base_profile.clone(),
+        processor_state_control_enabled,
     )
     .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_power_profile = applied.profile_id;
+    controls.personal_settings.processor_state_control_enabled =
+        applied.processor_state_control_enabled;
     if matches!(controls.active_power_profile, PowerProfileId::Custom) {
         controls.custom_processor_state = applied.processor_state;
         if let Some(custom_base_profile) = custom_base_profile {

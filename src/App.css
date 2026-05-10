@@ -585,6 +585,39 @@
   color: var(--text-soft);
 }
 
+.power-mode__meter-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.power-mode__meter-grid div {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+}
+
+.power-mode__meter-grid span {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.power-mode__meter-grid strong {
+  font-size: 1.18rem;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.power-mode__meter-grid small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+
 .fan-mode__select small,
 .fan-mode__meta-card small {
   color: var(--text-soft);

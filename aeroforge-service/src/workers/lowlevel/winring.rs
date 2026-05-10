@@ -35,9 +35,9 @@ const WINRING_DRIVER_PATH_ENV: &str = "AEROFORGE_WINRING0_DRIVER";
 const IA32_THERM_STATUS: u32 = 0x19C;
 const IA32_TEMPERATURE_TARGET: u32 = 0x1A2;
 const IA32_PACKAGE_THERM_STATUS: u32 = 0x1B1;
-const MSR_RAPL_POWER_UNIT: u32 = 0x606;
-const MSR_PKG_POWER_LIMIT: u32 = 0x610;
-const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
+pub(crate) const MSR_RAPL_POWER_UNIT: u32 = 0x606;
+pub(crate) const MSR_PKG_POWER_LIMIT: u32 = 0x610;
+pub(crate) const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
 const OLS_TYPE: u32 = 40000;
 const METHOD_BUFFERED: u32 = 0;
 const FILE_ANY_ACCESS: u32 = 0;
@@ -93,6 +93,7 @@ pub struct PackagePowerLimitApplyResult {
 impl WinRingContext {
     pub fn load(paths: &ServicePaths) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !winring_enabled() {
+            cleanup_stale_staged_drivers(paths);
             return Err(
                 "WinRing0 CPU MSR/RAPL path is disabled by default because Defender commonly flags the legacy driver. Set AEROFORGE_ENABLE_WINRING0=1 and provide AEROFORGE_WINRING0_DRIVER or a pre-staged ProgramData driver only for explicit diagnostics."
                     .into(),
@@ -270,12 +271,12 @@ pub fn winring_enabled() -> bool {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RaplUnits {
-    power_unit_w: f64,
-    energy_unit_j: f64,
+pub(crate) struct RaplUnits {
+    pub power_unit_w: f64,
+    pub energy_unit_j: f64,
 }
 
-fn decode_rapl_units(raw: u64) -> RaplUnits {
+pub(crate) fn decode_rapl_units(raw: u64) -> RaplUnits {
     let power_exponent = (raw & 0x0f) as i32;
     let energy_exponent = ((raw >> 8) & 0x1f) as i32;
 
@@ -285,7 +286,7 @@ fn decode_rapl_units(raw: u64) -> RaplUnits {
     }
 }
 
-fn decode_package_power_limit(raw: u64, power_unit_w: f64) -> PackagePowerLimitReadback {
+pub(crate) fn decode_package_power_limit(raw: u64, power_unit_w: f64) -> PackagePowerLimitReadback {
     PackagePowerLimitReadback {
         pl1_w: decode_power_limit_w(raw, 0, power_unit_w),
         pl1_enabled: bit_set(raw, 15),
@@ -305,7 +306,7 @@ fn decode_power_limit_w(raw: u64, shift: u8, power_unit_w: f64) -> Option<f32> {
     watts.is_finite().then_some(watts as f32)
 }
 
-fn compose_package_power_limit_write(
+pub(crate) fn compose_package_power_limit_write(
     current_raw: u64,
     write: PackagePowerLimitWrite,
     power_unit_w: f64,
@@ -340,7 +341,7 @@ fn compose_package_power_limit_write(
     Ok(target)
 }
 
-fn verify_package_power_limit_write(
+pub(crate) fn verify_package_power_limit_write(
     target_raw: u64,
     after_raw: u64,
     write: PackagePowerLimitWrite,
@@ -516,15 +517,33 @@ fn resolve_driver_binary(
         .into());
     }
 
-    let staged_driver_path = paths.state_dir.join("drivers").join("WinRing0x64.sys");
-    if is_usable_driver_path(&staged_driver_path) {
-        return Ok(staged_driver_path);
+    for staged_driver_path in staged_driver_candidates(paths) {
+        if is_usable_driver_path(&staged_driver_path) {
+            return Ok(staged_driver_path);
+        }
     }
 
     Err(format!(
         "WinRing0 is enabled, but no external driver was provided. Set {WINRING_DRIVER_PATH_ENV} to a trusted WinRing0x64.sys path for diagnostics."
     )
     .into())
+}
+
+fn staged_driver_candidates(paths: &ServicePaths) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(root) = paths.state_dir.parent() {
+        candidates.push(root.join("drivers").join("WinRing0x64.sys"));
+    }
+    candidates.push(paths.state_dir.join("drivers").join("WinRing0x64.sys"));
+    candidates
+}
+
+fn cleanup_stale_staged_drivers(paths: &ServicePaths) {
+    for path in staged_driver_candidates(paths) {
+        if path.is_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn is_usable_driver_path(path: &Path) -> bool {

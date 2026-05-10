@@ -16,6 +16,7 @@ use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
 };
+use std::sync::{Mutex, OnceLock};
 
 pub use models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
@@ -26,6 +27,7 @@ pub use models::{
 
 const WORKER_NAME: &str = "control-worker";
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+static FAN_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new(WORKER_NAME, run)
@@ -71,6 +73,11 @@ pub fn apply_fan_profile(
     paths: &ServicePaths,
     request: ApplyFanProfileRequest,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let _fan_apply_guard = FAN_APPLY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Fan apply lock was poisoned.")?;
+
     if matches!(request.profile_id, FanProfileId::Custom) {
         let curves = state::load_snapshot(paths)?
             .active_fan_curves
@@ -78,7 +85,7 @@ pub fn apply_fan_profile(
                 "Custom fan mode requires a saved curve before it can be applied.".to_string()
             })?;
 
-        return apply_custom_fan_curves(paths, ApplyCustomFanCurvesRequest { curves });
+        return apply_custom_fan_curves_unlocked(paths, ApplyCustomFanCurvesRequest { curves });
     }
 
     match fan::apply_fan_profile(paths, request) {
@@ -142,6 +149,18 @@ pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let _fan_apply_guard = FAN_APPLY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Fan apply lock was poisoned.")?;
+
+    apply_custom_fan_curves_unlocked(paths, request)
+}
+
+fn apply_custom_fan_curves_unlocked(
+    paths: &ServicePaths,
+    request: ApplyCustomFanCurvesRequest,
+) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     match fan::apply_custom_fan_curves(paths, request) {
         Ok(applied) => {
             state::persist_fan_apply_success(paths, &applied)?;
@@ -186,6 +205,11 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     };
 
+    let _fan_apply_guard = FAN_APPLY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Fan apply lock was poisoned.")?;
+
     match fan::apply_custom_fan_curves(paths, ApplyCustomFanCurvesRequest { curves }) {
         Ok(applied) => state::persist_fan_apply_success(paths, &applied)?,
         Err(error) => {
@@ -210,13 +234,21 @@ fn restore_startup_state(
         .processor_state
         .clone()
         .unwrap_or_else(|| default_processor_state_for_profile(&power_profile));
+    let processor_state_control_enabled = snapshot.processor_state_control_enabled;
 
     write_log_line(
         &paths.component_log("control-power"),
         "INFO",
         &format!(
-            "Restoring startup power profile {:?} with processor state min {} / max {}.",
-            power_profile, processor_state.min_percent, processor_state.max_percent
+            "Restoring startup power profile {:?} with processor state min {} / max {} (processor state writes {}).",
+            power_profile,
+            processor_state.min_percent,
+            processor_state.max_percent,
+            if processor_state_control_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
         ),
     )?;
 
@@ -226,6 +258,7 @@ fn restore_startup_state(
             profile_id: power_profile,
             processor_state,
             custom_base_profile: snapshot.custom_base_profile.clone(),
+            processor_state_control_enabled,
         },
     ) {
         Ok(applied) => {

@@ -9,9 +9,10 @@ use crate::{
 use super::{
     acer_hid::{self, SystemUsageMode},
     acer_wmi::{
-        apply_gaming_misc_setting, apply_gaming_profile, read_gaming_misc_setting,
-        GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE, GAMING_PROFILE_QUIET,
-        GAMING_PROFILE_TURBO, MISC_SETTING_PLATFORM_PROFILE, MISC_SETTING_SUPPORTED_PROFILES,
+        apply_gaming_misc_setting, apply_gaming_profile, decode_gm_output_byte,
+        read_gaming_misc_setting, GAMING_PROFILE_BALANCED, GAMING_PROFILE_PERFORMANCE,
+        GAMING_PROFILE_QUIET, GAMING_PROFILE_TURBO, MISC_SETTING_PLATFORM_PROFILE,
+        MISC_SETTING_SUPPORTED_PROFILES,
     },
     models::{
         AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, CustomPowerBaseId, PowerProfileId,
@@ -38,6 +39,7 @@ pub fn apply_power_profile(
 ) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let profile_id = request.profile_id.clone();
     let custom_base_profile = request.custom_base_profile.clone();
+    let processor_state_control_enabled = request.processor_state_control_enabled;
     let processor_state = sanitize_processor_state(request.processor_state)?;
     let power_before = nvidia_power::read_power_readback();
     let operating_mode = apply_operating_mode(&profile_id, custom_base_profile.as_ref())?;
@@ -47,37 +49,48 @@ pub fn apply_power_profile(
         &paths.component_log("control-power"),
         "INFO",
         &format!(
-            "Applying power profile {} with processor state min {} / max {}.",
-            profile_label, processor_state.min_percent, processor_state.max_percent
+            "Applying power profile {} with processor state min {} / max {} (processor state writes {}).",
+            profile_label,
+            processor_state.min_percent,
+            processor_state.max_percent,
+            if processor_state_control_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
         ),
     )?;
 
-    apply_scheme_value(
-        "setacvalueindex",
-        PROCTHROTTLEMIN,
-        processor_state.min_percent,
-    )?;
-    apply_scheme_value(
-        "setacvalueindex",
-        PROCTHROTTLEMAX,
-        processor_state.max_percent,
-    )?;
-    apply_scheme_value(
-        "setdcvalueindex",
-        PROCTHROTTLEMIN,
-        processor_state.min_percent,
-    )?;
-    apply_scheme_value(
-        "setdcvalueindex",
-        PROCTHROTTLEMAX,
-        processor_state.max_percent,
-    )?;
-    run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+    if processor_state_control_enabled {
+        apply_scheme_value(
+            "setacvalueindex",
+            PROCTHROTTLEMIN,
+            processor_state.min_percent,
+        )?;
+        apply_scheme_value(
+            "setacvalueindex",
+            PROCTHROTTLEMAX,
+            processor_state.max_percent,
+        )?;
+        apply_scheme_value(
+            "setdcvalueindex",
+            PROCTHROTTLEMIN,
+            processor_state.min_percent,
+        )?;
+        apply_scheme_value(
+            "setdcvalueindex",
+            PROCTHROTTLEMAX,
+            processor_state.max_percent,
+        )?;
+        run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+    }
+
     let readback = read_processor_state_readback()?;
-    let drift_detected = readback.ac.min_percent != processor_state.min_percent
-        || readback.ac.max_percent != processor_state.max_percent
-        || readback.dc.min_percent != processor_state.min_percent
-        || readback.dc.max_percent != processor_state.max_percent;
+    let drift_detected = processor_state_control_enabled
+        && (readback.ac.min_percent != processor_state.min_percent
+            || readback.ac.max_percent != processor_state.max_percent
+            || readback.dc.min_percent != processor_state.min_percent
+            || readback.dc.max_percent != processor_state.max_percent);
     let cpu_power_limit_detail =
         rapl_power::apply_profile_package_limit(paths, &profile_id, custom_base_profile.as_ref());
 
@@ -85,22 +98,34 @@ pub fn apply_power_profile(
     let power_after = nvidia_power::read_power_readback();
     let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
 
+    let processor_detail = if processor_state_control_enabled {
+        format!(
+            "Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{}",
+            processor_state.min_percent,
+            processor_state.max_percent,
+            readback.ac.min_percent,
+            readback.ac.max_percent,
+            readback.dc.min_percent,
+            readback.dc.max_percent,
+            if drift_detected {
+                " Windows reported a different processor policy than the requested values."
+            } else {
+                ""
+            }
+        )
+    } else {
+        format!(
+            "Windows processor min/max policy changes were skipped by AeroForge settings. Current readback AC {} / {} and DC {} / {}.",
+            readback.ac.min_percent,
+            readback.ac.max_percent,
+            readback.dc.min_percent,
+            readback.dc.max_percent
+        )
+    };
+
     let detail = format!(
-        "{} Windows processor policy requested min {} / max {} on the active scheme. Read back AC {} / {} and DC {} / {}.{} {} {}",
-        operating_mode.detail,
-        processor_state.min_percent,
-        processor_state.max_percent,
-        readback.ac.min_percent,
-        readback.ac.max_percent,
-        readback.dc.min_percent,
-        readback.dc.max_percent,
-        if drift_detected {
-            " Windows reported a different processor policy than the requested values."
-        } else {
-            ""
-        },
-        cpu_power_limit_detail,
-        power_detail
+        "{} {} {} {}",
+        operating_mode.detail, processor_detail, cpu_power_limit_detail, power_detail
     );
 
     write_log_line(&paths.component_log("control-power"), "INFO", &detail)?;
@@ -109,6 +134,7 @@ pub fn apply_power_profile(
         profile_id,
         processor_state,
         custom_base_profile,
+        processor_state_control_enabled,
         readback,
         drift_detected,
         applied_at_unix: unix_timestamp(),
@@ -297,7 +323,7 @@ fn apply_acer_platform_profile_or_fallback(
     let misc_result = apply_gaming_misc_setting(MISC_SETTING_PLATFORM_PROFILE, value);
     let after_misc = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
     match misc_result {
-        Ok(result) if misc_setting_output_accepted(result.output) => {
+        Ok(result) if misc_setting_output_accepted(result.output, value) => {
             let misc_confirmed = profile_readback_matches(&after_misc, value);
             let mode_label = if balanced_base_for_custom {
                 custom_base_label.unwrap_or("performance")
@@ -419,8 +445,11 @@ fn apply_legacy_gaming_profile(
     }
 }
 
-fn misc_setting_output_accepted(output: Option<u64>) -> bool {
-    matches!(output, None | Some(0) | Some(1))
+fn misc_setting_output_accepted(output: Option<u64>, expected: u8) -> bool {
+    match output {
+        None | Some(0) | Some(1) => true,
+        Some(value) => decode_gm_output_byte(value) == expected,
+    }
 }
 
 fn legacy_gaming_profile_output_accepted(output: Option<u64>) -> bool {
@@ -477,7 +506,7 @@ fn read_misc_value_byte(
 ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
     Ok(read_gaming_misc_setting(setting)?
         .output
-        .map(|value| (value & 0xFF) as u8))
+        .map(decode_gm_output_byte))
 }
 
 fn profile_readback_matches(

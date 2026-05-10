@@ -21,6 +21,7 @@ const VT_UI2: u16 = 18;
 const VT_UI4: u16 = 19;
 const VT_I8: u16 = 20;
 const VT_UI8: u16 = 21;
+const CIM_UINT32: i32 = 19;
 const CIM_UINT64: i32 = 21;
 const WBEM_E_NOT_FOUND: i32 = 0x8004_1002u32 as i32;
 
@@ -62,6 +63,15 @@ pub const MISC_SETTING_PLATFORM_PROFILE: u8 = 0x0B;
 
 pub fn clamp_manual_fan_percent(percent: u8) -> u8 {
     percent.clamp(MIN_MANUAL_FAN_PERCENT, 100)
+}
+
+pub fn decode_gm_output_byte(value: u64) -> u8 {
+    let shifted = ((value >> 8) & 0xFF) as u8;
+    if shifted != 0 || value > 0xFF {
+        shifted
+    } else {
+        (value & 0xFF) as u8
+    }
 }
 
 pub fn apply_gaming_profile(
@@ -466,6 +476,48 @@ impl WbemClassObject {
         value: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let name = BStr::new(name)?;
+        if let Ok(value32) = u32::try_from(value) {
+            let mut variant = Variant::u32(value32);
+            let hr = unsafe {
+                ((*(*self.0).vtable).put)(
+                    self.0,
+                    name.as_ptr(),
+                    0,
+                    variant.as_mut_ptr(),
+                    CIM_UINT32,
+                )
+            };
+            unsafe {
+                VariantClear(variant.as_mut_ptr());
+            }
+            if hresult_ok(hr) {
+                return Ok(());
+            }
+
+            let mut fallback = Variant::wmi_u64(value)?;
+            let fallback_hr = unsafe {
+                ((*(*self.0).vtable).put)(
+                    self.0,
+                    name.as_ptr(),
+                    0,
+                    fallback.as_mut_ptr(),
+                    CIM_UINT64,
+                )
+            };
+            unsafe {
+                VariantClear(fallback.as_mut_ptr());
+            }
+            if hresult_ok(fallback_hr) {
+                return Ok(());
+            }
+
+            return Err(format!(
+                "IWbemClassObject::Put(gmInput) failed with UInt32 0x{:08X} and UInt64 fallback 0x{:08X}",
+                hr as u32, fallback_hr as u32
+            )
+            .into());
+        }
+
         let mut variant = Variant::wmi_u64(value)?;
         let hr = unsafe {
             ((*(*self.0).vtable).put)(self.0, name.as_ptr(), 0, variant.as_mut_ptr(), CIM_UINT64)
@@ -583,6 +635,16 @@ impl Variant {
             reserved3: 0,
             data: VariantData { bstr_val: ptr },
         })
+    }
+
+    fn u32(value: u32) -> Self {
+        Self {
+            vt: VT_UI4,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+            data: VariantData { ul_val: value },
+        }
     }
 
     fn as_mut_ptr(&mut self) -> *mut Self {
@@ -802,4 +864,24 @@ extern "system" {
     fn SysFreeString(value: *mut u16);
     fn SysStringLen(value: *mut u16) -> u32;
     fn VariantClear(variant: *mut Variant) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_gm_output_byte;
+
+    #[test]
+    fn decodes_amd_shifted_gm_output_bytes() {
+        assert_eq!(decode_gm_output_byte(0x73_00), 0x73);
+        assert_eq!(decode_gm_output_byte(0x01_00), 0x01);
+        assert_eq!(decode_gm_output_byte(0x04_00), 0x04);
+        assert_eq!(decode_gm_output_byte(0x05_00), 0x05);
+    }
+
+    #[test]
+    fn keeps_legacy_low_byte_gm_outputs() {
+        assert_eq!(decode_gm_output_byte(0x00), 0x00);
+        assert_eq!(decode_gm_output_byte(0x01), 0x01);
+        assert_eq!(decode_gm_output_byte(0x64), 0x64);
+    }
 }

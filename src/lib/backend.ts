@@ -101,6 +101,7 @@ export type OcPreset = {
 export type PersonalSettings = {
   smartChargingEnabled: boolean
   usbPowerEnabled: boolean
+  processorStateControlEnabled: boolean
   blueLightFilterEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
@@ -364,11 +365,13 @@ export async function applyPowerProfile(
   profileId: PowerProfileId,
   processorState: ProcessorStateSettings,
   customBaseProfile?: CustomPowerBaseId | null,
+  processorStateControlEnabled = true,
 ) {
   return invoke<ControlSnapshot>('apply_power_profile', {
     profileId,
     processorState,
     customBaseProfile: customBaseProfile ?? null,
+    processorStateControlEnabled,
   })
 }
 

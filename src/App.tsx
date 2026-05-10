@@ -100,7 +100,6 @@ type FanProfile = {
   name: string
   strap: string
   summary: string
-  acousticLabel: string
   badge: string
 }
 
@@ -112,6 +111,7 @@ type PersistControlOverrides = {
   customCurves?: CurveSet
   fanSyncLockEnabled?: boolean
   smartChargingEnabled?: boolean
+  processorStateControlEnabled?: boolean
   autoRefreshRateOnBatteryEnabled?: boolean
   autoRefreshRateRestoreHz?: number | null
   blueLightFilterEnabled?: boolean
@@ -223,7 +223,6 @@ const fanProfiles: FanProfile[] = [
     name: 'Auto',
     strap: 'Adaptive cooling',
     summary: 'Balances airflow and acoustics automatically for mixed work and gaming.',
-    acousticLabel: '38 dBA target',
     badge: 'A',
   },
   {
@@ -231,7 +230,6 @@ const fanProfiles: FanProfile[] = [
     name: 'Max',
     strap: 'Cooling first',
     summary: 'Pins both fans high for the lowest thermals and the most aggressive airflow.',
-    acousticLabel: '49 dBA target',
     badge: 'M',
   },
   {
@@ -239,7 +237,6 @@ const fanProfiles: FanProfile[] = [
     name: 'Custom',
     strap: 'Hand tuned',
     summary: 'Direct control over separate GPU and CPU fan curves for both thermal zones.',
-    acousticLabel: 'User defined',
     badge: 'C',
   },
 ]
@@ -800,6 +797,38 @@ function formatWattValue(value: number | null | undefined, maximumFractionDigits
   return `${value.toLocaleString(undefined, { maximumFractionDigits })}W`
 }
 
+function formatWattReadout(value: number | null | undefined, maximumFractionDigits = 1) {
+  return formatWattValue(value, maximumFractionDigits) ?? '--'
+}
+
+function buildCpuPowerLimitLabel(pl1Label: string | null, pl2Label: string | null) {
+  if (pl1Label && pl2Label) {
+    return `PL1/PL2 ${pl1Label} / ${pl2Label}`
+  }
+
+  if (pl1Label) {
+    return `PL1 ${pl1Label}`
+  }
+
+  if (pl2Label) {
+    return `PL2 ${pl2Label}`
+  }
+
+  return null
+}
+
+function buildGpuPowerLimitLabel(
+  limitLabel: string | null,
+  maxLimit: number | null | undefined,
+) {
+  if (limitLabel) {
+    return `Limit ${limitLabel}`
+  }
+
+  const maxLimitLabel = formatWattValue(maxLimit, 1)
+  return maxLimitLabel ? `Max ${maxLimitLabel}` : null
+}
+
 function sanitizeIdentityText(value: string | null | undefined) {
   if (!value) {
     return null
@@ -1005,7 +1034,7 @@ function buildPowerDashboardSummary(
   const temperatureLabel = temperatureC != null ? `Temp ${temperatureC}C` : null
   const usageLabel = usagePercent != null ? `Usage ${usagePercent}%` : null
 
-  return [temperatureLabel, usageLabel].filter(Boolean).join(' • ')
+  return [temperatureLabel, usageLabel].filter(Boolean).join(' | ')
 }
 
 function buildCpuPowerDashboardSummary(
@@ -1016,17 +1045,53 @@ function buildCpuPowerDashboardSummary(
   pl2W: number | null | undefined,
 ) {
   const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const packageLabel = packagePowerW != null ? `Package ${formatWattValue(packagePowerW, 1)}` : null
-  const limitLabel =
-    pl1W != null && pl2W != null
-      ? `PL1 ${formatWattValue(pl1W, 1)} / PL2 ${formatWattValue(pl2W, 1)}`
-      : pl1W != null
-        ? `PL1 ${formatWattValue(pl1W, 1)}`
-        : pl2W != null
-          ? `PL2 ${formatWattValue(pl2W, 1)}`
-          : null
+  const powerLabel = packagePowerW != null ? `Power ${formatWattValue(packagePowerW, 1)}` : null
+  const limitLabel = buildCpuPowerLimitLabel(
+    formatWattValue(pl1W, 1),
+    formatWattValue(pl2W, 1),
+  )
 
-  return [baseSummary, packageLabel, limitLabel].filter(Boolean).join(' \u2022 ')
+  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
+}
+
+function buildPowerTargetFallback(
+  profileId: PowerProfile['id'],
+  customBase: CustomPowerBaseId,
+  customProcessorState: { min: number; max: number },
+  liveCpuPl2Label: string | null,
+) {
+  switch (profileId) {
+    case 'battery-guard':
+      return {
+        label: '28W PL1 target',
+        detail: 'Quiet maps CPU PL1 to 28W.',
+      }
+    case 'balanced':
+      return {
+        label: '45W PL1 target',
+        detail: 'Balanced maps CPU PL1 to 45W.',
+      }
+    case 'performance':
+      return {
+        label: '75W PL1 target',
+        detail: 'Performance maps CPU PL1 to 75W.',
+      }
+    case 'turbo':
+      return {
+        label: liveCpuPl2Label != null ? `${liveCpuPl2Label} PL1 target` : 'PL1 follows PL2',
+        detail:
+          liveCpuPl2Label != null
+            ? `Turbo raises CPU PL1 to current PL2 (${liveCpuPl2Label}).`
+            : 'Turbo raises CPU PL1 to current PL2 when RAPL readback is available.',
+      }
+    case 'custom':
+      return {
+        label: `${customPowerBaseCeilingLabels[customBase]} - ${Math.round(
+          18 + customProcessorState.max * 0.57,
+        )}W target`,
+        detail: `Custom rides the ${customPowerBaseCeilingLabels[customBase].toLowerCase()}.`,
+      }
+  }
 }
 
 function buildGpuPowerDashboardSummary(
@@ -1036,16 +1101,10 @@ function buildGpuPowerDashboardSummary(
   powerLimitW: number | null | undefined,
 ) {
   const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const powerLabel =
-    powerDrawW != null && powerLimitW != null
-      ? `Power ${formatWattValue(powerDrawW, 1)} / ${formatWattValue(powerLimitW)}`
-      : powerLimitW != null
-        ? `Limit ${formatWattValue(powerLimitW)}`
-        : powerDrawW != null
-          ? `Power ${formatWattValue(powerDrawW, 1)}`
-          : null
+  const powerLabel = powerDrawW != null ? `Power ${formatWattValue(powerDrawW, 1)}` : null
+  const limitLabel = powerLimitW != null ? `Limit ${formatWattValue(powerLimitW, 1)}` : null
 
-  return [baseSummary, powerLabel].filter(Boolean).join(' • ')
+  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
 }
 
 function getProcessorStateForPowerProfile(
@@ -1183,6 +1242,7 @@ function buildControlSnapshotForPersistence(input: {
   customCurves: CurveSet
   fanSyncLockEnabled: boolean
   smartChargingEnabled: boolean
+  processorStateControlEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
   usbPowerEnabled: boolean
@@ -1210,6 +1270,7 @@ function buildControlSnapshotForPersistence(input: {
     personalSettings: {
       smartChargingEnabled: input.smartChargingEnabled,
       usbPowerEnabled: input.usbPowerEnabled,
+      processorStateControlEnabled: input.processorStateControlEnabled,
       blueLightFilterEnabled: input.blueLightFilterEnabled,
       autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
       autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
@@ -1235,6 +1296,7 @@ function applyBackendControlSnapshot(
   setCustomCurves: (curves: CurveSet) => void,
   setFanSyncLockEnabled: (enabled: boolean) => void,
   setSmartChargingEnabled: (enabled: boolean) => void,
+  setProcessorStateControlEnabled: (enabled: boolean) => void,
   setUsbPowerEnabled: (enabled: boolean) => void,
   setBlueLightFilterEnabled: (enabled: boolean) => void,
   setSelectedBootArt: (art: string) => void,
@@ -1259,6 +1321,7 @@ function applyBackendControlSnapshot(
   setOcApplyState(controls.ocApplyState)
   setOcTuningLocked(controls.ocTuningLocked)
   setSmartChargingEnabled(controls.personalSettings.smartChargingEnabled)
+  setProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
   setUsbPowerEnabled(controls.personalSettings.usbPowerEnabled)
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
   setAutoRefreshRateSettings?.(
@@ -1319,6 +1382,8 @@ function App() {
   const [draggingPoint, setDraggingPoint] = useState<DragState | null>(null)
   const [smartChargingEnabled, setSmartChargingEnabled] = useState(true)
   const smartChargingEnabledRef = useRef(true)
+  const [processorStateControlEnabled, setProcessorStateControlEnabled] = useState(true)
+  const processorStateControlEnabledRef = useRef(true)
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
   const [blueLightFilterEnabled, setBlueLightFilterEnabled] = useState(false)
   const blueLightFilterEnabledRef = useRef(false)
@@ -1336,7 +1401,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.7')
+  const [backendVersion, setBackendVersion] = useState('0.12.8')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
@@ -1517,17 +1582,16 @@ function App() {
   const liveCpuPackagePowerLabel = formatWattValue(displayedCpuPackagePower, 1)
   const liveCpuPl1Label = formatWattValue(displayedCpuPl1, 1)
   const liveCpuPl2Label = formatWattValue(displayedCpuPl2, 1)
-  const liveCpuPowerLimitLabel =
-    liveCpuPl1Label != null && liveCpuPl2Label != null
-      ? `CPU PL1 ${liveCpuPl1Label} / PL2 ${liveCpuPl2Label}`
-      : liveCpuPl1Label != null
-        ? `CPU PL1 ${liveCpuPl1Label}`
-        : liveCpuPl2Label != null
-          ? `CPU PL2 ${liveCpuPl2Label}`
-          : null
+  const liveCpuPowerLimitLabel = buildCpuPowerLimitLabel(liveCpuPl1Label, liveCpuPl2Label)
+  const liveGpuPowerLimitShort = buildGpuPowerLimitLabel(
+    liveGpuPowerLimitLabel,
+    displayedGpuPowerMaxLimit,
+  )
+  const cpuPowerReadoutValue = liveCpuPackagePowerLabel ?? '--'
+  const gpuPowerReadoutValue = liveGpuPowerDrawLabel ?? '--'
   const liveCpuPowerStateDetail =
     liveCpuPowerLimitLabel != null
-      ? `${liveCpuPackagePowerLabel ? `Package ${liveCpuPackagePowerLabel}. ` : ''}${
+      ? `${liveCpuPackagePowerLabel ? `Power ${liveCpuPackagePowerLabel}. ` : ''}${
           displayedCpuPowerLimitLocked ? 'Package limits locked.' : 'Package limits unlocked.'
         }${
           displayedCpuPl1Enabled === false || displayedCpuPl2Enabled === false
@@ -1535,7 +1599,7 @@ function App() {
             : ''
         }`
       : liveCpuPackagePowerLabel != null
-        ? `CPU package ${liveCpuPackagePowerLabel}`
+        ? `CPU power ${liveCpuPackagePowerLabel}`
         : null
   const liveGpuPowerCeilingDetail =
     liveGpuPowerDrawLabel != null && liveGpuPowerLimitLabel != null
@@ -1555,14 +1619,21 @@ function App() {
   ]
     .filter(Boolean)
     .join(' | ')
-  const currentPowerWattage =
-    liveCpuPowerLimitLabel != null
-      ? liveCpuPowerLimitLabel
-      : liveGpuPowerLimitLabel != null
-      ? `GPU ${liveGpuPowerLimitLabel} limit`
-      : activePowerProfile === 'custom'
-      ? `${customPowerBaseCeilingLabels[customPowerBase]} • ${Math.round(18 + customProcessorState.max * 0.57)}W target`
-      : currentPowerProfile.wattage
+  const fallbackPowerTarget = buildPowerTargetFallback(
+    activePowerProfile,
+    customPowerBase,
+    customProcessorState,
+    liveCpuPl2Label,
+  )
+  const currentPowerWattage = `CPU ${cpuPowerReadoutValue} / GPU ${gpuPowerReadoutValue}`
+  const currentPowerLimitDetail = [
+    liveCpuPowerLimitLabel ? `CPU ${liveCpuPowerLimitLabel}` : null,
+    liveGpuPowerLimitShort ? `GPU ${liveGpuPowerLimitShort}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ')
+  const cpuPowerMeterDetail = liveCpuPowerLimitLabel ?? 'No PL readback'
+  const gpuPowerMeterDetail = liveGpuPowerLimitShort ?? 'No readback'
   const currentPowerRuntime = formatRemainingRuntime(displayedBatteryLifeRemainingSec)
   const runtimeEstimatePending =
     serviceConnected &&
@@ -1582,15 +1653,29 @@ function App() {
       : currentPowerRuntime
         ? 'Live estimate from Windows'
         : 'Windows did not provide a runtime estimate'
+  const currentPowerManagerDetail =
+    currentPowerLimitDetail ||
+    livePowerCeilingDetail ||
+    fallbackPowerTarget.detail ||
+    currentPowerRuntime ||
+    currentPowerRuntimeDetail
   const currentPowerSummary =
     activePowerProfile === 'custom'
-      ? `Processor state tuned to ${customProcessorState.min}% minimum and ${customProcessorState.max}% maximum on the ${currentCustomPowerBase.name} firmware base.`
+      ? processorStateControlEnabled
+        ? `Processor state tuned to ${customProcessorState.min}% minimum and ${customProcessorState.max}% maximum on the ${currentCustomPowerBase.name} firmware base.`
+        : `Custom rides the ${currentCustomPowerBase.name} firmware base. CPU min/max writes are disabled.`
       : activePowerProfile === 'battery-guard'
-        ? 'Direct Whisper quiet-mode request with a conservative processor policy for lower noise and heat.'
+        ? processorStateControlEnabled
+          ? 'Direct Whisper quiet-mode request with a conservative processor policy for lower noise and heat.'
+          : 'Direct Whisper quiet-mode request without changing Windows CPU min/max state.'
         : activePowerProfile === 'performance'
-          ? 'Direct Acer performance-mode apply with processor state pinned to 100% minimum and maximum.'
+          ? processorStateControlEnabled
+            ? 'Direct Acer performance-mode apply with processor state pinned to 100% minimum and maximum.'
+            : 'Direct Acer performance-mode apply without changing Windows CPU min/max state.'
         : activePowerProfile === 'turbo'
-          ? 'Direct Acer turbo mode apply with processor state pinned to 100% minimum and maximum.'
+          ? processorStateControlEnabled
+            ? 'Direct Acer turbo mode apply with processor state pinned to 100% minimum and maximum.'
+            : 'Direct Acer turbo mode apply without changing Windows CPU min/max state.'
           : currentPowerProfile.summary
   const updateLastCheckedLabel = updateStatus?.lastCheckedAtUnix
     ? formatUnixClock(updateStatus.lastCheckedAtUnix)
@@ -1658,6 +1743,11 @@ function App() {
     setSmartChargingEnabled(enabled)
   }
 
+  function commitProcessorStateControlEnabled(enabled: boolean) {
+    processorStateControlEnabledRef.current = enabled
+    setProcessorStateControlEnabled(enabled)
+  }
+
   function commitBlueLightFilterEnabled(enabled: boolean) {
     blueLightFilterEnabledRef.current = enabled
     setBlueLightFilterEnabled(enabled)
@@ -1715,6 +1805,8 @@ function App() {
     const nextFanSyncLockEnabled = overrides?.fanSyncLockEnabled ?? fanSyncLockEnabled
     const nextSmartChargingEnabled =
       overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
+    const nextProcessorStateControlEnabled =
+      overrides?.processorStateControlEnabled ?? processorStateControlEnabledRef.current
     const nextAutoRefreshRateOnBatteryEnabled =
       overrides?.autoRefreshRateOnBatteryEnabled ??
       autoRefreshRateOnBatteryEnabledRef.current
@@ -1743,6 +1835,7 @@ function App() {
           customCurves: nextCustomCurves,
           fanSyncLockEnabled: nextFanSyncLockEnabled,
           smartChargingEnabled: nextSmartChargingEnabled,
+          processorStateControlEnabled: nextProcessorStateControlEnabled,
           autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
           autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
           usbPowerEnabled,
@@ -1772,6 +1865,7 @@ function App() {
     customProcessorState.max,
     customPowerBase,
     smartChargingEnabled,
+    processorStateControlEnabled,
     autoRefreshRateOnBatteryEnabled,
     autoRefreshRateRestoreHz,
     usbPowerEnabled,
@@ -2485,6 +2579,7 @@ function App() {
             commitCustomCurves,
             setFanSyncLockEnabled,
             commitSmartChargingEnabled,
+            commitProcessorStateControlEnabled,
             setUsbPowerEnabled,
             commitBlueLightFilterEnabled,
             setSelectedBootArt,
@@ -2760,11 +2855,14 @@ function App() {
     }
 
     const hasService = serviceConnectedRef.current
+    const processorPolicyEnabled = processorStateControlEnabledRef.current
 
     setActivePowerProfile(profileId)
     setStatusMessage(
       hasService
-        ? `${profileName} profile apply requested.`
+        ? processorPolicyEnabled
+          ? `${profileName} profile apply requested.`
+          : `${profileName} profile apply requested. CPU min/max writes are off.`
         : `${profileName} profile staged in the frontend preview.`,
     )
     pulseControl(profileId)
@@ -2795,6 +2893,7 @@ function App() {
     queuePerformanceEvent('power-profile-apply-started', profileId, {
       minPercent: nextProcessorState.min,
       maxPercent: nextProcessorState.max,
+      processorStateControlEnabled: processorPolicyEnabled,
     })
 
     try {
@@ -2806,6 +2905,7 @@ function App() {
           maxPercent: nextProcessorState.max,
         },
         profileId === 'custom' ? customPowerBaseRef.current : null,
+        processorPolicyEnabled,
       )
       const refreshed = await refreshCachedLiveControlsAfterApply()
       const liveControls = refreshed.liveControls
@@ -2814,26 +2914,27 @@ function App() {
 
       if (!resultSuperseded) {
         applyBackendControlSnapshot(
-        mergeControlsWithLiveSnapshot(updatedControls, liveControls),
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+          mergeControlsWithLiveSnapshot(updatedControls, liveControls),
+          setActivePowerProfile,
+          setCustomProcessorState,
+          setCustomPowerBase,
+          setGpuOverclock,
+          setCustomOcSlot,
+          setActiveOcSlot,
+          setOcApplyState,
+          setOcTuningLocked,
+          setActiveFanProfile,
+          commitCustomCurves,
+          setFanSyncLockEnabled,
+          commitSmartChargingEnabled,
+          commitProcessorStateControlEnabled,
+          setUsbPowerEnabled,
+          commitBlueLightFilterEnabled,
+          setSelectedBootArt,
+          setCustomBootFilename,
+          setUpdateChannel,
+          setCheckForUpdatesOnLaunch,
+        )
       }
       queuePerformanceEvent('power-profile-apply-finished', profileId, {
         totalMs: performance.now() - applyStartedMs,
@@ -2843,13 +2944,19 @@ function App() {
       })
 
       if (!resultSuperseded) {
-        setStatusMessage(
+        if (!processorPolicyEnabled) {
+          setStatusMessage(
+            `${profileName} profile applied through the AeroForge service. CPU min/max writes were skipped by Settings.`,
+          )
+        } else {
+          setStatusMessage(
         `${profileName} profile applied through the AeroForge service${
           liveControls?.processorStateReadback
             ? ` and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} • DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
             : '.'
         }`,
-      )
+          )
+        }
       }
     } catch (error) {
       queuePerformanceEvent('power-profile-apply-failed', profileId, {
@@ -2889,7 +2996,11 @@ function App() {
 
     const revision = customPowerApplyRevisionRef.current + 1
     customPowerApplyRevisionRef.current = revision
-    setStatusMessage(`${reason}. Applying to Windows processor policy...`)
+    setStatusMessage(
+      processorStateControlEnabledRef.current
+        ? `${reason}. Applying to Windows processor policy...`
+        : `${reason}. Applying firmware mode with CPU min/max writes off...`,
+    )
 
     customPowerApplyTimerRef.current = window.setTimeout(() => {
       customPowerApplyTimerRef.current = null
@@ -2906,6 +3017,8 @@ function App() {
       return
     }
 
+    const processorPolicyEnabled = processorStateControlEnabledRef.current
+
     try {
       const updatedControls = await applyPowerProfile(
         'custom',
@@ -2914,6 +3027,7 @@ function App() {
           maxPercent: nextProcessorState.max,
         },
         nextBase,
+        processorPolicyEnabled,
       )
       const liveControls = await getLiveControlSnapshot().catch(() => null)
 
@@ -2935,6 +3049,7 @@ function App() {
         commitCustomCurves,
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -2945,7 +3060,9 @@ function App() {
       liveControlSnapshotRef.current = liveControls
 
       setStatusMessage(
-        liveControls?.processorStateReadback
+        !processorPolicyEnabled
+          ? 'Custom power policy applied. CPU min/max writes were skipped by Settings.'
+          : liveControls?.processorStateReadback
           ? `Custom processor state applied and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} \u2022 DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
           : `Custom processor state applied as ${nextProcessorState.min}/${nextProcessorState.max}.`,
       )
@@ -3018,6 +3135,7 @@ function App() {
         commitCustomCurves,
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3073,6 +3191,7 @@ function App() {
       commitCustomCurves,
       setFanSyncLockEnabled,
       commitSmartChargingEnabled,
+      commitProcessorStateControlEnabled,
       setUsbPowerEnabled,
       commitBlueLightFilterEnabled,
       setSelectedBootArt,
@@ -3221,6 +3340,7 @@ function App() {
         commitCustomCurves,
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3273,6 +3393,7 @@ function App() {
         commitCustomCurves,
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3467,6 +3588,24 @@ function App() {
     }
   }
 
+  async function handleProcessorStateControlToggle() {
+    const nextEnabled = !processorStateControlEnabledRef.current
+
+    if (!nextEnabled && customPowerApplyTimerRef.current !== null) {
+      window.clearTimeout(customPowerApplyTimerRef.current)
+      customPowerApplyTimerRef.current = null
+      customPowerApplyRevisionRef.current += 1
+    }
+
+    commitProcessorStateControlEnabled(nextEnabled)
+    await persistStagedControls({ processorStateControlEnabled: nextEnabled })
+    setStatusMessage(
+      nextEnabled
+        ? 'CPU min/max writes enabled. Power modes can update Windows processor policy again.'
+        : 'CPU min/max writes disabled. Firmware power modes still apply.',
+    )
+  }
+
   function updateCustomProcessorState(
     field: 'min' | 'max',
     rawValue: number,
@@ -3581,6 +3720,7 @@ function App() {
         commitCustomCurves,
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3622,6 +3762,7 @@ function App() {
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
+          processorStateControlEnabled: processorStateControlEnabledRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -3666,6 +3807,7 @@ function App() {
           customCurves: customCurvesRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
+          processorStateControlEnabled: processorStateControlEnabledRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -3870,6 +4012,11 @@ function App() {
                 details={[
                   { label: 'Util', value: displayedGpuUsage, suffix: '%' },
                   { label: 'VRAM', value: displayedGpuMemoryUsage, suffix: '%' },
+                  {
+                    label: 'Power',
+                    value: displayedGpuPowerDraw,
+                    displayValue: formatWattReadout(displayedGpuPowerDraw),
+                  },
                 ]}
               />
               <HomeTemperatureDial
@@ -3877,7 +4024,11 @@ function App() {
                 identity={displayedCpuIdentity}
                 value={displayedCpuTemp}
                 details={[
-                  { label: 'Avg', value: displayedCpuTemp, suffix: ' C' },
+                  {
+                    label: 'Power',
+                    value: displayedCpuPackagePower,
+                    displayValue: formatWattReadout(displayedCpuPackagePower),
+                  },
                   { label: 'Min', value: displayedCpuTempLowest, suffix: ' C' },
                   { label: 'Max', value: displayedCpuTempHighest, suffix: ' C' },
                 ]}
@@ -3922,7 +4073,6 @@ function App() {
                   <span className="eyebrow">Cooling Target</span>
                   <div className="fan-mode__meta-card">
                     <strong>{fanTelemetryDescriptor.modeLabel}</strong>
-                    <small>{currentFanProfile.acousticLabel}</small>
                   </div>
                 </div>
               </div>
@@ -4056,9 +4206,19 @@ function App() {
 
                 <div className="power-mode__field power-mode__field--meta">
                   <span className="eyebrow">Power Manager</span>
-                  <div className="power-mode__meta-card">
-                    <strong>{currentPowerWattage}</strong>
-                    <small>{livePowerCeilingDetail || currentPowerRuntime || currentPowerRuntimeDetail}</small>
+                  <div className="power-mode__meta-card" title={currentPowerManagerDetail}>
+                    <div className="power-mode__meter-grid">
+                      <div>
+                        <span>CPU</span>
+                        <strong>{cpuPowerReadoutValue}</strong>
+                        <small>{cpuPowerMeterDetail}</small>
+                      </div>
+                      <div>
+                        <span>GPU</span>
+                        <strong>{gpuPowerReadoutValue}</strong>
+                        <small>{gpuPowerMeterDetail}</small>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -4504,6 +4664,26 @@ function App() {
                           </div>
                         )}
 
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>CPU Min/Max Writes</strong>
+                            <p>
+                              {processorStateControlEnabled
+                                ? 'AeroForge can change Windows processor minimum and maximum state when applying power profiles.'
+                                : 'Firmware power modes still apply; Windows processor minimum and maximum state is left unchanged.'}
+                            </p>
+                          </div>
+
+                          <button
+                            className={`toggle ${processorStateControlEnabled ? 'is-on' : ''}`}
+                            onClick={() => void handleProcessorStateControlToggle()}
+                            aria-pressed={processorStateControlEnabled}
+                            type="button"
+                          >
+                            <span />
+                          </button>
+                        </div>
+
                         {usbPowerVisible && (
                           <div className="personal-setting-block">
                             <div>
@@ -4826,8 +5006,10 @@ function App() {
                     </strong>
                     <small>
                       {activeTelemetry
-                        ? `CPU fan ${activeTelemetry.cpuFanRpm} RPM, GPU fan ${activeTelemetry.gpuFanRpm} RPM, CPU package ${
+                        ? `CPU fan ${activeTelemetry.cpuFanRpm} RPM, GPU fan ${activeTelemetry.gpuFanRpm} RPM, CPU power ${
                             formatWattValue(activeTelemetry.cpuPackagePowerW, 1) ?? '?'
+                          }, GPU power ${
+                            formatWattValue(activeTelemetry.gpuPowerDrawW, 1) ?? '?'
                           }, battery ${activeTelemetry.batteryPercent}%.`
                         : ''}
                     </small>
@@ -4937,6 +5119,7 @@ type HomeTemperatureDialProps = {
     label: string
     value: number | null
     suffix?: string
+    displayValue?: string
   }>
 }
 
@@ -5020,8 +5203,8 @@ function HomeTemperatureDial({
             <div className="home-temp-card__detail-row" key={detail.label}>
               <span>{detail.label}</span>
               <strong>
-                {formatTelemetryValue(detail.value)}
-                {detail.value == null ? '' : detail.suffix ?? ''}
+                {detail.displayValue ?? formatTelemetryValue(detail.value)}
+                {detail.displayValue != null || detail.value == null ? '' : detail.suffix ?? ''}
               </strong>
             </div>
           ))}

@@ -20,6 +20,10 @@ const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
 const FRESH_SUPERVISOR_MAX_AGE_SECONDS: u64 = 15;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CachedSupervisorSnapshot {
@@ -69,6 +73,7 @@ struct ApplyPowerProfileRequest {
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
+    processor_state_control_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +112,8 @@ struct ApplySmartChargeRequest {
 pub struct AppliedPowerProfilePayload {
     pub profile_id: PowerProfileId,
     pub processor_state: ProcessorStateSettings,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,12 +276,14 @@ pub fn apply_power_profile(
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
+    processor_state_control_enabled: bool,
 ) -> Result<AppliedPowerProfilePayload, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::ApplyPowerProfile {
         payload: ApplyPowerProfileRequest {
             profile_id,
             processor_state,
             custom_base_profile,
+            processor_state_control_enabled,
         },
     })?;
     Ok(serde_json::from_value::<AppliedPowerProfilePayload>(

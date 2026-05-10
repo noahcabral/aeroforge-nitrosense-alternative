@@ -195,6 +195,8 @@ pub struct PersonalSettings {
     pub smart_charging_enabled: bool,
     #[serde(default = "default_true")]
     pub usb_power_enabled: bool,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
     #[serde(default)]
     pub blue_light_filter_enabled: bool,
     #[serde(default)]

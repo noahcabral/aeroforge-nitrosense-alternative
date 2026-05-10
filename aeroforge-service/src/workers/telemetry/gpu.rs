@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::c_void,
     ptr::{null, null_mut},
     sync::{Arc, Mutex, OnceLock},
@@ -27,7 +26,6 @@ const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
 const DISCRETE_GPU_ACTIVE_DEDICATED_BYTES: f64 = 16.0 * 1024.0 * 1024.0;
-const NVIDIA_POWER_TELEMETRY_ENV: &str = "AEROFORGE_ENABLE_NVIDIA_TELEMETRY";
 const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
 const ERROR_SUCCESS: u32 = 0;
 
@@ -332,21 +330,6 @@ fn pdh_call(status: u32, call_name: &str) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-fn nvidia_power_telemetry_enabled() -> bool {
-    env_flag_enabled(NVIDIA_POWER_TELEMETRY_ENV)
-}
-
-fn env_flag_enabled(name: &str) -> bool {
-    env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn load_nvml_api() -> Option<NvmlApi> {
     let library = unsafe { Library::new(r"C:\Windows\System32\nvml.dll").ok()? };
 
@@ -476,7 +459,7 @@ fn read_nvml_snapshot(
             power_default_limit_w,
             power_min_limit_w,
             power_max_limit_w,
-        ) = if nvidia_power_telemetry_enabled() {
+        ) = {
             let power_draw_w = read_nvml_power_mw(api.device_get_power_usage, device)
                 .map(milliwatts_to_watts)
                 .and_then(sanitize_power_w);
@@ -496,8 +479,6 @@ fn read_nvml_snapshot(
                 power_min_limit_w,
                 power_max_limit_w,
             )
-        } else {
-            (None, None, None, None, None)
         };
 
         Ok(GpuSnapshot {
@@ -570,12 +551,7 @@ fn nvml_call(code: i32, call_name: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let include_power = nvidia_power_telemetry_enabled();
-    let query_fields = if include_power {
-        "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit"
-    } else {
-        "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total"
-    };
+    let query_fields = "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit";
     let query_arg = format!("--query-gpu={query_fields}");
 
     let output = std::process::Command::new("nvidia-smi")
@@ -627,21 +603,11 @@ fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error 
         memory_usage_percent,
         temp_c,
         clock_mhz,
-        power_draw_w: include_power
-            .then(|| parse_optional_watts(fields.get(5).copied()))
-            .flatten(),
-        power_limit_w: include_power
-            .then(|| parse_optional_watts(fields.get(6).copied()))
-            .flatten(),
-        power_default_limit_w: include_power
-            .then(|| parse_optional_watts(fields.get(7).copied()))
-            .flatten(),
-        power_min_limit_w: include_power
-            .then(|| parse_optional_watts(fields.get(8).copied()))
-            .flatten(),
-        power_max_limit_w: include_power
-            .then(|| parse_optional_watts(fields.get(9).copied()))
-            .flatten(),
+        power_draw_w: parse_optional_watts(fields.get(5).copied()),
+        power_limit_w: parse_optional_watts(fields.get(6).copied()),
+        power_default_limit_w: parse_optional_watts(fields.get(7).copied()),
+        power_min_limit_w: parse_optional_watts(fields.get(8).copied()),
+        power_max_limit_w: parse_optional_watts(fields.get(9).copied()),
     })
 }
 

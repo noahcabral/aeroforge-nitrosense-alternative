@@ -36,6 +36,7 @@ pub fn persist_apply_success(
     snapshot.active_power_profile = Some(applied.profile_id.clone());
     snapshot.processor_state = Some(applied.processor_state.clone());
     snapshot.custom_base_profile = applied.custom_base_profile.clone();
+    snapshot.processor_state_control_enabled = applied.processor_state_control_enabled;
     snapshot.processor_state_readback = Some(applied.readback.clone());
     snapshot.processor_state_drift_detected = applied.drift_detected;
     snapshot.last_applied_at_unix = Some(applied.applied_at_unix);

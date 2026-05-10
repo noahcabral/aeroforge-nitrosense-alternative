@@ -1,4 +1,5 @@
 mod models;
+pub(crate) mod pawnio;
 mod topology;
 pub(crate) mod winring;
 
@@ -11,7 +12,7 @@ use std::{
 };
 
 use models::LowLevelSnapshot;
-use winring::RaplReadback;
+use winring::{PackagePowerLimitApplyResult, PackagePowerLimitWrite, RaplReadback};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -57,8 +58,108 @@ fn run(
     Ok(())
 }
 
+pub(crate) enum MsrProvider {
+    PawnIo(pawnio::PawnIoContext),
+    WinRing(winring::WinRingContext),
+}
+
+impl MsrProvider {
+    fn transport(&self) -> &'static str {
+        match self {
+            Self::PawnIo(_) => "pawnio",
+            Self::WinRing(_) => "winring0",
+        }
+    }
+
+    fn source_path(&self) -> String {
+        match self {
+            Self::PawnIo(context) => context.module_path.display().to_string(),
+            Self::WinRing(context) => context.driver_path.display().to_string(),
+        }
+    }
+
+    fn detail(&self, sampled_processor_count: usize, logical_processor_count: usize) -> String {
+        match self {
+            Self::PawnIo(context) => format!(
+                "PawnIO MSR provider active from {}. RAPL telemetry is sampled through a restricted AeroForge module across {} logical processors.",
+                context.module_path.display(),
+                logical_processor_count
+            ),
+            Self::WinRing(context) => format!(
+                "WinRing0 kernel driver active from {}. Sampled {} physical cores across {} logical processors.",
+                context.driver_path.display(),
+                sampled_processor_count,
+                logical_processor_count
+            ),
+        }
+    }
+
+    fn read_tj_max(&self) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::PawnIo(_) => Ok(None),
+            Self::WinRing(context) => context.read_tj_max(),
+        }
+    }
+
+    fn read_package_temp(
+        &self,
+        tj_max_c: Option<u8>,
+    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::PawnIo(_) => Ok(None),
+            Self::WinRing(context) => context.read_package_temp(tj_max_c),
+        }
+    }
+
+    fn read_core_temp(
+        &self,
+        affinity_mask: usize,
+        tj_max_c: Option<u8>,
+    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::PawnIo(_) => Ok(None),
+            Self::WinRing(context) => context.read_core_temp(affinity_mask, tj_max_c),
+        }
+    }
+
+    pub(crate) fn read_rapl_readback(
+        &self,
+    ) -> Result<Option<RaplReadback>, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::PawnIo(context) => context.read_rapl_readback(),
+            Self::WinRing(context) => context.read_rapl_readback(),
+        }
+    }
+
+    pub(crate) fn apply_package_power_limit(
+        &self,
+        write: PackagePowerLimitWrite,
+    ) -> Result<Option<PackagePowerLimitApplyResult>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        match self {
+            Self::PawnIo(context) => context.apply_package_power_limit(write),
+            Self::WinRing(context) => context.apply_package_power_limit(write),
+        }
+    }
+}
+
+pub(crate) fn load_msr_provider(
+    paths: &ServicePaths,
+) -> Result<MsrProvider, Box<dyn std::error::Error + Send + Sync>> {
+    match pawnio::PawnIoContext::load(paths) {
+        Ok(context) => return Ok(MsrProvider::PawnIo(context)),
+        Err(pawnio_error) => match winring::WinRingContext::load(paths) {
+            Ok(context) => Ok(MsrProvider::WinRing(context)),
+            Err(winring_error) => Err(format!(
+                "No CPU MSR/RAPL provider is available. PawnIO: {pawnio_error} WinRing0: {winring_error}"
+            )
+            .into()),
+        },
+    }
+}
+
 struct LowLevelSampler {
-    context: Option<winring::WinRingContext>,
+    context: Option<MsrProvider>,
     last_load_attempt: Option<Instant>,
     last_load_error: Option<String>,
     last_rapl_energy: Option<RaplEnergySample>,
@@ -102,10 +203,12 @@ impl LowLevelSampler {
             }
         }
 
-        let driver_path = context.driver_path.display().to_string();
+        let source_path = context.source_path();
+        let sampled_processor_count = core_temps.len();
+        let transport = context.transport().to_string();
+        let detail = context.detail(sampled_processor_count, logical_processor_count);
         let package_power_w = self.calculate_package_power_w(rapl_readback);
         let power_limit = rapl_readback.and_then(|readback| readback.package_power_limit);
-        let sampled_processor_count = core_temps.len();
         let average_core_temp_c = models::hottest_core_average(&core_temps, 3);
         let lowest_core_temp_c = core_temps.iter().copied().min();
         let highest_core_temp_c = core_temps.iter().copied().max();
@@ -114,15 +217,11 @@ impl LowLevelSampler {
         Ok(LowLevelSnapshot {
             available: tj_max_c.is_some()
                 || package_temp_c.is_some()
-                || average_core_temp_c.is_some(),
-            transport: "winring0".into(),
-            detail: format!(
-                "WinRing0 kernel driver active from {}. Sampled {} physical cores across {} logical processors.",
-                driver_path,
-                sampled_processor_count,
-                logical_processor_count
-            ),
-            driver_path: Some(driver_path),
+                || average_core_temp_c.is_some()
+                || rapl_readback.is_some(),
+            transport,
+            detail,
+            driver_path: Some(source_path),
             logical_processor_count,
             sampled_processor_count,
             tj_max_c,
@@ -177,19 +276,22 @@ impl LowLevelSampler {
         }
 
         self.last_load_attempt = Some(Instant::now());
-        match winring::WinRingContext::load(paths) {
+        match load_msr_provider(paths) {
             Ok(context) => {
                 if self.last_load_error.is_some() {
                     let _ = write_log_line(
                         &paths.component_log("lowlevel-init"),
                         "INFO",
-                        "Recovered after prior WinRing0 initialization failure.",
+                        "Recovered after prior CPU MSR/RAPL provider initialization failure.",
                     );
                 } else {
                     let _ = write_log_line(
                         &paths.component_log("lowlevel-init"),
                         "INFO",
-                        "WinRing0 initialization succeeded.",
+                        &format!(
+                            "CPU MSR/RAPL provider initialized through {}.",
+                            context.transport()
+                        ),
                     );
                 }
                 self.last_load_error = None;

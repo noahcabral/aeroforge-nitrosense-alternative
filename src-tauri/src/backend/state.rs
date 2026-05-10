@@ -454,6 +454,7 @@ fn build_default_controls() -> ControlSnapshot {
         personal_settings: PersonalSettings {
             smart_charging_enabled: true,
             usb_power_enabled: true,
+            processor_state_control_enabled: true,
             blue_light_filter_enabled: false,
             auto_refresh_rate_on_battery_enabled: false,
             auto_refresh_rate_restore_hz: None,

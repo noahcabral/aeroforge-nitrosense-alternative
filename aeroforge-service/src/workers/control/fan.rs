@@ -8,8 +8,9 @@ use crate::{
 
 use super::{
     acer_wmi::{
-        apply_fan_behavior, apply_fan_speed, clamp_manual_fan_percent, FAN_BEHAVIOR_AUTO,
-        FAN_BEHAVIOR_CUSTOM_MIXED, FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU, FAN_SELECTOR_GPU,
+        apply_fan_behavior, apply_fan_speed, clamp_manual_fan_percent, decode_gm_output_byte,
+        FAN_BEHAVIOR_AUTO, FAN_BEHAVIOR_CUSTOM_MIXED, FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU,
+        FAN_SELECTOR_GPU,
     },
     models::{
         AppliedFanControlSnapshot, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
@@ -269,7 +270,15 @@ fn behavior_input_for_profile(profile_id: &FanProfileId) -> u64 {
 }
 
 fn wmi_output_accepted(result: &super::acer_wmi::AcerWmiMethodResult) -> bool {
-    matches!(result.output, None | Some(0) | Some(1))
+    let Some(output) = result.output else {
+        return true;
+    };
+    if matches!(output, 0 | 1) || output == result.input {
+        return true;
+    }
+
+    let expected = decode_gm_output_byte(result.input);
+    expected != 0 && decode_gm_output_byte(output) == expected
 }
 
 fn wmi_result_json(result: &super::acer_wmi::AcerWmiMethodResult) -> Value {

@@ -1,4 +1,7 @@
-use crate::{paths::ServicePaths, workers::lowlevel::winring};
+use crate::{
+    paths::ServicePaths,
+    workers::lowlevel::{self, winring},
+};
 
 use super::models::{CustomPowerBaseId, PowerProfileId};
 
@@ -24,7 +27,7 @@ fn apply_profile_package_limit_inner(
     profile_id: &PowerProfileId,
     custom_base_profile: Option<&CustomPowerBaseId>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let context = winring::WinRingContext::load(paths)?;
+    let context = lowlevel::load_msr_provider(paths)?;
     let Some(readback) = context.read_rapl_readback()? else {
         return Ok("CPU RAPL readback unavailable; package power limits were not changed.".into());
     };
