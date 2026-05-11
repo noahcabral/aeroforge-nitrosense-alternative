@@ -341,6 +341,10 @@ export async function installStagedUpdate() {
   return invoke<UpdateStatus>('install_staged_update')
 }
 
+export async function showUpdateNotification(versionLabel: string) {
+  return invoke<void>('show_update_notification', { versionLabel })
+}
+
 export async function applyBlueLightFilter(enabled: boolean) {
   return invoke<BlueLightApplyResult>('apply_blue_light_filter', { enabled })
 }

@@ -203,6 +203,101 @@ pub fn install_staged_update(state: State<'_, BackendState>) -> Result<UpdateSta
 }
 
 #[tauri::command]
+pub fn show_update_notification(version_label: String) -> Result<(), String> {
+    show_desktop_update_notification(&version_label)
+}
+
+#[cfg(windows)]
+fn show_desktop_update_notification(version_label: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let version = normalize_notification_text(version_label, 80);
+    let body = if version.is_empty() {
+        "A new AeroForge build is ready to download.".to_string()
+    } else {
+        format!("{version} is ready to download.")
+    };
+    let script = build_windows_notification_script("AeroForge update available", &body);
+
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not launch Windows notification helper: {error}"))
+}
+
+#[cfg(not(windows))]
+fn show_desktop_update_notification(_version_label: &str) -> Result<(), String> {
+    Err("Windows notifications are only available on Windows builds.".into())
+}
+
+#[cfg(windows)]
+fn build_windows_notification_script(title: &str, body: &str) -> String {
+    let title = powershell_single_quote(title);
+    let body = powershell_single_quote(body);
+
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$title = {title}
+$body = {body}
+try {{
+  [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+  [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+  $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
+  $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
+  $textNodes = $xml.GetElementsByTagName('text')
+  [void]$textNodes.Item(0).AppendChild($xml.CreateTextNode($title))
+  [void]$textNodes.Item(1).AppendChild($xml.CreateTextNode($body))
+  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AeroForge Control').Show($toast)
+  exit 0
+}} catch {{
+  try {{
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $notify = New-Object System.Windows.Forms.NotifyIcon
+    $notify.Icon = [System.Drawing.SystemIcons]::Information
+    $notify.Visible = $true
+    $notify.BalloonTipTitle = $title
+    $notify.BalloonTipText = $body
+    $notify.ShowBalloonTip(9000)
+    Start-Sleep -Seconds 10
+    $notify.Dispose()
+    exit 0
+  }} catch {{
+    exit 1
+  }}
+}}"#
+    )
+}
+
+fn normalize_notification_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[tauri::command]
 pub fn apply_blue_light_filter(
     enabled: bool,
     state: State<'_, BackendState>,

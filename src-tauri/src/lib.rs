@@ -28,6 +28,7 @@ pub fn run() {
             commands::check_for_updates,
             commands::stage_update_download,
             commands::install_staged_update,
+            commands::show_update_notification,
             commands::append_performance_log,
             commands::apply_blue_light_filter,
             commands::apply_smart_charging,

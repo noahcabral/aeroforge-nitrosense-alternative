@@ -244,6 +244,11 @@ fn build_contract() -> BackendContract {
                 purpose: "Launch the portable update handoff script for a previously staged ZIP build.".into(),
             },
             CommandDescriptor {
+                command: "show_update_notification".into(),
+                stage: "implemented".into(),
+                purpose: "Show a Windows notification when a newer AeroForge release is available.".into(),
+            },
+            CommandDescriptor {
                 command: "save_control_snapshot".into(),
                 stage: "implemented".into(),
                 purpose: "Persist AeroForge-owned control state to disk.".into(),

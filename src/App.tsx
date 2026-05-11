@@ -24,6 +24,7 @@ import {
   getLiveControlSnapshot,
   installStagedUpdate,
   saveControlSnapshot,
+  showUpdateNotification,
   stageUpdateDownload,
   type CapabilitySnapshot,
   type ControlSnapshot,
@@ -1401,12 +1402,12 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.8')
+  const [backendVersion, setBackendVersion] = useState('0.12.9')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
-  const [dismissedUpdateNoticeKey, setDismissedUpdateNoticeKey] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
+  const updateNotificationKeyRef = useRef<string | null>(null)
   const [statusMessage, setStatusMessage] = useState(
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
@@ -1708,17 +1709,6 @@ function App() {
     updateActionPending === 'stage' ? 'Downloading...' : 'Download Latest Update'
   const updateInstallButtonLabel =
     updateActionPending === 'install' ? 'Launching...' : 'Install Staged Update'
-  const updateNoticeKey =
-    updateStatus?.latestVersion ?? updateStatus?.latestCommitSha ?? updateStatus?.latestTitle ?? null
-  const updateNoticeVersionLabel = updateStatus?.latestVersion
-    ? `v${updateStatus.latestVersion}`
-    : updateStatus?.latestTitle ?? 'New AeroForge release'
-  const updateNoticeVisible = Boolean(
-    updateStatus?.updateAvailable &&
-      updateStatus.canStageUpdate &&
-      updateNoticeKey &&
-      dismissedUpdateNoticeKey !== updateNoticeKey,
-  )
   useEffect(() => {
     const previousTab = activeTabRef.current
     activeTabRef.current = activeTab
@@ -3425,6 +3415,37 @@ function App() {
     }
   }
 
+  async function notifyWindowsUpdateAvailable(status: UpdateStatus) {
+    const notificationKey =
+      status.latestVersion ?? status.latestCommitSha ?? status.latestTitle ?? null
+
+    if (
+      !isDesktopRuntime() ||
+      !status.updateAvailable ||
+      !status.canStageUpdate ||
+      !notificationKey ||
+      updateNotificationKeyRef.current === notificationKey
+    ) {
+      return
+    }
+
+    const previousNotificationKey = updateNotificationKeyRef.current
+    updateNotificationKeyRef.current = notificationKey
+
+    const versionLabel = status.latestVersion
+      ? `v${status.latestVersion}`
+      : status.latestTitle ?? 'New AeroForge release'
+
+    try {
+      await showUpdateNotification(versionLabel)
+    } catch (error) {
+      updateNotificationKeyRef.current = previousNotificationKey
+      pushTransportDebugEventRef.current(
+        `windows update notification failed: ${describeError(error)}`,
+      )
+    }
+  }
+
   async function runUpdateCheck(manual: boolean, channelOverride?: UpdateChannel) {
     setUpdateActionPending('check')
     setUpdateActionMessage('Checking the published GitHub release feed...')
@@ -3433,6 +3454,7 @@ function App() {
       const status = await checkForUpdates(channelOverride ?? updateChannel)
       setUpdateStatus(status)
       setUpdateActionMessage(status.detail)
+      void notifyWindowsUpdateAvailable(status)
       if (manual || status.updateAvailable || status.lastError) {
         setStatusMessage(status.detail)
       }
@@ -3598,11 +3620,6 @@ function App() {
     } finally {
       setSettingsActionPending((current) => (current === 'smart-charge' ? null : current))
     }
-  }
-
-  function openUpdatesPanel() {
-    setActiveTab('personal')
-    setActivePersonalSection('updates')
   }
 
   async function handleProcessorStateControlToggle() {
@@ -3889,42 +3906,6 @@ function App() {
             ))}
           </nav>
         </header>
-
-        {updateNoticeVisible && (
-          <aside className="update-notice" role="status" aria-live="polite">
-            <div className="update-notice__copy">
-              <span className="eyebrow">Update Available</span>
-              <strong>{updateNoticeVersionLabel}</strong>
-              <p>A new AeroForge build is ready to download.</p>
-            </div>
-
-            <div className="update-notice__actions">
-              <button
-                className="button button--notice"
-                disabled={!updateStatus?.canStageUpdate || updateActionPending !== null}
-                onClick={() => void handleStageLatestUpdate()}
-                type="button"
-              >
-                {updateActionPending === 'stage' ? 'Downloading...' : 'Download'}
-              </button>
-              <button className="button button--ghost" onClick={openUpdatesPanel} type="button">
-                Details
-              </button>
-              <button
-                className="update-notice__dismiss"
-                onClick={() => {
-                  if (updateNoticeKey) {
-                    setDismissedUpdateNoticeKey(updateNoticeKey)
-                  }
-                }}
-                type="button"
-                aria-label="Dismiss update notification"
-              >
-                X
-              </button>
-            </div>
-          </aside>
-        )}
 
         {activeTab === 'home' && (
           <div
