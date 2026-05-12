@@ -136,9 +136,16 @@ fn build_service_status(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let supervisor_raw = fs::read_to_string(paths.supervisor_snapshot())?;
     let supervisor = serde_json::from_str::<SupervisorSnapshot>(&supervisor_raw)?;
+    let worker_problem = critical_worker_problem(&supervisor.workers);
+    let connected = worker_problem.is_none();
+    let detail = if let Some(problem) = worker_problem {
+        format!("Connected to the AeroForge service named-pipe host, but service controls are degraded: {problem}.")
+    } else {
+        "Connected to the AeroForge service named-pipe host.".into()
+    };
 
     Ok(json!({
-        "connected": true,
+        "connected": connected,
         "pipeName": pipe_path,
         "serviceName": supervisor.service,
         "version": env!("CARGO_PKG_VERSION"),
@@ -147,8 +154,33 @@ fn build_service_status(
         "workerCount": supervisor.worker_count,
         "updatedAtUnix": supervisor.updated_at_unix,
         "workers": supervisor.workers,
-        "detail": "Connected to the AeroForge service named-pipe host."
+        "detail": detail
     }))
+}
+
+fn critical_worker_problem(workers: &[super::models::WorkerStatusSnapshot]) -> Option<String> {
+    for worker_name in ["control-worker", "ipc-worker"] {
+        let Some(worker) = workers.iter().find(|worker| worker.name == worker_name) else {
+            return Some(format!(
+                "{worker_name} is missing from the supervisor snapshot"
+            ));
+        };
+        let state = worker.state.trim().to_ascii_lowercase();
+        if !matches!(state.as_str(), "running" | "starting") {
+            return Some(format!(
+                "{} is {}{}",
+                worker.name,
+                worker.state,
+                worker
+                    .last_error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
+    None
 }
 
 fn read_snapshot(

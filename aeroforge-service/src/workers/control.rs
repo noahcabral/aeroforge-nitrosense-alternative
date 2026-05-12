@@ -14,7 +14,7 @@ mod state;
 
 use crate::{
     paths::{write_log_line, ServicePaths},
-    workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
+    workers::{run_periodic_worker, unix_timestamp, WorkerEventSender, WorkerRegistration},
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -28,6 +28,7 @@ pub use models::{
 
 const WORKER_NAME: &str = "control-worker";
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const CUSTOM_FAN_REFRESH_INTERVAL_SECS: u64 = 1;
 static FAN_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn registration() -> WorkerRegistration {
@@ -251,6 +252,10 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     };
 
+    if !custom_fan_refresh_due(snapshot.last_fan_applied_at_unix) {
+        return Ok(());
+    }
+
     let _fan_apply_guard = FAN_APPLY_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -272,6 +277,14 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     }
 
     Ok(())
+}
+
+fn custom_fan_refresh_due(last_applied_at_unix: Option<u64>) -> bool {
+    let Some(last_applied_at_unix) = last_applied_at_unix else {
+        return true;
+    };
+
+    unix_timestamp().saturating_sub(last_applied_at_unix) >= CUSTOM_FAN_REFRESH_INTERVAL_SECS
 }
 
 fn restore_startup_state(

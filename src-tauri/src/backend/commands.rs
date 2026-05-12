@@ -35,10 +35,7 @@ pub fn get_backend_contract(state: State<'_, BackendState>) -> BackendContract {
 #[tauri::command]
 pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
     match service_pipe::fetch_service_status() {
-        Ok(mut status) => {
-            status.connected = true;
-            status
-        }
+        Ok(status) => status,
         Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
     }
 }

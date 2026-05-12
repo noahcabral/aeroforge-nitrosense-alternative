@@ -2,7 +2,9 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::windows::process::CommandExt,
     path::PathBuf,
+    process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -19,6 +21,8 @@ use super::models::{
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
 const FRESH_SUPERVISOR_MAX_AGE_SECONDS: u64 = 15;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CRITICAL_WORKERS: &[&str] = &["control-worker", "ipc-worker"];
 
 fn default_true() -> bool {
     true
@@ -196,11 +200,20 @@ fn build_cached_service_status(detail_seed: &str, trust_fresh_snapshot: bool) ->
         };
 
     let fresh = trust_fresh_snapshot && supervisor_is_fresh(updated_at_unix);
+    let worker_problem = critical_worker_problem(&workers);
+    let connected = fresh && worker_problem.is_none();
     let missing_pipe_detail = if fresh {
-        format!(
-            "Loaded fresh AeroForge service supervisor snapshot from {}.",
-            supervisor_file.display()
-        )
+        if let Some(problem) = &worker_problem {
+            format!(
+                "AeroForge service supervisor is fresh, but service controls are degraded: {problem}. Snapshot: {}.",
+                supervisor_file.display()
+            )
+        } else {
+            format!(
+                "Loaded fresh AeroForge service supervisor snapshot from {}.",
+                supervisor_file.display()
+            )
+        }
     } else if detail_seed.contains("os error 2") {
         format!(
             "{SERVICE_NAME} is not installed or is not running. Install AeroForge with the setup installer, or start {SERVICE_NAME}. Raw pipe error: {detail_seed}"
@@ -221,7 +234,7 @@ fn build_cached_service_status(detail_seed: &str, trust_fresh_snapshot: bool) ->
     };
 
     ServiceStatus {
-        connected: fresh,
+        connected,
         pipe_name: PIPE_PATH.into(),
         service_name,
         version: None,
@@ -394,11 +407,16 @@ fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Se
 
 fn open_pipe_with_retry() -> Result<std::fs::File, Box<dyn std::error::Error + Send + Sync>> {
     let mut last_error: Option<std::io::Error> = None;
+    let mut recovery_attempted = false;
 
-    for _ in 0..20 {
+    for attempt in 0..20 {
         match OpenOptions::new().read(true).write(true).open(PIPE_PATH) {
             Ok(pipe) => return Ok(pipe),
             Err(error) => {
+                if !recovery_attempted && attempt >= 2 && should_try_service_recovery(&error) {
+                    recovery_attempted = true;
+                    let _ = ensure_service_running();
+                }
                 last_error = Some(error);
                 thread::sleep(Duration::from_millis(100));
             }
@@ -408,6 +426,147 @@ fn open_pipe_with_retry() -> Result<std::fs::File, Box<dyn std::error::Error + S
     Err(last_error
         .unwrap_or_else(|| std::io::Error::other("Failed to open named pipe"))
         .into())
+}
+
+pub fn ensure_service_running() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let worker_problem = cached_supervisor_worker_problem();
+    let service_state = query_service_state()?;
+
+    match (service_state.as_deref(), worker_problem) {
+        (Some("RUNNING"), Some(problem)) => {
+            stop_service_best_effort()?;
+            wait_for_service_state("STOPPED", Duration::from_secs(8)).ok();
+            start_service()?;
+            wait_for_service_state("RUNNING", Duration::from_secs(12))?;
+            Ok(format!(
+                "Restarted {SERVICE_NAME} because its worker state was unhealthy: {problem}."
+            ))
+        }
+        (Some("RUNNING"), None) => Ok(format!("{SERVICE_NAME} is already running.")),
+        (Some(_), _) => {
+            start_service()?;
+            wait_for_service_state("RUNNING", Duration::from_secs(12))?;
+            Ok(format!("Started {SERVICE_NAME}."))
+        }
+        (None, _) => Err(format!("{SERVICE_NAME} is not installed.").into()),
+    }
+}
+
+fn should_try_service_recovery(error: &std::io::Error) -> bool {
+    if cached_supervisor_worker_problem().is_some() {
+        return true;
+    }
+
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    ) || matches!(error.raw_os_error(), Some(2) | Some(231))
+}
+
+fn cached_supervisor_worker_problem() -> Option<String> {
+    let raw = fs::read_to_string(supervisor_file_path()).ok()?;
+    let snapshot = serde_json::from_str::<CachedSupervisorSnapshot>(&raw).ok()?;
+    critical_worker_problem(&snapshot.workers)
+}
+
+fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
+    for worker_name in CRITICAL_WORKERS {
+        let Some(worker) = workers.iter().find(|worker| worker.name == *worker_name) else {
+            return Some(format!(
+                "{worker_name} is missing from the supervisor snapshot"
+            ));
+        };
+        let state = worker.state.trim().to_ascii_lowercase();
+        if !matches!(state.as_str(), "running" | "starting") {
+            return Some(format!(
+                "{} is {}{}",
+                worker.name,
+                worker.state,
+                worker
+                    .last_error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
+    None
+}
+
+fn query_service_state() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let output = sc_output(["query", SERVICE_NAME])?;
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    if text.contains("does not exist") || text.contains("1060") {
+        return Ok(None);
+    }
+    if text.contains("RUNNING") {
+        return Ok(Some("RUNNING".into()));
+    }
+    if text.contains("STOPPED") {
+        return Ok(Some("STOPPED".into()));
+    }
+    if text.contains("START_PENDING") {
+        return Ok(Some("START_PENDING".into()));
+    }
+    if text.contains("STOP_PENDING") {
+        return Ok(Some("STOP_PENDING".into()));
+    }
+    Ok(Some("UNKNOWN".into()))
+}
+
+fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = sc_output(["start", SERVICE_NAME])?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    if text.contains("1056") || text.contains("already been started") {
+        return Ok(());
+    }
+
+    Err(format!("sc.exe start {SERVICE_NAME} failed: {}", text.trim()).into())
+}
+
+fn stop_service_best_effort() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = sc_output(["stop", SERVICE_NAME])?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    if text.contains("1062") || text.contains("has not been started") {
+        return Ok(());
+    }
+
+    Err(format!("sc.exe stop {SERVICE_NAME} failed: {}", text.trim()).into())
+}
+
+fn wait_for_service_state(
+    target: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let started = std::time::Instant::now();
+    while started.elapsed() <= timeout {
+        if query_service_state()?.as_deref() == Some(target) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!("{SERVICE_NAME} did not reach {target} within {:?}", timeout).into())
+}
+
+fn sc_output<const N: usize>(
+    args: [&str; N],
+) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(Command::new("sc.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(args)
+        .output()?)
 }
 
 fn service_state_dir() -> PathBuf {

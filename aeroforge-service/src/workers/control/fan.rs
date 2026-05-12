@@ -413,10 +413,18 @@ fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
     let system_model = identity.system_model.to_ascii_lowercase();
     let cpu_identity = format!("{} {}", identity.cpu_brand, identity.cpu_name).to_ascii_lowercase();
 
-    if system_model.contains("anv16-41")
-        || cpu_identity.contains("amd")
-        || cpu_identity.contains("ryzen")
-    {
+    if system_model.contains("anv15-41") {
+        return CustomFanStrategy {
+            id: "custom-behavior-then-direct-speed",
+            reason: format!(
+                "Acer Custom fan behavior latch selected for ANV15-41 so firmware does not keep pulling direct speed targets back to the BIOS fan table. Model '{}', CPU '{}'.",
+                identity.system_model, cpu_identity
+            ),
+            behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
+        };
+    }
+
+    if system_model.contains("anv16-41") {
         return CustomFanStrategy {
             id: "custom-direct-speed-only",
             reason: format!(
@@ -438,6 +446,17 @@ fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
                 identity.system_model, cpu_identity
             ),
             behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
+        };
+    }
+
+    if cpu_identity.contains("amd") || cpu_identity.contains("ryzen") {
+        return CustomFanStrategy {
+            id: "custom-direct-speed-only",
+            reason: format!(
+                "Direct-only selected for unclassified AMD/Ryzen hardware. Model '{}', CPU '{}'.",
+                identity.system_model, cpu_identity
+            ),
+            behavior_input: None,
         };
     }
 
