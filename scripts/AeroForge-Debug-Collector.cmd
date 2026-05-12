@@ -623,6 +623,12 @@ function Write-DebugSummaryJson {
     if ($pipeControlsPayload.fanCurveApplySupported -eq $false) {
       $flags.Add("AeroForge control snapshot reports custom fan curves unsupported.")
     }
+    if ($pipeControlsPayload.nvidiaTelemetryEnabled -eq $true) {
+      $flags.Add("AeroForge NVIDIA telemetry polling is enabled. For NVIDIA idle reports, compare with Settings > NVIDIA Telemetry Polling disabled.")
+    }
+    if ($pipeControlsPayload.activeFanProfile -eq "custom") {
+      $flags.Add("Custom fan mode is active; inspect issue evidence, control-fan log, Acer fan readback, and sampling output for requested versus applied fan targets.")
+    }
   }
 
   $summary = [ordered]@{
@@ -675,6 +681,9 @@ function Invoke-OptionalSamplingCapture {
     if ($gaming) {
       $sensorRows = @()
       foreach ($item in @(
+        @{ name = "FanBehavior"; method = "GetGamingFanBehavior"; input = [uint32]0 },
+        @{ name = "CpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]1 },
+        @{ name = "GpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]4 },
         @{ name = "CpuTemp"; input = [uint32]0x0101 },
         @{ name = "CpuFan"; input = [uint32]0x0201 },
         @{ name = "SystemTemp"; input = [uint32]0x0301 },
@@ -682,10 +691,15 @@ function Invoke-OptionalSamplingCapture {
         @{ name = "GpuTemp"; input = [uint32]0x0A01 }
       )) {
         try {
-          $result = Invoke-CimMethod -InputObject $gaming -MethodName GetGamingSysInfo -Arguments @{ gmInput = $item.input } -ErrorAction Stop
+          $method = if ($item.method) { $item.method } else { "GetGamingSysInfo" }
+          $result = Invoke-CimMethod -InputObject $gaming -MethodName $method -Arguments @{ gmInput = $item.input } -ErrorAction Stop
           $sensorRows += [pscustomobject]@{
             name = $item.name
+            method = $method
             output = $result.gmOutput
+            outputHex = ("0x{0:X}" -f [uint64]$result.gmOutput)
+            decodedLowByte = (([uint64]$result.gmOutput) -band 0xFF)
+            decodedShiftedByte = ((([uint64]$result.gmOutput) -shr 8) -band 0xFF)
             reading = ((([uint64]$result.gmOutput) -shr 8) -band 0xFFFF)
           }
         } catch {
@@ -695,10 +709,21 @@ function Invoke-OptionalSamplingCapture {
       $acerSensors = $sensorRows
     }
 
+    $nvidiaSample = $null
+    $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+    if ($nvidiaSmi) {
+      try {
+        $nvidiaSample = (& $nvidiaSmi.Source --query-gpu=name,pstate,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>&1 | Out-String).Trim()
+      } catch {
+        $nvidiaSample = "nvidia-smi sample failed: $($_.Exception.Message)"
+      }
+    }
+
     $rows.Add([pscustomobject]@{
       timestamp = (Get-Date -Format o)
       cpu = $cpuTotal
       acerSensors = $acerSensors
+      nvidiaSmi = $nvidiaSample
       pipeTelemetry = $pipeTelemetry
       pipeControls = $pipeControls
     })
@@ -979,6 +1004,223 @@ function Get-RecentEventsMatching {
     Format-List
 }
 
+function Get-AcerFanReadOnlySnapshot {
+  $gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $gaming) {
+    "AcerGamingFunction instance not found."
+    return
+  }
+
+  foreach ($item in @(
+    @{ name = "FanBehavior"; method = "GetGamingFanBehavior"; input = [uint32]0 },
+    @{ name = "CpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]1 },
+    @{ name = "GpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]4 },
+    @{ name = "SupportedSensors"; method = "GetGamingSysInfo"; input = [uint32]0x0000 },
+    @{ name = "CpuTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0101 },
+    @{ name = "CpuFan"; method = "GetGamingSysInfo"; input = [uint32]0x0201 },
+    @{ name = "SystemTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0301 },
+    @{ name = "GpuFan"; method = "GetGamingSysInfo"; input = [uint32]0x0601 },
+    @{ name = "GpuTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0A01 }
+  )) {
+    try {
+      $result = Invoke-CimMethod -InputObject $gaming -MethodName $item.method -Arguments @{ gmInput = $item.input } -ErrorAction Stop
+      [pscustomobject]@{
+        name = $item.name
+        method = $item.method
+        input = ("0x{0:X}" -f [uint32]$item.input)
+        output = $result.gmOutput
+        outputHex = ("0x{0:X}" -f [uint64]$result.gmOutput)
+        decodedLowByte = (([uint64]$result.gmOutput) -band 0xFF)
+        decodedShiftedByte = ((([uint64]$result.gmOutput) -shr 8) -band 0xFF)
+        decodedShiftedWord = ((([uint64]$result.gmOutput) -shr 8) -band 0xFFFF)
+      }
+    } catch {
+      [pscustomobject]@{
+        name = $item.name
+        method = $item.method
+        input = ("0x{0:X}" -f [uint32]$item.input)
+        error = $_.Exception.Message
+      }
+    }
+  }
+}
+
+function Get-AeroForgeIssueEvidence {
+  "===== Service control snapshot payload ====="
+  $controlReply = Invoke-NamedPipeJsonRequest -Kind "getControlSnapshot" -TimeoutMs 1500
+  try {
+    ($controlReply | ConvertFrom-Json -ErrorAction Stop) | ConvertTo-Json -Depth 12
+  } catch {
+    $controlReply
+  }
+  ""
+
+  "===== Service telemetry snapshot payload ====="
+  $telemetryReply = Invoke-NamedPipeJsonRequest -Kind "getTelemetrySnapshot" -TimeoutMs 1500
+  try {
+    ($telemetryReply | ConvertFrom-Json -ErrorAction Stop) | ConvertTo-Json -Depth 12
+  } catch {
+    $telemetryReply
+  }
+  ""
+
+  "===== Acer fan read-only snapshot ====="
+  Get-AcerFanReadOnlySnapshot | Format-Table -AutoSize -Wrap
+  ""
+
+  "===== Recent service logs that matter for current reports ====="
+  $logRoot = Join-Path $env:ProgramData "AeroForge\Service\logs"
+  foreach ($name in @(
+    "control-fan.log",
+    "control-smart-charge.log",
+    "control-power.log",
+    "control-telemetry.log",
+    "telemetry-nvidia-gpu.log",
+    "telemetry-worker.log",
+    "lowlevel.log",
+    "installer-service.log"
+  )) {
+    Get-RecentTextTail -Path (Join-Path $logRoot $name) -LineCount 180
+  }
+}
+
+function Get-AeroForgePerformanceEvidence {
+  param([string[]]$Roots)
+
+  $files = New-Object System.Collections.Generic.List[object]
+  foreach ($root in $Roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique) {
+    Get-ChildItem -LiteralPath $root -Recurse -Force -Filter "performance.jsonl" -ErrorAction SilentlyContinue |
+      ForEach-Object { $files.Add($_) }
+  }
+
+  if ($files.Count -eq 0) {
+    "No performance.jsonl files found under AeroForge AppData roots. Open AeroForge, reproduce the lag, then rerun the collector."
+    return
+  }
+
+  foreach ($file in $files | Sort-Object FullName -Unique) {
+    "===== $($file.FullName) ====="
+    $file | Select-Object FullName, Length, LastWriteTimeUtc | Format-List
+    $lines = @(Get-Content -LiteralPath $file.FullName -Tail 600 -ErrorAction SilentlyContinue)
+    $events = @()
+    foreach ($line in $lines) {
+      if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+      }
+      try {
+        $events += ($line | ConvertFrom-Json -ErrorAction Stop)
+      } catch {
+      }
+    }
+
+    "===== Event type counts from recent tail ====="
+    $events |
+      Group-Object eventType |
+      Sort-Object Count -Descending |
+      Select-Object Count, Name |
+      Format-Table -AutoSize -Wrap
+    ""
+
+    "===== Recent mode-change/apply events ====="
+    $events |
+      Where-Object { $_.eventType -match 'power-profile|fan-profile|stage-fit|window-resize|backend-poll|frame-sample' } |
+      Select-Object -Last 120 occurredAtUnixMs, activeTab, eventType, detail, payload |
+      Format-List
+    ""
+
+    "===== Raw recent tail ====="
+    $lines | Select-Object -Last 160
+    ""
+  }
+}
+
+function Get-NvidiaIdleEvidence {
+  "===== AeroForge NVIDIA telemetry setting from service control snapshot ====="
+  $controlPayload = ConvertFrom-PipeJsonReply -Text (Invoke-NamedPipeJsonRequest -Kind "getControlSnapshot" -TimeoutMs 1500)
+  if ($controlPayload) {
+    $controlPayload |
+      Select-Object nvidiaTelemetryEnabled, activeFanProfile, activePowerProfile, lastFanApplyDetail, lastGpuTuningDetail |
+      Format-List
+  } else {
+    "Could not parse AeroForge service control snapshot."
+  }
+  ""
+
+  "===== GPU process memory and engine counters ====="
+  try {
+    Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage' -SampleInterval 1 -MaxSamples 2 |
+      Select-Object -ExpandProperty CounterSamples |
+      Select-Object Path, CookedValue |
+      Sort-Object Path |
+      Format-Table -AutoSize -Wrap
+  } catch {
+    "GPU Adapter Memory counter failed: $($_.Exception.Message)"
+  }
+  try {
+    Get-Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 2 |
+      Select-Object -ExpandProperty CounterSamples |
+      Where-Object { $_.CookedValue -gt 0 } |
+      Select-Object Path, CookedValue |
+      Sort-Object CookedValue -Descending |
+      Format-Table -AutoSize -Wrap
+  } catch {
+    "GPU Engine counter failed: $($_.Exception.Message)"
+  }
+  ""
+
+  "===== nvidia-smi idle-oriented sample ====="
+  $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+  if ($nvidiaSmi) {
+    & $nvidiaSmi.Source --query-gpu=name,pci.bus_id,persistence_mode,pstate,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader,nounits
+  } else {
+    "nvidia-smi.exe not found in PATH."
+  }
+}
+
+function Get-BatteryLimitEvidence {
+  "===== Windows battery status ====="
+  Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Format-List *
+  ""
+
+  "===== BatteryControl read-only matrix ====="
+  $batteryControls = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction SilentlyContinue)
+  if ($batteryControls.Count -eq 0) {
+    "BatteryControl instance not found."
+  } else {
+    $batteryControl = $batteryControls | Select-Object -First 1
+    $batteryControl | Format-List *
+    $rows = foreach ($batteryNo in @(0,1,2,3)) {
+      foreach ($functionQuery in @(0,1,2,3,4,5)) {
+        try {
+          $get = Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
+            uBatteryNo = [byte]$batteryNo
+            uFunctionQuery = [byte]$functionQuery
+            uReserved = ([byte[]](0,0))
+          } -ErrorAction Stop
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            functionList = $get.uFunctionList
+            functionStatus = (@($get.uFunctionStatus) -join ",")
+            'return' = (@($get.uReturn) -join ",")
+          }
+        } catch {
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            error = $_.Exception.Message
+          }
+        }
+      }
+    }
+    $rows | Format-Table -AutoSize -Wrap
+  }
+  ""
+
+  "===== Smart-charge service log tail ====="
+  Get-RecentTextTail -Path (Join-Path $env:ProgramData "AeroForge\Service\logs\control-smart-charge.log") -LineCount 220
+}
+
 $stamp = Get-TimeStamp
 $desktop = if (-not [string]::IsNullOrWhiteSpace($OutputRoot)) {
   $OutputRoot
@@ -1036,6 +1278,8 @@ Privacy notes:
 Most useful files:
 - summary.json: one-page machine, service, app/service version, Acer WMI, telemetry, and failure-flag summary.
 - commands\*.txt: system, service, WMI, pipe, hardware, TDP/PL, shortcut, event-log, and updater probes.
+- commands\*-aeroforge_issue_evidence.txt: focused custom-fan, battery-limit, NVIDIA-idle, and service-log evidence.
+- commands\*-aeroforge_performance_evidence.txt: frame/mode-switch lag evidence from performance.jsonl.
 - sampling.json: optional timed telemetry capture when launched with -SampleSeconds 60.
 - runtime-files\ProgramData-AeroForge-Service: AeroForge service logs and state snapshots.
 - runtime-files\Temp-AeroForge-Service: fallback service-installer logs, if Windows wrote them under Temp.
@@ -1043,7 +1287,7 @@ Most useful files:
 - collector.log and collector-transcript.txt: collector progress and errors.
 
 Optional deeper capture:
-- Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer sensor, AeroForge pipe samples, and AMD SMU/ACPI/WMI context for intermittent AMD, power, battery, or fan issues.
+- Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer fan behavior/speed/sensor snapshots, NVIDIA idle samples, AeroForge pipe samples, and AMD SMU/ACPI/WMI context for intermittent AMD, power, battery, GPU idle, lag, or fan issues.
 - Maintainers can use -OutputRoot "C:\Some\Temp\Folder" to write the bundle somewhere other than the Desktop.
 "@
 Write-TextFile -Path (Join-Path $script:BundleRoot "README.txt") -Text $readme
@@ -1061,6 +1305,12 @@ $installRoots = @(
   $(if ($serviceBinary) { Split-Path -Parent $serviceBinary })
 ) | Where-Object { $_ }
 $script:InstallRoots = $installRoots
+$script:AppDataCandidates = @(
+  (Join-Path $env:APPDATA "com.noah.aeroforgecontrol"),
+  (Join-Path $env:LOCALAPPDATA "com.noah.aeroforgecontrol"),
+  (Join-Path $env:APPDATA "AeroForge Control"),
+  (Join-Path $env:LOCALAPPDATA "AeroForge Control")
+)
 
 Invoke-DiagCommand "collector context" {
   [pscustomobject]@{
@@ -1177,6 +1427,10 @@ Invoke-DiagCommand "aeroforge service state snapshots" {
     }
 }
 
+Invoke-DiagCommand "aeroforge issue evidence" {
+  Get-AeroForgeIssueEvidence
+}
+
 Invoke-DiagCommand "services filtered" {
   Get-CimInstance Win32_Service |
     Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName) -match 'AeroForge|Acer|Nitro|Predator|Quick Access|QuickAccess|NVIDIA|NVDisplay|NVContainer|WebView|WinRing|OpenLibSys' } |
@@ -1203,6 +1457,10 @@ Invoke-DiagCommand "process command lines filtered" {
 
 Invoke-DiagCommand "named pipe read-only probe" {
   Get-AeroForgePipeProbe
+}
+
+Invoke-DiagCommand "aeroforge performance evidence" {
+  Get-AeroForgePerformanceEvidence -Roots $script:AppDataCandidates
 }
 
 Invoke-DiagCommand "aeroforge installed file inventory" {
@@ -1247,6 +1505,10 @@ Invoke-DiagCommand "windows power state" {
   Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Format-List *
 }
 
+Invoke-DiagCommand "battery limit evidence" {
+  Get-BatteryLimitEvidence
+}
+
 Invoke-DiagCommand "display and gpu" {
   Get-CimInstance Win32_VideoController | Select-Object Name, AdapterCompatibility, DriverVersion, DriverDate, CurrentRefreshRate, CurrentHorizontalResolution, CurrentVerticalResolution, VideoModeDescription, Status | Format-List
   Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | Select-Object Name, MonitorType, MonitorManufacturer, ScreenWidth, ScreenHeight, Status | Format-List
@@ -1273,6 +1535,10 @@ Invoke-DiagCommand "nvidia power limits" {
   } else {
     "nvidia-smi.exe not found in PATH."
   }
+}
+
+Invoke-DiagCommand "nvidia idle evidence" {
+  Get-NvidiaIdleEvidence
 }
 
 Invoke-DiagCommand "acer wmi classes" {
@@ -1367,12 +1633,7 @@ Invoke-DiagCommand "battery report" {
 
 $programDataService = Join-Path $env:ProgramData "AeroForge\Service"
 $tempService = Join-Path $env:TEMP "AeroForge\Service"
-$appDataCandidates = @(
-  (Join-Path $env:APPDATA "com.noah.aeroforgecontrol"),
-  (Join-Path $env:LOCALAPPDATA "com.noah.aeroforgecontrol"),
-  (Join-Path $env:APPDATA "AeroForge Control"),
-  (Join-Path $env:LOCALAPPDATA "AeroForge Control")
-)
+$appDataCandidates = $script:AppDataCandidates
 
 Write-LogLine "Copying safe AeroForge service runtime files."
 Copy-SafeTextTree -Source $programDataService -Destination (Join-Path $script:RuntimeDir "ProgramData-AeroForge-Service")

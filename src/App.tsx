@@ -24,6 +24,7 @@ import {
   getLiveControlSnapshot,
   installStagedUpdate,
   saveControlSnapshot,
+  setNvidiaTelemetryEnabled,
   showUpdateNotification,
   stageUpdateDownload,
   type CapabilitySnapshot,
@@ -113,6 +114,7 @@ type PersistControlOverrides = {
   fanSyncLockEnabled?: boolean
   smartChargingEnabled?: boolean
   processorStateControlEnabled?: boolean
+  nvidiaTelemetryEnabled?: boolean
   autoRefreshRateOnBatteryEnabled?: boolean
   autoRefreshRateRestoreHz?: number | null
   blueLightFilterEnabled?: boolean
@@ -790,6 +792,29 @@ function formatTelemetryValue(value: number | null | undefined, suffix = '') {
   return `${value}${suffix}`
 }
 
+function formatFanSpeedMeta(
+  rpm: number | null | undefined,
+  targetPercent: number | null | undefined,
+) {
+  const rpmLabel = rpm == null ? null : 'RPM'
+  const targetLabel = targetPercent == null ? null : `Target ${targetPercent}%`
+  return [rpmLabel, targetLabel].filter(Boolean).join(' | ')
+}
+
+function buildFanSpeedDetail(
+  rpm: number | null | undefined,
+  targetPercent: number | null | undefined,
+  liveDetail: string,
+  unavailableDetail = 'Fan telemetry unavailable',
+) {
+  if (rpm == null && targetPercent == null) {
+    return unavailableDetail
+  }
+
+  const targetDetail = targetPercent == null ? null : `Target ${targetPercent}%`
+  return [targetDetail, rpm == null ? null : liveDetail].filter(Boolean).join(' | ')
+}
+
 function formatWattValue(value: number | null | undefined, maximumFractionDigits = 0) {
   if (value == null || Number.isNaN(value)) {
     return null
@@ -1220,10 +1245,10 @@ function mergeControlsWithLiveSnapshot(
 
   return {
     ...controls,
-    activePowerProfile: liveControls.activePowerProfile ?? controls.activePowerProfile,
-    activeFanProfile: liveControls.activeFanProfile ?? controls.activeFanProfile,
     customProcessorState:
-      liveControls.activePowerProfile === 'custom' && liveControls.processorState
+      controls.activePowerProfile === 'custom' &&
+      liveControls.activePowerProfile === 'custom' &&
+      liveControls.processorState
         ? liveControls.processorState
         : controls.customProcessorState,
     customPowerBase: controls.customPowerBase,
@@ -1244,6 +1269,7 @@ function buildControlSnapshotForPersistence(input: {
   fanSyncLockEnabled: boolean
   smartChargingEnabled: boolean
   processorStateControlEnabled: boolean
+  nvidiaTelemetryEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
   usbPowerEnabled: boolean
@@ -1272,6 +1298,7 @@ function buildControlSnapshotForPersistence(input: {
       smartChargingEnabled: input.smartChargingEnabled,
       usbPowerEnabled: input.usbPowerEnabled,
       processorStateControlEnabled: input.processorStateControlEnabled,
+      nvidiaTelemetryEnabled: input.nvidiaTelemetryEnabled,
       blueLightFilterEnabled: input.blueLightFilterEnabled,
       autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
       autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
@@ -1298,6 +1325,7 @@ function applyBackendControlSnapshot(
   setFanSyncLockEnabled: (enabled: boolean) => void,
   setSmartChargingEnabled: (enabled: boolean) => void,
   setProcessorStateControlEnabled: (enabled: boolean) => void,
+  setNvidiaTelemetryEnabled: (enabled: boolean) => void,
   setUsbPowerEnabled: (enabled: boolean) => void,
   setBlueLightFilterEnabled: (enabled: boolean) => void,
   setSelectedBootArt: (art: string) => void,
@@ -1323,6 +1351,7 @@ function applyBackendControlSnapshot(
   setOcTuningLocked(controls.ocTuningLocked)
   setSmartChargingEnabled(controls.personalSettings.smartChargingEnabled)
   setProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
+  setNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? true)
   setUsbPowerEnabled(controls.personalSettings.usbPowerEnabled)
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
   setAutoRefreshRateSettings?.(
@@ -1385,6 +1414,8 @@ function App() {
   const smartChargingEnabledRef = useRef(true)
   const [processorStateControlEnabled, setProcessorStateControlEnabled] = useState(true)
   const processorStateControlEnabledRef = useRef(true)
+  const [nvidiaTelemetryEnabled, setNvidiaTelemetryEnabledState] = useState(true)
+  const nvidiaTelemetryEnabledRef = useRef(true)
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
   const [blueLightFilterEnabled, setBlueLightFilterEnabled] = useState(false)
   const blueLightFilterEnabledRef = useRef(false)
@@ -1402,7 +1433,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.12.9')
+  const [backendVersion, setBackendVersion] = useState('0.13.0')
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
@@ -1412,7 +1443,7 @@ function App() {
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
   const [settingsActionPending, setSettingsActionPending] = useState<
-    null | 'smart-charge' | 'blue-light' | 'boot-logo' | 'refresh-rate'
+    null | 'smart-charge' | 'blue-light' | 'boot-logo' | 'refresh-rate' | 'nvidia-telemetry'
   >(null)
   const [glowTarget, setGlowTarget] = useState<string>('turbo')
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
@@ -1457,6 +1488,8 @@ function App() {
   const telemetrySnapshotRef = useRef<string | null>(null)
   const liveControlSnapshotStateRef = useRef<string | null>(null)
   const liveControlSnapshotRef = useRef<LiveControlSnapshot | null>(null)
+  const [liveControlSnapshot, setLiveControlSnapshot] =
+    useState<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
   const performanceLogSessionIdRef = useRef(`af-${Date.now().toString(36)}`)
   const performanceLogQueueRef = useRef<PerformanceLogEvent[]>([])
@@ -1492,6 +1525,7 @@ function App() {
   const blueLightPending = settingsActionPending === 'blue-light'
   const bootLogoPending = settingsActionPending === 'boot-logo'
   const refreshRatePending = settingsActionPending === 'refresh-rate'
+  const nvidiaTelemetryPending = settingsActionPending === 'nvidia-telemetry'
   const currentPowerProfile = powerProfiles.find(
     (profile) => profile.id === activePowerProfile,
   )!
@@ -1563,6 +1597,10 @@ function App() {
   const displayedCpuClock = presentPositive(activeTelemetry?.cpuClockMhz ?? null)
   const displayedCpuFanRpm = presentPositive(activeTelemetry?.cpuFanRpm ?? null)
   const displayedGpuFanRpm = presentPositive(activeTelemetry?.gpuFanRpm ?? null)
+  const displayedCpuFanTargetPercent =
+    liveControlSnapshot?.currentCpuFanSpeedPercent ?? null
+  const displayedGpuFanTargetPercent =
+    liveControlSnapshot?.currentGpuFanSpeedPercent ?? null
   const powerHeadline = currentPowerProfile.name
   const displayedCpuIdentity = buildHardwareIdentity(
     activeTelemetry?.cpuBrand,
@@ -1750,6 +1788,11 @@ function App() {
     setProcessorStateControlEnabled(enabled)
   }
 
+  function commitNvidiaTelemetryEnabled(enabled: boolean) {
+    nvidiaTelemetryEnabledRef.current = enabled
+    setNvidiaTelemetryEnabledState(enabled)
+  }
+
   function commitBlueLightFilterEnabled(enabled: boolean) {
     blueLightFilterEnabledRef.current = enabled
     setBlueLightFilterEnabled(enabled)
@@ -1809,6 +1852,8 @@ function App() {
       overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
     const nextProcessorStateControlEnabled =
       overrides?.processorStateControlEnabled ?? processorStateControlEnabledRef.current
+    const nextNvidiaTelemetryEnabled =
+      overrides?.nvidiaTelemetryEnabled ?? nvidiaTelemetryEnabledRef.current
     const nextAutoRefreshRateOnBatteryEnabled =
       overrides?.autoRefreshRateOnBatteryEnabled ??
       autoRefreshRateOnBatteryEnabledRef.current
@@ -1838,6 +1883,7 @@ function App() {
           fanSyncLockEnabled: nextFanSyncLockEnabled,
           smartChargingEnabled: nextSmartChargingEnabled,
           processorStateControlEnabled: nextProcessorStateControlEnabled,
+          nvidiaTelemetryEnabled: nextNvidiaTelemetryEnabled,
           autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
           autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
           usbPowerEnabled,
@@ -1868,6 +1914,7 @@ function App() {
     customPowerBase,
     smartChargingEnabled,
     processorStateControlEnabled,
+    nvidiaTelemetryEnabled,
     autoRefreshRateOnBatteryEnabled,
     autoRefreshRateRestoreHz,
     usbPowerEnabled,
@@ -2234,6 +2281,7 @@ function App() {
       updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
       updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
         liveControlSnapshotRef.current = next
+        setLiveControlSnapshot(next)
       })
       if (activeTabRef.current === 'debug') {
         updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
@@ -2582,6 +2630,7 @@ function App() {
             setFanSyncLockEnabled,
             commitSmartChargingEnabled,
             commitProcessorStateControlEnabled,
+            commitNvidiaTelemetryEnabled,
             setUsbPowerEnabled,
             commitBlueLightFilterEnabled,
             setSelectedBootArt,
@@ -2602,6 +2651,7 @@ function App() {
             liveControls,
             (next) => {
               liveControlSnapshotRef.current = next
+              setLiveControlSnapshot(next)
             },
           )
           if (activeTabRef.current === 'debug') {
@@ -2651,6 +2701,7 @@ function App() {
           updateSerializedState(debugServiceStatusRef, null, setServiceStatus)
           updateSerializedState(liveControlSnapshotStateRef, null, (next) => {
             liveControlSnapshotRef.current = next
+            setLiveControlSnapshot(next)
           })
           updateSerializedState(telemetrySnapshotRef, null, setLiveTelemetry)
           if (activeTabRef.current === 'debug') {
@@ -2702,6 +2753,7 @@ function App() {
             liveControls,
             (next) => {
               liveControlSnapshotRef.current = next
+              setLiveControlSnapshot(next)
             },
           )
           if (activeTabRef.current === 'debug') {
@@ -2751,6 +2803,7 @@ function App() {
           updateSerializedState(debugServiceStatusRef, null, setServiceStatus)
           updateSerializedState(liveControlSnapshotStateRef, null, (next) => {
             liveControlSnapshotRef.current = next
+            setLiveControlSnapshot(next)
           })
           updateSerializedState(telemetrySnapshotRef, null, setLiveTelemetry)
           if (activeTabRef.current === 'debug') {
@@ -2930,6 +2983,7 @@ function App() {
           setFanSyncLockEnabled,
           commitSmartChargingEnabled,
           commitProcessorStateControlEnabled,
+          commitNvidiaTelemetryEnabled,
           setUsbPowerEnabled,
           commitBlueLightFilterEnabled,
           setSelectedBootArt,
@@ -3052,6 +3106,7 @@ function App() {
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3060,6 +3115,7 @@ function App() {
         setCheckForUpdatesOnLaunch,
       )
       liveControlSnapshotRef.current = liveControls
+      setLiveControlSnapshot(liveControls)
 
       setStatusMessage(
         !processorPolicyEnabled
@@ -3138,6 +3194,7 @@ function App() {
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3194,6 +3251,7 @@ function App() {
       setFanSyncLockEnabled,
       commitSmartChargingEnabled,
       commitProcessorStateControlEnabled,
+      commitNvidiaTelemetryEnabled,
       setUsbPowerEnabled,
       commitBlueLightFilterEnabled,
       setSelectedBootArt,
@@ -3202,6 +3260,7 @@ function App() {
       setCheckForUpdatesOnLaunch,
     )
     liveControlSnapshotRef.current = liveControls
+    setLiveControlSnapshot(liveControls)
     return result.detail
   }
 
@@ -3343,6 +3402,7 @@ function App() {
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3396,6 +3456,7 @@ function App() {
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3640,11 +3701,62 @@ function App() {
     )
   }
 
+  async function handleNvidiaTelemetryToggle() {
+    if (settingsActionPending) {
+      return
+    }
+
+    const previousEnabled = nvidiaTelemetryEnabledRef.current
+    const nextEnabled = !previousEnabled
+
+    commitNvidiaTelemetryEnabled(nextEnabled)
+    setSettingsActionPending('nvidia-telemetry')
+    setStatusMessage(
+      nextEnabled
+        ? 'Re-enabling NVIDIA telemetry polling...'
+        : 'Disabling NVIDIA telemetry polling so the dGPU can idle...',
+    )
+
+    try {
+      const result = await setNvidiaTelemetryEnabled(nextEnabled)
+      applyBackendControlSnapshot(
+        result.controls,
+        setActivePowerProfile,
+        setCustomProcessorState,
+        setCustomPowerBase,
+        setGpuOverclock,
+        setCustomOcSlot,
+        setActiveOcSlot,
+        setOcApplyState,
+        setOcTuningLocked,
+        setActiveFanProfile,
+        commitCustomCurves,
+        setFanSyncLockEnabled,
+        commitSmartChargingEnabled,
+        commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
+        setUsbPowerEnabled,
+        commitBlueLightFilterEnabled,
+        setSelectedBootArt,
+        setCustomBootFilename,
+        setUpdateChannel,
+        setCheckForUpdatesOnLaunch,
+      )
+      setStatusMessage(result.detail)
+    } catch (error) {
+      commitNvidiaTelemetryEnabled(previousEnabled)
+      setStatusMessage(`NVIDIA telemetry setting failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'nvidia-telemetry' ? null : current))
+    }
+  }
+
   function updateCustomProcessorState(
     field: 'min' | 'max',
     rawValue: number,
   ) {
-    const value = clamp(Math.round(rawValue), 5, 100)
+    const lowerBound = field === 'min' ? 0 : 5
+    const value = clamp(Math.round(rawValue), lowerBound, 100)
     const current = customProcessorStateRef.current
     const nextState =
       field === 'min'
@@ -3755,6 +3867,7 @@ function App() {
         setFanSyncLockEnabled,
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
+        commitNvidiaTelemetryEnabled,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3797,6 +3910,7 @@ function App() {
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
+          nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -3842,6 +3956,7 @@ function App() {
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
+          nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -4017,22 +4132,26 @@ function App() {
                   label="GPU Fan"
                   value={displayedGpuFanRpm}
                   detail={
-                    displayedGpuFanRpm == null
-                      ? 'Fan telemetry unavailable'
-                      : serviceConnected
+                    buildFanSpeedDetail(
+                      displayedGpuFanRpm,
+                      displayedGpuFanTargetPercent,
+                      serviceConnected
                         ? 'Live graphics cooling speed'
-                        : 'Cached graphics cooling speed'
+                        : 'Cached graphics cooling speed',
+                    )
                   }
                 />
                 <HomeFanReadoutCard
                   label="CPU Fan"
                   value={displayedCpuFanRpm}
                   detail={
-                    displayedCpuFanRpm == null
-                      ? 'Fan telemetry unavailable'
-                      : serviceConnected
+                    buildFanSpeedDetail(
+                      displayedCpuFanRpm,
+                      displayedCpuFanTargetPercent,
+                      serviceConnected
                         ? 'Live processor cooling speed'
-                        : 'Cached processor cooling speed'
+                        : 'Cached processor cooling speed',
+                    )
                   }
                 />
               </div>
@@ -4170,12 +4289,42 @@ function App() {
                       />
                     </div>
 
+                    <div className="fan-preset-dashboard fan-preset-dashboard--compact">
+                      <div className="fan-rpm-card">
+                        <div className="fan-rpm-card__fan fan-rpm-card__fan--gpu" />
+                        <div className="fan-rpm-card__content">
+                          <span className="eyebrow">GPU</span>
+                          <strong>{formatTelemetryValue(displayedGpuFanRpm)}</strong>
+                          <small>
+                            {formatFanSpeedMeta(
+                              displayedGpuFanRpm,
+                              displayedGpuFanTargetPercent,
+                            )}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className="fan-rpm-card">
+                        <div className="fan-rpm-card__fan fan-rpm-card__fan--cpu" />
+                        <div className="fan-rpm-card__content">
+                          <span className="eyebrow">CPU</span>
+                          <strong>{formatTelemetryValue(displayedCpuFanRpm)}</strong>
+                          <small>
+                            {formatFanSpeedMeta(
+                              displayedCpuFanRpm,
+                              displayedCpuFanTargetPercent,
+                            )}
+                          </small>
+                        </div>
+                      </div>
+                    </div>
+
                     <div className="fan-custom-footer">
                       <button className="button button--ghost" onClick={resetCustomCurve}>
                         Reset custom
                       </button>
                       <span>
-                        Custom mode stores edits immediately and refreshes the curve-derived fan target every 5 seconds.
+                        Custom mode stores edits immediately and refreshes the curve-derived fan target every 1 second.
                       </span>
                     </div>
                   </>
@@ -4187,7 +4336,12 @@ function App() {
                         <div className="fan-rpm-card__content">
                           <span className="eyebrow">GPU</span>
                           <strong>{formatTelemetryValue(displayedGpuFanRpm)}</strong>
-                          <small>{displayedGpuFanRpm == null ? '' : 'RPM'}</small>
+                          <small>
+                            {formatFanSpeedMeta(
+                              displayedGpuFanRpm,
+                              displayedGpuFanTargetPercent,
+                            )}
+                          </small>
                         </div>
                       </div>
 
@@ -4196,7 +4350,12 @@ function App() {
                         <div className="fan-rpm-card__content">
                           <span className="eyebrow">CPU</span>
                           <strong>{formatTelemetryValue(displayedCpuFanRpm)}</strong>
-                          <small>{displayedCpuFanRpm == null ? '' : 'RPM'}</small>
+                          <small>
+                            {formatFanSpeedMeta(
+                              displayedCpuFanRpm,
+                              displayedCpuFanTargetPercent,
+                            )}
+                          </small>
                         </div>
                       </div>
                     </div>
@@ -4367,6 +4526,7 @@ function App() {
                     <div className="power-custom-grid">
                       <ProcessorStateControl
                         label="Minimum Processor State"
+                        min={0}
                         value={customProcessorState.min}
                         onChange={(value) => updateCustomProcessorState('min', value)}
                       />
@@ -4712,6 +4872,29 @@ function App() {
                             className={`toggle ${processorStateControlEnabled ? 'is-on' : ''}`}
                             onClick={() => void handleProcessorStateControlToggle()}
                             aria-pressed={processorStateControlEnabled}
+                            type="button"
+                          >
+                            <span />
+                          </button>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>NVIDIA Telemetry Polling</strong>
+                            <p>
+                              {nvidiaTelemetryPending
+                                ? 'Applying the telemetry polling rule now.'
+                                : nvidiaTelemetryEnabled
+                                  ? 'AeroForge may read NVIDIA clocks, power, and limits when Windows reports active dGPU memory.'
+                                  : 'AeroForge skips NVIDIA clock and power polling so the dGPU can stay idle; firmware fan and temperature readings remain available.'}
+                            </p>
+                          </div>
+
+                          <button
+                            className={`toggle ${nvidiaTelemetryEnabled ? 'is-on' : ''}`}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleNvidiaTelemetryToggle()}
+                            aria-pressed={nvidiaTelemetryEnabled}
                             type="button"
                           >
                             <span />
@@ -5272,12 +5455,14 @@ function BootSplashPreview({ art, compact = false }: BootSplashPreviewProps) {
 
 type ProcessorStateControlProps = {
   label: string
+  min?: number
   value: number
   onChange: (value: number) => void
 }
 
 function ProcessorStateControl({
   label,
+  min = 5,
   value,
   onChange,
 }: ProcessorStateControlProps) {
@@ -5291,7 +5476,7 @@ function ProcessorStateControl({
       <input
         className="power-setting__slider"
         type="range"
-        min="5"
+        min={min}
         max="100"
         step="1"
         value={value}
@@ -5301,7 +5486,7 @@ function ProcessorStateControl({
       <input
         className="power-setting__input"
         type="number"
-        min="5"
+        min={min}
         max="100"
         step="1"
         value={value}

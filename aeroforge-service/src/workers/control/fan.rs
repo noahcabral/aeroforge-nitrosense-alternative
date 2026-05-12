@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::{thread, time::Duration};
+use std::{env, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -65,7 +65,14 @@ pub fn apply_custom_fan_curves(
         cpu_temp, requested_cpu_speed, cpu_speed, gpu_temp, requested_gpu_speed, gpu_speed
     );
 
-    apply_custom_wmi_fan_control(paths, curves, Some(cpu_speed), Some(gpu_speed), &context)
+    apply_custom_wmi_fan_control(
+        paths,
+        curves,
+        Some(cpu_speed),
+        Some(gpu_speed),
+        &context,
+        !request.quiet_success_log,
+    )
 }
 
 fn apply_firmware_wmi_fan_control(
@@ -158,15 +165,38 @@ fn apply_custom_wmi_fan_control(
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     context: &str,
+    log_success: bool,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    write_log_line(
-        &paths.component_log("control-fan"),
-        "INFO",
-        &format!(
-            "Applying custom fan curve by direct speed target only. {} Skipping SetGamingFanBehavior(Custom) because ANV16-41 feedback shows that behavior latch can pin fans to max on some firmware.",
-            context
-        ),
-    )?;
+    if log_success {
+        write_log_line(
+            &paths.component_log("control-fan"),
+            "INFO",
+            &format!(
+                "Applying custom fan curve by direct speed target. {}",
+                context
+            ),
+        )?;
+    }
+
+    let strategy = select_custom_fan_strategy(paths);
+    let behavior_result = if let Some(behavior_input) = strategy.behavior_input {
+        let result = apply_fan_behavior(behavior_input)?;
+        if wmi_output_accepted(&result) {
+            thread::sleep(Duration::from_millis(200));
+        } else {
+            write_log_line(
+                &paths.component_log("control-fan"),
+                "WARN",
+                &format!(
+                    "Custom fan strategy {} requested SetGamingFanBehavior(0x{behavior_input:08X}), but AcerGamingFunction returned gmOutput {:?}. Continuing with direct speed writes. {}",
+                    strategy.id, result.output, strategy.reason
+                ),
+            )?;
+        }
+        Some(result)
+    } else {
+        None
+    };
 
     let speed_results = match apply_direct_speed_targets(cpu_speed_percent, gpu_speed_percent) {
         Ok(results) => results,
@@ -225,16 +255,25 @@ fn apply_custom_wmi_fan_control(
         "namespace": "ROOT\\WMI",
         "class": "AcerGamingFunction",
         "instance": "ACPI\\PNP0C14\\APGe_0",
-        "strategy": "custom-direct-speed-only",
-        "behavior": null,
+        "strategy": strategy.id,
+        "strategyReason": strategy.reason,
+        "behavior": behavior_result.as_ref().map(wmi_result_json),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "verification": build_fan_verification(),
     }));
 
     let verification = build_fan_verification_detail();
-    let detail =
-        build_custom_apply_detail(context, cpu_speed_percent, gpu_speed_percent, &verification);
-    write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
+    let detail = build_custom_apply_detail(
+        context,
+        &strategy,
+        behavior_result.as_ref(),
+        cpu_speed_percent,
+        gpu_speed_percent,
+        &verification,
+    );
+    if log_success {
+        write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
+    }
 
     Ok(AppliedFanControlSnapshot {
         profile_id: FanProfileId::Custom,
@@ -313,6 +352,8 @@ fn build_apply_detail(
 
 fn build_custom_apply_detail(
     context: &str,
+    strategy: &CustomFanStrategy,
+    behavior_result: Option<&super::acer_wmi::AcerWmiMethodResult>,
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     verification: &str,
@@ -324,9 +365,114 @@ fn build_custom_apply_detail(
         _ => "No explicit per-fan speed write was requested.".into(),
     };
 
+    let behavior_detail = match behavior_result {
+        Some(result) => format!(
+            "SetGamingFanBehavior(0x{:08X}) was sent first by strategy {} and returned gmOutput {:?}. {}",
+            result.input, strategy.id, result.output, strategy.reason
+        ),
+        None => format!(
+            "No SetGamingFanBehavior write was sent by strategy {}. {}",
+            strategy.id, strategy.reason
+        ),
+    };
+
     format!(
-        "Custom fan curve target was applied through direct AcerGamingFunction SetGamingFanSpeed calls without SetGamingFanBehavior(Custom). {context} {speed_detail} {verification}"
+        "Custom fan curve target was applied through direct AcerGamingFunction SetGamingFanSpeed calls. {behavior_detail} {context} {speed_detail} {verification}"
     )
+}
+
+struct CustomFanStrategy {
+    id: &'static str,
+    reason: String,
+    behavior_input: Option<u64>,
+}
+
+fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
+    if let Ok(value) = env::var("AEROFORGE_CUSTOM_FAN_STRATEGY") {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "behavior" | "custom" | "custom-behavior"
+        ) {
+            return CustomFanStrategy {
+                id: "custom-behavior-then-direct-speed",
+                reason: "AEROFORGE_CUSTOM_FAN_STRATEGY requested the Acer Custom fan behavior latch before direct speed writes.".into(),
+                behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
+            };
+        }
+        if matches!(normalized.as_str(), "direct" | "direct-only" | "speed-only") {
+            return CustomFanStrategy {
+                id: "custom-direct-speed-only",
+                reason: "AEROFORGE_CUSTOM_FAN_STRATEGY requested direct speed writes without a firmware behavior latch.".into(),
+                behavior_input: None,
+            };
+        }
+    }
+
+    let identity = read_hardware_identity(paths);
+    let system_model = identity.system_model.to_ascii_lowercase();
+    let cpu_identity = format!("{} {}", identity.cpu_brand, identity.cpu_name).to_ascii_lowercase();
+
+    if system_model.contains("anv16-41")
+        || cpu_identity.contains("amd")
+        || cpu_identity.contains("ryzen")
+    {
+        return CustomFanStrategy {
+            id: "custom-direct-speed-only",
+            reason: format!(
+                "Direct-only selected for AMD/ANV16-family safety. Model '{}', CPU '{}'.",
+                identity.system_model, cpu_identity
+            ),
+            behavior_input: None,
+        };
+    }
+
+    if system_model.contains("anv15-52")
+        || cpu_identity.contains("genuineintel")
+        || cpu_identity.contains("intel")
+    {
+        return CustomFanStrategy {
+            id: "custom-behavior-then-direct-speed",
+            reason: format!(
+                "Acer Custom fan behavior latch selected for Intel/ANV15-family hardware so firmware stops treating direct speed targets like Auto. Model '{}', CPU '{}'.",
+                identity.system_model, cpu_identity
+            ),
+            behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
+        };
+    }
+
+    CustomFanStrategy {
+        id: "custom-direct-speed-only",
+        reason: format!(
+            "Direct-only selected for unknown hardware. Model '{}', CPU '{}'.",
+            identity.system_model, cpu_identity
+        ),
+        behavior_input: None,
+    }
+}
+
+#[derive(Default)]
+struct HardwareIdentity {
+    cpu_name: String,
+    cpu_brand: String,
+    system_model: String,
+}
+
+fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentity {
+    let raw = match std::fs::read_to_string(paths.worker_snapshot("telemetry")) {
+        Ok(raw) => raw,
+        Err(_) => return HardwareIdentity::default(),
+    };
+    let value = match serde_json::from_str::<Value>(&raw) {
+        Ok(value) => value,
+        Err(_) => return HardwareIdentity::default(),
+    };
+
+    HardwareIdentity {
+        cpu_name: get_string(&value, "cpuName"),
+        cpu_brand: get_string(&value, "cpuBrand"),
+        system_model: get_string(&value, "systemModel"),
+    }
 }
 
 fn build_fan_verification_detail() -> String {
@@ -443,6 +589,16 @@ fn read_current_temperatures(paths: &ServicePaths) -> CurrentTemperatures {
 fn get_u8(value: &Value, keys: &[&str]) -> Option<u8> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(value_to_u8))
+}
+
+fn get_string(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn value_to_u8(value: &Value) -> Option<u8> {

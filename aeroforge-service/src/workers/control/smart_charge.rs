@@ -18,6 +18,10 @@ struct BatteryControlApplyOutput {
     set_attempt: Option<String>,
     #[serde(default)]
     matched_status_index: Option<usize>,
+    #[serde(default)]
+    matched_battery_no: Option<u8>,
+    #[serde(default)]
+    matched_function_query: Option<u8>,
 }
 
 pub fn apply_smart_charging(
@@ -59,11 +63,19 @@ pub fn apply_smart_charging(
 }
 
 fn battery_control_attempt_detail(output: &BatteryControlApplyOutput) -> String {
-    match (&output.set_attempt, output.matched_status_index) {
-        (Some(attempt), Some(index)) => {
+    match (
+        &output.set_attempt,
+        output.matched_status_index,
+        output.matched_battery_no,
+        output.matched_function_query,
+    ) {
+        (Some(attempt), Some(index), Some(battery_no), Some(query)) => {
+            format!("Matched BatteryControl battery {battery_no} query {query} status byte {index} with {attempt}.")
+        }
+        (Some(attempt), Some(index), _, _) => {
             format!("Matched BatteryControl status byte {index} with {attempt}.")
         }
-        (Some(attempt), None) => format!("Matched BatteryControl readback with {attempt}."),
+        (Some(attempt), None, _, _) => format!("Matched BatteryControl readback with {attempt}."),
         _ => "Matched BatteryControl readback.".into(),
     }
 }
@@ -218,105 +230,145 @@ $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorA
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
 function Read-HealthStatus {
-  param($Battery)
+  param($Battery, [int]$BatteryNo, [int]$FunctionQuery)
   $get = Invoke-CimMethod -InputObject $Battery -MethodName GetBatteryHealthControlStatus -Arguments @{
-    uBatteryNo = [byte]1
-    uFunctionQuery = [byte]1
+    uBatteryNo = [byte]$BatteryNo
+    uFunctionQuery = [byte]$FunctionQuery
     uReserved = ([byte[]](0,0))
   } -ErrorAction Stop
   return $get
 }
 
 function New-StatusBytes {
-  param([int]$First, [int]$Second)
-  return ([byte[]]@([byte]$First,[byte]$Second,0,0,0))
+  param([int]$First, [int]$Second, [int]$Third)
+  return ([byte[]]@([byte]$First,[byte]$Second,[byte]$Third,0,0))
 }
 
-function Test-DesiredStatus {
-  param($GetResult, [int]$Requested)
-  $statuses = @($GetResult.uFunctionStatus | ForEach-Object { [int]$_ })
-  if ($statuses.Count -lt 2) {
-    return [ordered]@{ ok = $false; health = $null; index = $null }
-  }
-
-  if ($Requested -eq 0) {
-    if ($statuses[0] -eq 0 -and $statuses[1] -eq 0) {
-      return [ordered]@{ ok = $true; health = 0; index = 0 }
+function Find-DesiredStatus {
+  param($Battery, [int]$Requested)
+  $reads = New-Object System.Collections.Generic.List[object]
+  foreach ($batteryNo in @(0,1,2,3)) {
+    foreach ($query in @(0,1,2,3,4,5)) {
+      try {
+        $get = Read-HealthStatus -Battery $Battery -BatteryNo $batteryNo -FunctionQuery $query
+        $statuses = @($get.uFunctionStatus | ForEach-Object { [int]$_ })
+        $reads.Add([ordered]@{
+          batteryNo = $batteryNo
+          functionQuery = $query
+          functionList = [int]$get.uFunctionList
+          functionStatus = $statuses
+          getReturn = @($get.uReturn)
+          result = $get
+        })
+      } catch {
+        $reads.Add([ordered]@{
+          batteryNo = $batteryNo
+          functionQuery = $query
+          error = $_.Exception.Message
+        })
+      }
     }
-    return [ordered]@{ ok = $false; health = [Math]::Max($statuses[0], $statuses[1]); index = $null }
   }
 
-  foreach ($index in @(0,1)) {
-    if ($statuses[$index] -eq $Requested) {
-      return [ordered]@{ ok = $true; health = $Requested; index = $index }
+  foreach ($read in $reads) {
+    if (-not $read.Contains('functionStatus')) { continue }
+    $statuses = @($read.functionStatus)
+    if ($Requested -eq 0) {
+      if ($statuses.Count -ge 2 -and $statuses[0] -eq 0 -and $statuses[1] -eq 0) {
+        return [ordered]@{ ok = $true; health = 0; index = 0; read = $read }
+      }
+      continue
+    }
+
+    for ($index = 0; $index -lt $statuses.Count; $index++) {
+      if ($statuses[$index] -eq $Requested) {
+        return [ordered]@{ ok = $true; health = $Requested; index = $index; read = $read }
+      }
     }
   }
 
-  return [ordered]@{ ok = $false; health = [Math]::Max($statuses[0], $statuses[1]); index = $null }
+  $best = $reads | Where-Object { $_.Contains('functionStatus') } | Select-Object -First 1
+  $health = -1
+  if ($best) {
+    $usable = @($best.functionStatus | Where-Object { $_ -ne 255 })
+    if ($usable.Count -gt 0) {
+      $health = [int]($usable | Measure-Object -Maximum).Maximum
+    }
+  }
+  return [ordered]@{ ok = $false; health = $health; index = $null; read = $best; reads = $reads }
 }
 
-$attempts = @(
-  @{
-    Name = 'legacy-byte0-array'
+$attempts = New-Object System.Collections.Generic.List[object]
+foreach ($batteryNo in @(0,1)) {
+  $attempts.Add(@{
+    Name = ('battery{0}-legacy-byte0-array' -f $batteryNo)
     Arguments = @{
-      uBatteryNo = [byte]1
+      uBatteryNo = [byte]$batteryNo
       uFunctionMask = [byte]1
-      uFunctionStatus = (New-StatusBytes -First $status -Second 0)
+      uFunctionStatus = (New-StatusBytes -First $status -Second 0 -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
-  },
-  @{
-    Name = 'legacy-byte0-scalar'
+  })
+  $attempts.Add(@{
+    Name = ('battery{0}-legacy-byte0-scalar' -f $batteryNo)
     Arguments = @{
-      uBatteryNo = [byte]1
+      uBatteryNo = [byte]$batteryNo
       uFunctionMask = [byte]1
       uFunctionStatus = $status
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
-  },
-  @{
-    Name = 'battery-health-byte1-array'
+  })
+  $attempts.Add(@{
+    Name = ('battery{0}-health-byte1-array' -f $batteryNo)
     Arguments = @{
-      uBatteryNo = [byte]1
+      uBatteryNo = [byte]$batteryNo
       uFunctionMask = [byte]2
-      uFunctionStatus = (New-StatusBytes -First 0 -Second $status)
+      uFunctionStatus = (New-StatusBytes -First 0 -Second $status -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
-  },
-  @{
-    Name = 'combined-byte0-byte1-array'
+  })
+  $attempts.Add(@{
+    Name = ('battery{0}-combined-byte0-byte1-array' -f $batteryNo)
     Arguments = @{
-      uBatteryNo = [byte]1
+      uBatteryNo = [byte]$batteryNo
       uFunctionMask = [byte]3
-      uFunctionStatus = (New-StatusBytes -First $status -Second $status)
+      uFunctionStatus = (New-StatusBytes -First $status -Second $status -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
-  }
-)
+  })
+}
 
 $errors = New-Object System.Collections.Generic.List[string]
 foreach ($attempt in $attempts) {
   try {
     $set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments $attempt.Arguments -ErrorAction Stop
     Start-Sleep -Milliseconds 250
-    $get = Read-HealthStatus -Battery $battery
-    $match = Test-DesiredStatus -GetResult $get -Requested ([int]$status)
+    $match = Find-DesiredStatus -Battery $battery -Requested ([int]$status)
     $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
     if ($match.ok) {
+      $read = $match.read
       [ordered]@{
         requestedHealthStatus = [int]$status
         healthStatus = $health
         setAttempt = $attempt.Name
         matchedStatusIndex = $match.index
-        functionList = [int]$get.uFunctionList
-        functionStatus = @($get.uFunctionStatus)
-        getReturn = @($get.uReturn)
+        matchedBatteryNo = $read.batteryNo
+        matchedFunctionQuery = $read.functionQuery
+        functionList = [int]$read.functionList
+        functionStatus = @($read.functionStatus)
+        getReturn = @($read.getReturn)
         setReturn = @($set.uReturn)
         setReservedOut = @($set.uReservedOut)
       } | ConvertTo-Json -Compress
       exit 0
     }
-    $errors.Add(('{0}: readback returned {1} with statuses [{2}] after requesting {3}' -f $attempt.Name, $health, (@($get.uFunctionStatus) -join ','), [int]$status))
+    $read = $match.read
+    $readDetail = if ($read -and $read.Contains('functionStatus')) {
+      ('batteryNo {0} query {1} statuses [{2}]' -f $read.batteryNo, $read.functionQuery, (@($read.functionStatus) -join ','))
+    } else {
+      'no readable health-status rows'
+    }
+    $errors.Add(('{0}: readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
   } catch {
     $errors.Add(('{0}: {1}' -f $attempt.Name, $_.Exception.Message))
   }

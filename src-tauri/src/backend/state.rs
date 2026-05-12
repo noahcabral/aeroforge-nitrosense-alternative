@@ -289,6 +289,11 @@ fn build_contract() -> BackendContract {
                 purpose: "Switch the primary display to 60 Hz while on battery and restore the captured refresh rate on AC or disable.".into(),
             },
             CommandDescriptor {
+                command: "set_nvidia_telemetry_enabled".into(),
+                stage: "implemented".into(),
+                purpose: "Enable or disable NVIDIA clock, power, and limit polling in the AeroForge service.".into(),
+            },
+            CommandDescriptor {
                 command: "set_charge_behavior".into(),
                 stage: "planned".into(),
                 purpose: "Control smart charging, USB power, and related battery behaviors.".into(),
@@ -460,6 +465,7 @@ fn build_default_controls() -> ControlSnapshot {
             smart_charging_enabled: true,
             usb_power_enabled: true,
             processor_state_control_enabled: true,
+            nvidia_telemetry_enabled: true,
             blue_light_filter_enabled: false,
             auto_refresh_rate_on_battery_enabled: false,
             auto_refresh_rate_restore_hz: None,

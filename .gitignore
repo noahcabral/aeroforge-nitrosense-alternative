@@ -29,6 +29,8 @@ dist-ssr
 .runtime-webview-before.json
 .runtime-webview-after.json
 portable/
+aeroforge logo no text.png
+aeroforge logo with text.png
 *.obj
 *.rmeta
 

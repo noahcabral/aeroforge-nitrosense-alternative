@@ -11,9 +11,12 @@ mod system;
 use models::{LowLevelSnapshot, TelemetrySnapshot};
 
 use crate::{
-    paths::ServicePaths,
+    paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
 };
+use std::sync::{Mutex, OnceLock};
+
+static NVIDIA_TELEMETRY_STATE_LOG: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new("telemetry-worker", run)
@@ -41,7 +44,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     let cpu_clock_mhz = cpu::read_cpu_clock_mhz(paths);
     let firmware = firmware::read_firmware_sensors(paths);
     let acer_hid_status = acer_hid_status::read_status_snapshot();
-    let gpu = gpu::read_gpu_snapshot(paths);
+    let gpu = read_gpu_snapshot(paths);
     let hardware_identity = hardware_identity::read_hardware_identity(paths);
     let low_level = read_low_level_snapshot(paths).unwrap_or_default();
     let cpu_thermal = cpu::build_cpu_thermal_snapshot(&low_level, &firmware);
@@ -104,6 +107,50 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     )?;
 
     Ok(())
+}
+
+fn read_gpu_snapshot(paths: &ServicePaths) -> models::GpuSnapshot {
+    if !nvidia_telemetry_enabled(paths) {
+        return models::GpuSnapshot::default();
+    }
+
+    gpu::read_gpu_snapshot(paths)
+}
+
+fn nvidia_telemetry_enabled(paths: &ServicePaths) -> bool {
+    let enabled = std::fs::read_to_string(paths.worker_snapshot("control"))
+        .ok()
+        .and_then(|raw| {
+            serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()
+        })
+        .and_then(|snapshot| {
+            snapshot
+                .get("nvidiaTelemetryEnabled")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(true);
+
+    log_nvidia_telemetry_state(paths, enabled);
+    enabled
+}
+
+fn log_nvidia_telemetry_state(paths: &ServicePaths, enabled: bool) {
+    let cache = NVIDIA_TELEMETRY_STATE_LOG.get_or_init(|| Mutex::new(None));
+    let Ok(mut last_enabled) = cache.lock() else {
+        return;
+    };
+
+    if last_enabled.as_ref() == Some(&enabled) {
+        return;
+    }
+
+    *last_enabled = Some(enabled);
+    let detail = if enabled {
+        "NVIDIA telemetry polling is enabled."
+    } else {
+        "NVIDIA telemetry polling is disabled; skipping NVML and nvidia-smi reads."
+    };
+    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
 }
 
 fn read_low_level_snapshot(

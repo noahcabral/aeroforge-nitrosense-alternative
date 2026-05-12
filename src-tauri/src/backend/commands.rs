@@ -13,9 +13,9 @@ use super::{
         ApplyState, BackendBootstrap, BackendContract, BackendPollSnapshot, BackendPollTimings,
         BlueLightApplyResult, BootLogoApplyResult, CapabilitySnapshot, ControlSnapshot,
         CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
-        PerformanceLogEvent, PersistenceStatus, PowerProfileId, ProcessorStateSettings,
-        ServiceStatus, ShellStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId,
-        UpdateStatus,
+        NvidiaTelemetryApplyResult, PerformanceLogEvent, PersistenceStatus, PowerProfileId,
+        ProcessorStateSettings, ServiceStatus, ShellStatus, SmartChargeApplyResult,
+        TelemetrySnapshot, UpdateChannelId, UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
@@ -391,6 +391,36 @@ pub fn apply_auto_refresh_rate(
     })
 }
 
+#[tauri::command]
+pub fn set_nvidia_telemetry_enabled(
+    enabled: bool,
+    state: State<'_, BackendState>,
+) -> Result<NvidiaTelemetryApplyResult, String> {
+    let service_result = service_pipe::apply_telemetry_settings(enabled);
+
+    let mut controls = state.controls();
+    controls.personal_settings.nvidia_telemetry_enabled = enabled;
+    let controls = state
+        .save_controls(controls)
+        .map_err(|error| error.to_string())?;
+
+    let (enabled, detail) = match service_result {
+        Ok(applied) => (applied.nvidia_telemetry_enabled, applied.detail),
+        Err(error) => (
+            enabled,
+            format!(
+                "Saved NVIDIA telemetry setting locally, but the service did not accept it yet: {error}"
+            ),
+        ),
+    };
+
+    Ok(NvidiaTelemetryApplyResult {
+        controls,
+        enabled,
+        detail,
+    })
+}
+
 fn merge_capabilities(
     desktop: CapabilitySnapshot,
     service: CapabilitySnapshot,
@@ -431,19 +461,25 @@ pub fn reset_control_snapshot(state: State<'_, BackendState>) -> Result<ControlS
 }
 
 #[tauri::command]
-pub fn apply_power_profile(
+pub async fn apply_power_profile(
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
     processor_state_control_enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
-    let applied = service_pipe::apply_power_profile(
-        profile_id.clone(),
-        processor_state.clone(),
-        custom_base_profile.clone(),
-        processor_state_control_enabled,
-    )
+    let custom_base_profile_for_apply = custom_base_profile.clone();
+    let custom_base_profile_for_save = custom_base_profile.clone();
+    let applied = tauri::async_runtime::spawn_blocking(move || {
+        service_pipe::apply_power_profile(
+            profile_id,
+            processor_state,
+            custom_base_profile_for_apply,
+            processor_state_control_enabled,
+        )
+    })
+    .await
+    .map_err(|error| format!("Power profile apply worker failed: {error}"))?
     .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
@@ -452,7 +488,7 @@ pub fn apply_power_profile(
         applied.processor_state_control_enabled;
     if matches!(controls.active_power_profile, PowerProfileId::Custom) {
         controls.custom_processor_state = applied.processor_state;
-        if let Some(custom_base_profile) = custom_base_profile {
+        if let Some(custom_base_profile) = custom_base_profile_for_save {
             controls.custom_power_base = custom_base_profile;
         }
     }
@@ -488,11 +524,15 @@ pub fn apply_gpu_tuning(
 }
 
 #[tauri::command]
-pub fn apply_fan_profile(
+pub async fn apply_fan_profile(
     profile_id: FanProfileId,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
-    let applied = service_pipe::apply_fan_profile(profile_id).map_err(|error| error.to_string())?;
+    let applied =
+        tauri::async_runtime::spawn_blocking(move || service_pipe::apply_fan_profile(profile_id))
+            .await
+            .map_err(|error| format!("Fan profile apply worker failed: {error}"))?
+            .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = applied.profile_id;
@@ -509,16 +549,21 @@ pub fn apply_fan_profile(
 }
 
 #[tauri::command]
-pub fn apply_custom_fan_curves(
+pub async fn apply_custom_fan_curves(
     curves: FanCurveSet,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
-    let applied =
-        service_pipe::apply_custom_fan_curves(curves.clone()).map_err(|error| error.to_string())?;
+    let curves_for_save = curves.clone();
+    let applied = tauri::async_runtime::spawn_blocking(move || {
+        service_pipe::apply_custom_fan_curves(curves.clone())
+    })
+    .await
+    .map_err(|error| format!("Custom fan curve apply worker failed: {error}"))?
+    .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = FanProfileId::Custom;
-    controls.fan_curves = applied.curves.unwrap_or(curves);
+    controls.fan_curves = applied.curves.unwrap_or(curves_for_save);
 
     let controls = state
         .save_controls(controls)

@@ -20,13 +20,14 @@ use std::sync::{Mutex, OnceLock};
 
 pub use models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
-    AppliedPowerProfileSnapshot, AppliedSmartChargeSnapshot, ApplyBootLogoRequest,
-    ApplyCustomFanCurvesRequest, ApplyFanProfileRequest, ApplyGpuTuningRequest,
-    ApplyPowerProfileRequest, ApplySmartChargeRequest, FanProfileId,
+    AppliedPowerProfileSnapshot, AppliedSmartChargeSnapshot, AppliedTelemetrySettingsSnapshot,
+    ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
+    ApplyGpuTuningRequest, ApplyPowerProfileRequest, ApplySmartChargeRequest,
+    ApplyTelemetrySettingsRequest, FanProfileId,
 };
 
 const WORKER_NAME: &str = "control-worker";
-const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 static FAN_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn registration() -> WorkerRegistration {
@@ -85,7 +86,13 @@ pub fn apply_fan_profile(
                 "Custom fan mode requires a saved curve before it can be applied.".to_string()
             })?;
 
-        return apply_custom_fan_curves_unlocked(paths, ApplyCustomFanCurvesRequest { curves });
+        return apply_custom_fan_curves_unlocked(
+            paths,
+            ApplyCustomFanCurvesRequest {
+                curves,
+                quiet_success_log: false,
+            },
+        );
     }
 
     match fan::apply_fan_profile(paths, request) {
@@ -145,6 +152,27 @@ pub fn apply_smart_charging(
     }
 }
 
+pub fn apply_telemetry_settings(
+    paths: &ServicePaths,
+    request: ApplyTelemetrySettingsRequest,
+) -> Result<AppliedTelemetrySettingsSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    state::persist_telemetry_settings(paths, request.nvidia_telemetry_enabled)?;
+
+    let detail = if request.nvidia_telemetry_enabled {
+        "NVIDIA telemetry polling enabled. AeroForge may read dGPU clocks, power, and limits when Windows reports active dGPU memory."
+    } else {
+        "NVIDIA telemetry polling disabled. AeroForge will skip NVML and nvidia-smi reads so the dGPU can idle."
+    }
+    .to_string();
+
+    write_log_line(&paths.component_log("control-telemetry"), "INFO", &detail)?;
+
+    Ok(AppliedTelemetrySettingsSnapshot {
+        nvidia_telemetry_enabled: request.nvidia_telemetry_enabled,
+        detail,
+    })
+}
+
 pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
@@ -181,7 +209,13 @@ fn run(
     event_tx: WorkerEventSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(&paths)?;
-    restore_startup_state(&paths)?;
+    if let Err(error) = restore_startup_state(&paths) {
+        let _ = write_log_line(
+            &paths.component_log("control-worker"),
+            "ERROR",
+            &format!("Startup restore failed and will be retried by the periodic worker: {error}"),
+        );
+    }
 
     run_periodic_worker(
         WORKER_NAME,
@@ -196,7 +230,19 @@ fn run(
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
-    let snapshot = state::load_snapshot(paths)?;
+    let snapshot = match state::load_snapshot(paths) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = write_log_line(
+                &paths.component_log("control-worker"),
+                "ERROR",
+                &format!(
+                    "Control snapshot was temporarily unavailable; next tick will retry: {error}"
+                ),
+            );
+            return Ok(());
+        }
+    };
     if !matches!(snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
         return Ok(());
     }
@@ -210,7 +256,13 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         .lock()
         .map_err(|_| "Fan apply lock was poisoned.")?;
 
-    match fan::apply_custom_fan_curves(paths, ApplyCustomFanCurvesRequest { curves }) {
+    match fan::apply_custom_fan_curves(
+        paths,
+        ApplyCustomFanCurvesRequest {
+            curves,
+            quiet_success_log: true,
+        },
+    ) {
         Ok(applied) => state::persist_fan_apply_success(paths, &applied)?,
         Err(error) => {
             let detail = format!("Periodic custom fan curve refresh failed: {error}");
@@ -282,7 +334,13 @@ fn restore_startup_state(
     match fan_profile {
         FanProfileId::Custom => {
             if let Some(curves) = snapshot.active_fan_curves.clone() {
-                match apply_custom_fan_curves(paths, ApplyCustomFanCurvesRequest { curves }) {
+                match apply_custom_fan_curves(
+                    paths,
+                    ApplyCustomFanCurvesRequest {
+                        curves,
+                        quiet_success_log: false,
+                    },
+                ) {
                     Ok(applied) => {
                         let _ = write_log_line(
                             &paths.component_log("control-fan"),

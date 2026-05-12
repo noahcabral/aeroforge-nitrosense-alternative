@@ -197,6 +197,8 @@ pub struct PersonalSettings {
     pub usb_power_enabled: bool,
     #[serde(default = "default_true")]
     pub processor_state_control_enabled: bool,
+    #[serde(default = "default_true")]
+    pub nvidia_telemetry_enabled: bool,
     #[serde(default)]
     pub blue_light_filter_enabled: bool,
     #[serde(default)]
@@ -259,6 +261,10 @@ pub struct LiveControlSnapshot {
     pub active_fan_profile: Option<FanProfileId>,
     #[serde(default)]
     pub active_fan_curves: Option<FanCurveSet>,
+    #[serde(default)]
+    pub current_cpu_fan_speed_percent: Option<u8>,
+    #[serde(default)]
+    pub current_gpu_fan_speed_percent: Option<u8>,
     #[serde(default)]
     pub last_fan_applied_at_unix: Option<u64>,
     #[serde(default = "default_waiting_fan_apply_detail")]
@@ -430,6 +436,14 @@ pub struct DisplayRefreshApplyResult {
     pub current_hz: u32,
     pub applied_hz: Option<u32>,
     pub restore_hz: Option<u32>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NvidiaTelemetryApplyResult {
+    pub controls: ControlSnapshot,
+    pub enabled: bool,
     pub detail: String,
 }
 

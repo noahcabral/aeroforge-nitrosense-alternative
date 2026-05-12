@@ -4,6 +4,7 @@ use serde_json::Value;
 use crate::workers::control::{
     ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
     ApplyGpuTuningRequest, ApplyPowerProfileRequest, ApplySmartChargeRequest,
+    ApplyTelemetrySettingsRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +31,9 @@ pub enum PipeRequest {
     },
     ApplySmartCharging {
         payload: ApplySmartChargeRequest,
+    },
+    ApplyTelemetrySettings {
+        payload: ApplyTelemetrySettingsRequest,
     },
 }
 

@@ -860,6 +860,33 @@
   border-bottom: 1px solid rgba(236, 120, 46, 0.18);
 }
 
+.fan-preset-dashboard--compact {
+  padding: 0.85rem 0 1rem;
+}
+
+.fan-preset-dashboard--compact .fan-rpm-card {
+  grid-template-columns: 88px 1fr;
+  min-height: 104px;
+}
+
+.fan-preset-dashboard--compact .fan-rpm-card__fan {
+  width: 78px;
+  height: 78px;
+}
+
+.fan-preset-dashboard--compact .fan-rpm-card__fan::after {
+  inset: 14px;
+}
+
+.fan-preset-dashboard--compact .fan-rpm-card__content strong {
+  font-size: 2.3rem;
+  letter-spacing: 0;
+}
+
+.fan-preset-dashboard--compact .fan-rpm-card__content small {
+  font-size: 0.95rem;
+}
+
 .power-gauge-card {
   display: grid;
   grid-template-columns: 170px 1fr;

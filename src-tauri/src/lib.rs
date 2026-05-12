@@ -1,7 +1,7 @@
 mod backend;
 
 use backend::{
-    blue_light, commands, nitro_guard, nitro_key, single_instance, smart_charge,
+    blue_light, commands, nitro_guard, nitro_key, service_pipe, single_instance, smart_charge,
     state::BackendState,
 };
 use tauri::Manager;
@@ -33,6 +33,7 @@ pub fn run() {
             commands::apply_blue_light_filter,
             commands::apply_smart_charging,
             commands::apply_auto_refresh_rate,
+            commands::set_nvidia_telemetry_enabled,
             commands::save_control_snapshot,
             commands::reset_control_snapshot,
             commands::apply_power_profile,
@@ -53,6 +54,10 @@ pub fn run() {
                 .controls()
                 .personal_settings
                 .smart_charging_enabled;
+            let saved_nvidia_telemetry_state = backend_state
+                .controls()
+                .personal_settings
+                .nvidia_telemetry_enabled;
             app.manage(backend_state);
             nitro_guard::start();
             nitro_key::start(app.handle().clone());
@@ -64,6 +69,10 @@ pub fn run() {
                 saved_smart_charge_state,
             )) {
                 eprintln!("AeroForge smart-charge sync failed during startup: {error}");
+            }
+            if let Err(error) = service_pipe::apply_telemetry_settings(saved_nvidia_telemetry_state)
+            {
+                eprintln!("AeroForge NVIDIA telemetry sync failed during startup: {error}");
             }
 
             if cfg!(debug_assertions) {

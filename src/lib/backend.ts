@@ -102,6 +102,7 @@ export type PersonalSettings = {
   smartChargingEnabled: boolean
   usbPowerEnabled: boolean
   processorStateControlEnabled: boolean
+  nvidiaTelemetryEnabled: boolean
   blueLightFilterEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
@@ -141,6 +142,8 @@ export type LiveControlSnapshot = {
   lastError: string | null
   activeFanProfile: FanProfileId | null
   activeFanCurves: FanCurveSet | null
+  currentCpuFanSpeedPercent: number | null
+  currentGpuFanSpeedPercent: number | null
   lastFanAppliedAtUnix: number | null
   lastFanApplyDetail: string
   lastFanError: string | null
@@ -242,6 +245,12 @@ export type DisplayRefreshApplyResult = {
   currentHz: number
   appliedHz: number | null
   restoreHz: number | null
+  detail: string
+}
+
+export type NvidiaTelemetryApplyResult = {
+  controls: ControlSnapshot
+  enabled: boolean
   detail: string
 }
 
@@ -355,6 +364,10 @@ export async function applySmartCharging(enabled: boolean) {
 
 export async function applyAutoRefreshRate(enabled: boolean, onBattery: boolean) {
   return invoke<DisplayRefreshApplyResult>('apply_auto_refresh_rate', { enabled, onBattery })
+}
+
+export async function setNvidiaTelemetryEnabled(enabled: boolean) {
+  return invoke<NvidiaTelemetryApplyResult>('set_nvidia_telemetry_enabled', { enabled })
 }
 
 export async function saveControlSnapshot(snapshot: ControlSnapshot) {

@@ -58,6 +58,9 @@ enum PipeRequest {
     ApplySmartCharging {
         payload: ApplySmartChargeRequest,
     },
+    ApplyTelemetrySettings {
+        payload: ApplyTelemetrySettingsRequest,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +110,12 @@ struct ApplySmartChargeRequest {
     enabled: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyTelemetrySettingsRequest {
+    nvidia_telemetry_enabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedPowerProfilePayload {
@@ -146,6 +155,13 @@ pub struct AppliedSmartChargePayload {
     pub enabled: bool,
     pub battery_healthy: u8,
     pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedTelemetrySettingsPayload {
+    pub nvidia_telemetry_enabled: bool,
     pub detail: String,
 }
 
@@ -338,6 +354,19 @@ pub fn apply_smart_charging(
         payload: ApplySmartChargeRequest { enabled },
     })?;
     Ok(serde_json::from_value::<AppliedSmartChargePayload>(
+        payload,
+    )?)
+}
+
+pub fn apply_telemetry_settings(
+    nvidia_telemetry_enabled: bool,
+) -> Result<AppliedTelemetrySettingsPayload, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = request(PipeRequest::ApplyTelemetrySettings {
+        payload: ApplyTelemetrySettingsRequest {
+            nvidia_telemetry_enabled,
+        },
+    })?;
+    Ok(serde_json::from_value::<AppliedTelemetrySettingsPayload>(
         payload,
     )?)
 }

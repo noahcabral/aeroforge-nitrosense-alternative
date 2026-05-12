@@ -25,8 +25,9 @@ const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
-const DISCRETE_GPU_ACTIVE_DEDICATED_BYTES: f64 = 16.0 * 1024.0 * 1024.0;
+const GPU_ACTIVE_ENGINE_PERCENT: f64 = 1.0;
 const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
+const GPU_ENGINE_UTILIZATION_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
 const ERROR_SUCCESS: u32 = 0;
 
 type NvmlDevice = *mut c_void;
@@ -92,8 +93,17 @@ struct GpuTelemetryCache {
 struct GpuActivitySample {
     active: bool,
     adapter_count: usize,
+    engine_sample_count: usize,
+    active_engine_sample_count: usize,
     max_dedicated_bytes: f64,
     total_dedicated_bytes: f64,
+    max_engine_utilization_percent: f64,
+    target_adapter_key: Option<String>,
+}
+
+struct PdhCounterSample {
+    name: String,
+    value: f64,
 }
 
 impl RefreshState for GpuTelemetryCache {
@@ -185,7 +195,7 @@ fn gpu_activity_gate_allows_nvml(
                 let cooldown_active = gate_cooldown_active(&guard, now);
                 let allows_nvml = sample.active || cooldown_active;
                 let reason = if sample.active {
-                    "dedicated-memory-threshold"
+                    "gpu-engine-active"
                 } else if cooldown_active {
                     "recent-dgpu-activity-cooldown"
                 } else {
@@ -270,37 +280,82 @@ fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send 
 
 fn query_windows_discrete_gpu_activity(
 ) -> Result<GpuActivitySample, Box<dyn std::error::Error + Send + Sync>> {
-    let usages = read_gpu_adapter_dedicated_usage_bytes()?;
-    Ok(GpuActivitySample::from_dedicated_usages(usages))
+    let adapter_samples = read_pdh_counter_samples(GPU_ADAPTER_DEDICATED_USAGE_COUNTER)
+        .unwrap_or_else(|_| Vec::new());
+    let engine_samples = read_pdh_counter_samples(GPU_ENGINE_UTILIZATION_COUNTER)?;
+    Ok(GpuActivitySample::from_pdh_samples(
+        adapter_samples,
+        engine_samples,
+    ))
 }
 
 impl GpuActivitySample {
-    fn from_dedicated_usages(usages: Vec<f64>) -> Self {
-        let adapter_count = usages.len();
-        let max_dedicated_bytes = usages.iter().copied().fold(0.0, f64::max);
-        let total_dedicated_bytes = usages.iter().sum();
-        let active = usages
+    fn from_pdh_samples(
+        adapter_samples: Vec<PdhCounterSample>,
+        engine_samples: Vec<PdhCounterSample>,
+    ) -> Self {
+        let adapter_count = adapter_samples.len();
+        let engine_sample_count = engine_samples.len();
+        let max_dedicated_bytes = adapter_samples
             .iter()
-            .any(|usage| *usage >= DISCRETE_GPU_ACTIVE_DEDICATED_BYTES);
+            .map(|sample| sample.value)
+            .fold(0.0, f64::max);
+        let total_dedicated_bytes = adapter_samples.iter().map(|sample| sample.value).sum();
+        let target_adapter_key = adapter_samples
+            .iter()
+            .max_by(|left, right| {
+                left.value
+                    .partial_cmp(&right.value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|sample| extract_gpu_adapter_key(&sample.name));
+
+        let matching_engine_samples = engine_samples
+            .iter()
+            .filter(|sample| match target_adapter_key.as_deref() {
+                Some(target) => extract_gpu_adapter_key(&sample.name)
+                    .as_deref()
+                    .map(|key| key == target)
+                    .unwrap_or(false),
+                None => true,
+            })
+            .collect::<Vec<_>>();
+        let max_engine_utilization_percent = matching_engine_samples
+            .iter()
+            .map(|sample| sample.value)
+            .fold(0.0, f64::max);
+        let active_engine_sample_count = matching_engine_samples
+            .iter()
+            .filter(|sample| sample.value >= GPU_ACTIVE_ENGINE_PERCENT)
+            .count();
+        let active = active_engine_sample_count > 0;
 
         Self {
             active,
             adapter_count,
+            engine_sample_count,
+            active_engine_sample_count,
             max_dedicated_bytes,
             total_dedicated_bytes,
+            max_engine_utilization_percent,
+            target_adapter_key,
         }
     }
 
     fn format_gate_detail(&self, allows_nvml: bool, reason: &str) -> String {
         format!(
-            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} maxDedicated={:.1}MB totalDedicated={:.1}MB threshold={:.1}MB.",
+            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} engineSamples={} activeEngineSamples={} targetAdapter={} maxEngine={:.1}% engineThreshold={:.1}% maxDedicated={:.1}MB totalDedicated={:.1}MB. Dedicated memory is diagnostic only and does not open the NVML gate.",
             self.active,
             allows_nvml,
             reason,
             self.adapter_count,
+            self.engine_sample_count,
+            self.active_engine_sample_count,
+            self.target_adapter_key.as_deref().unwrap_or("unknown"),
+            self.max_engine_utilization_percent,
+            GPU_ACTIVE_ENGINE_PERCENT,
             bytes_to_mib(self.max_dedicated_bytes),
             bytes_to_mib(self.total_dedicated_bytes),
-            bytes_to_mib(DISCRETE_GPU_ACTIVE_DEDICATED_BYTES),
         )
     }
 }
@@ -309,9 +364,17 @@ fn bytes_to_mib(bytes: f64) -> f64 {
     bytes / 1024.0 / 1024.0
 }
 
-fn read_gpu_adapter_dedicated_usage_bytes(
-) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
-    let counter_path = wide_null(GPU_ADAPTER_DEDICATED_USAGE_COUNTER);
+fn extract_gpu_adapter_key(name: &str) -> Option<String> {
+    let start = name.find("luid_")?;
+    let tail = &name[start..];
+    let end = tail.find("_eng_").unwrap_or(tail.len());
+    Some(tail[..end].to_string())
+}
+
+fn read_pdh_counter_samples(
+    counter: &str,
+) -> Result<Vec<PdhCounterSample>, Box<dyn std::error::Error + Send + Sync>> {
+    let counter_path = wide_null(counter);
     let mut query: PDH_HQUERY = null_mut();
     pdh_call(
         unsafe { PdhOpenQueryW(null(), 0, &mut query) },
@@ -365,17 +428,33 @@ fn read_gpu_adapter_dedicated_usage_bytes(
     )?;
 
     let items = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize) };
-    let mut usages = Vec::with_capacity(items.len());
+    let mut samples = Vec::with_capacity(items.len());
     for item in items {
         if item.FmtValue.CStatus == ERROR_SUCCESS {
             let value = unsafe { item.FmtValue.Anonymous.doubleValue };
             if value.is_finite() && value >= 0.0 {
-                usages.push(value);
+                samples.push(PdhCounterSample {
+                    name: unsafe { wide_ptr_to_string(item.szName) },
+                    value,
+                });
             }
         }
     }
 
-    Ok(usages)
+    Ok(samples)
+}
+
+unsafe fn wide_ptr_to_string(value: *const u16) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+
+    let mut len = 0usize;
+    while *value.add(len) != 0 {
+        len += 1;
+    }
+
+    String::from_utf16_lossy(std::slice::from_raw_parts(value, len))
 }
 
 struct PdhQuery(PDH_HQUERY);

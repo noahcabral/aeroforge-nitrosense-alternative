@@ -113,6 +113,20 @@ pub fn process_request(
                 },
             }
         }
+        PipeRequest::ApplyTelemetrySettings { payload } => {
+            match control::apply_telemetry_settings(paths, payload) {
+                Ok(applied) => PipeResponse::Ok {
+                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
+                        json!({
+                            "detail": format!("Applied telemetry settings but failed to serialize response: {error}")
+                        })
+                    }),
+                },
+                Err(error) => PipeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
     }
 }
 
@@ -141,5 +155,7 @@ fn read_snapshot(
     path: impl AsRef<Path>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str::<Value>(&raw)?)
+    Ok(serde_json::from_str::<Value>(
+        raw.trim_start_matches('\u{feff}'),
+    )?)
 }

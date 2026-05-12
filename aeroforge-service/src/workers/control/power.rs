@@ -145,7 +145,7 @@ pub fn apply_power_profile(
 fn sanitize_processor_state(
     processor_state: ProcessorStateSettings,
 ) -> Result<ProcessorStateSettings, Box<dyn std::error::Error + Send + Sync>> {
-    let min_percent = processor_state.min_percent.clamp(5, 100);
+    let min_percent = processor_state.min_percent.clamp(0, 100);
     let max_percent = processor_state.max_percent.clamp(5, 100);
 
     if min_percent > max_percent {

@@ -103,6 +103,8 @@ pub struct ApplyFanProfileRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyCustomFanCurvesRequest {
     pub curves: FanCurveSet,
+    #[serde(default)]
+    pub quiet_success_log: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -117,6 +119,12 @@ pub struct ApplyBootLogoRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ApplySmartChargeRequest {
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTelemetrySettingsRequest {
+    pub nvidia_telemetry_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -177,6 +185,13 @@ pub struct AppliedSmartChargeSnapshot {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppliedTelemetrySettingsSnapshot {
+    pub nvidia_telemetry_enabled: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlSnapshot {
     pub service: String,
     pub power_apply_supported: bool,
@@ -192,6 +207,8 @@ pub struct ControlSnapshot {
     pub custom_base_profile: Option<CustomPowerBaseId>,
     #[serde(default = "default_true")]
     pub processor_state_control_enabled: bool,
+    #[serde(default = "default_true")]
+    pub nvidia_telemetry_enabled: bool,
     #[serde(default)]
     pub processor_state_readback: Option<ProcessorStateReadback>,
     #[serde(default)]
@@ -211,6 +228,10 @@ pub struct ControlSnapshot {
     pub active_fan_profile: Option<FanProfileId>,
     #[serde(default)]
     pub active_fan_curves: Option<FanCurveSet>,
+    #[serde(default)]
+    pub current_cpu_fan_speed_percent: Option<u8>,
+    #[serde(default)]
+    pub current_gpu_fan_speed_percent: Option<u8>,
     #[serde(default)]
     pub last_fan_applied_at_unix: Option<u64>,
     #[serde(default = "default_waiting_fan_apply_detail")]
@@ -258,6 +279,7 @@ impl ControlSnapshot {
             }),
             custom_base_profile: None,
             processor_state_control_enabled: true,
+            nvidia_telemetry_enabled: true,
             processor_state_readback: None,
             processor_state_drift_detected: false,
             last_applied_at_unix: None,
@@ -269,6 +291,8 @@ impl ControlSnapshot {
             last_gpu_tuning_error: None,
             active_fan_profile: Some(FanProfileId::Auto),
             active_fan_curves: None,
+            current_cpu_fan_speed_percent: None,
+            current_gpu_fan_speed_percent: None,
             last_fan_applied_at_unix: None,
             last_fan_apply_detail: default_waiting_fan_apply_detail(),
             last_fan_error: None,
