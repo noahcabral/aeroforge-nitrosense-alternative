@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::{process::Command, sync::OnceLock, thread, time::Duration};
+use std::{env, process::Command, sync::OnceLock, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -321,44 +321,41 @@ fn apply_acer_platform_profile_or_fallback(
     balanced_base_for_custom: bool,
     custom_base_label: Option<&'static str>,
 ) -> String {
-    let supported_profiles_raw = read_misc_value_byte(MISC_SETTING_SUPPORTED_PROFILES);
-    let current_before = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
     let value = u8::try_from(input).unwrap_or_default();
-    let supported_detail = describe_supported_profiles(&supported_profiles_raw, value);
-    let before_detail = match current_before {
-        Ok(Some(value)) => format!("Current platform profile before apply read as 0x{value:02X}."),
-        Ok(None) => "Current platform profile before apply returned no gmOutput byte.".into(),
-        Err(error) => format!("Current platform profile before apply was unavailable: {error}."),
+    let mode_label = if balanced_base_for_custom {
+        custom_base_label.unwrap_or("performance")
+    } else {
+        profile_label
     };
 
-    let misc_result = apply_gaming_misc_setting(MISC_SETTING_PLATFORM_PROFILE, value);
-    let after_misc = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
-    match misc_result {
+    match apply_gaming_misc_setting(MISC_SETTING_PLATFORM_PROFILE, value) {
         Ok(result) if misc_setting_output_accepted(result.output, value) => {
-            let misc_confirmed = profile_readback_matches(&after_misc, value);
-            let mode_label = if balanced_base_for_custom {
-                custom_base_label.unwrap_or("performance")
-            } else {
-                profile_label
-            };
-            if misc_confirmed {
+            if profile_readback_enabled() {
+                let supported_profiles_raw = read_misc_value_byte(MISC_SETTING_SUPPORTED_PROFILES);
+                let after_misc = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
+                let supported_detail = describe_supported_profiles(&supported_profiles_raw, value);
+                if profile_readback_matches(&after_misc, value) {
+                    return format!(
+                        "Confirmed AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. {supported_detail} {}",
+                        result.output,
+                        describe_profile_readback(
+                            "Current platform profile after misc-setting write",
+                            &after_misc,
+                        )
+                    );
+                }
                 return format!(
-                    "Confirmed AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. {supported_detail} {before_detail} {}",
+                    "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}; readback did not confirm the target. {supported_detail} {} Legacy fallback skipped because the primary write was accepted.",
                     result.output,
-                    describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+                    describe_profile_readback(
+                        "Current platform profile after misc-setting write",
+                        &after_misc,
+                    )
                 );
             }
             return format!(
-                "AcerGamingFunction accepted SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}, but the follow-up platform-profile readback did not confirm the target. {supported_detail} {before_detail} {} {}",
-                result.output,
-                describe_profile_readback("Current platform profile after misc-setting write", &after_misc),
-                apply_legacy_gaming_profile(
-                    profile_label,
-                    input,
-                    value,
-                    balanced_base_for_custom,
-                    custom_base_label,
-                )
+                "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. Platform profile readback skipped for responsive profile switching; set AEROFORGE_PROFILE_READBACK=1 for diagnostics.",
+                result.output
             );
         }
         Ok(result) => {
@@ -370,9 +367,8 @@ fn apply_acer_platform_profile_or_fallback(
                 custom_base_label,
             );
             return format!(
-                "AcerGamingFunction rejected platform profile SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}. {supported_detail} {before_detail} {} {fallback}",
-                result.output,
-                describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+                "AcerGamingFunction rejected platform profile SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}. Platform readback skipped before fallback for responsive profile switching. {fallback}",
+                result.output
             );
         }
         Err(error) => {
@@ -384,8 +380,7 @@ fn apply_acer_platform_profile_or_fallback(
                 custom_base_label,
             );
             return format!(
-                "AcerGamingFunction platform profile misc-setting write unavailable: {error}. {supported_detail} {before_detail} {} {fallback}",
-                describe_profile_readback("Current platform profile after misc-setting write", &after_misc)
+                "AcerGamingFunction platform profile misc-setting write unavailable: {error}. Platform readback skipped before fallback for responsive profile switching. {fallback}"
             );
         }
     }
@@ -400,35 +395,54 @@ fn apply_legacy_gaming_profile(
 ) -> String {
     match apply_gaming_profile(input) {
         Ok(result) => {
-            let after_legacy = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
+            let after_legacy = profile_readback_enabled()
+                .then(|| read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE));
             let gm_output = result.output;
-            let readback_confirmed = profile_readback_matches(&after_legacy, target_profile_value);
+            let readback_confirmed = after_legacy
+                .as_ref()
+                .map(|readback| profile_readback_matches(readback, target_profile_value))
+                .unwrap_or(false);
+            let readback_detail = after_legacy
+                .as_ref()
+                .map(|readback| {
+                    describe_profile_readback(
+                        "Current platform profile after legacy profile write",
+                        readback,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "Current platform profile after legacy profile write readback skipped for responsive profile switching.".into()
+                });
             if readback_confirmed || legacy_gaming_profile_output_accepted(gm_output) {
                 if balanced_base_for_custom {
                     let verb = if readback_confirmed {
                         "Confirmed"
-                    } else {
+                    } else if profile_readback_enabled() {
                         "Accepted but did not confirm"
+                    } else {
+                        "Accepted"
                     };
                     format!(
                         "{verb} AcerGamingFunction {} base mode with SetGamingProfile({}) and gmOutput {:?} before layering the custom processor policy. {}",
                         custom_base_label.unwrap_or("performance"),
                         result.input,
                         gm_output,
-                        describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                        readback_detail
                     )
                 } else {
                     let verb = if readback_confirmed {
                         "Confirmed"
-                    } else {
+                    } else if profile_readback_enabled() {
                         "Accepted but did not confirm"
+                    } else {
+                        "Accepted"
                     };
                     format!(
                         "{verb} AcerGamingFunction {} mode with SetGamingProfile({}) and gmOutput {:?}. {}",
                         profile_label,
                         result.input,
                         gm_output,
-                        describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                        readback_detail
                     )
                 }
             } else if balanced_base_for_custom {
@@ -437,7 +451,7 @@ fn apply_legacy_gaming_profile(
                     custom_base_label.unwrap_or("performance"),
                     result.input,
                     gm_output,
-                    describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                    readback_detail
                 )
             } else {
                 format!(
@@ -445,7 +459,7 @@ fn apply_legacy_gaming_profile(
                     profile_label,
                     result.input,
                     gm_output,
-                    describe_profile_readback("Current platform profile after legacy profile write", &after_legacy)
+                    readback_detail
                 )
             }
         }
@@ -465,6 +479,12 @@ fn misc_setting_output_accepted(output: Option<u64>, expected: u8) -> bool {
 
 fn legacy_gaming_profile_output_accepted(output: Option<u64>) -> bool {
     matches!(output, None | Some(0) | Some(1))
+}
+
+fn profile_readback_enabled() -> bool {
+    env::var("AEROFORGE_PROFILE_READBACK")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 fn describe_supported_profiles(

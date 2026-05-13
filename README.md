@@ -93,15 +93,21 @@ Nitro / NVIDIA / WebView diagnostics, Windows event logs, power/display state,
 driver inventory, Defender status, startup entries, shortcut targets, update
 reachability, NVIDIA power-limit readback, AMD/CPU power diagnostics, read-only
 Acer WMI probes, app/service version facts, installer logs, UI performance logs,
-and a root `summary.json`.
+dxdiag output, filtered Windows Error Reporting crash inventories, and a root
+`summary.json`.
 
 The collector is read-only. It skips binaries, images, staged update payloads,
 WebView cache/storage folders, and token-like filenames, then redacts common
 token/password/secret strings in copied text files. Launch it with
-`-SampleSeconds 60` when you need a short CPU-frequency, fan-RPM, and AeroForge
-pipe sampling trace for intermittent AMD, power, or fan reports. Maintainers can
-add `-OutputRoot "C:\Temp\AeroForgeDebug"` to place the bundle somewhere other
-than the Desktop.
+`-Quick -PollSeconds 60` for a low-noise service/CPU/power/fan timeline, or
+`-Deep -PollSeconds 120 -PollIntervalMs 1000` for the full support timeline.
+Focused polling is also available, for example
+`-Poll fans pipe performance -PollSeconds 45 -PollIntervalMs 500` for custom fan
+or mode-switch lag, and `-Poll nvidia gpu-counters processes -PollSeconds 90`
+for dGPU idle or power-limit reports. Add `-NoNvidiaSmi` when testing whether
+NVIDIA command-line polling itself is waking the dGPU. Maintainers can add
+`-OutputRoot "C:\Temp\AeroForgeDebug"` to place the bundle somewhere other than
+the Desktop, or run `-ListOptions` to print every supported switch.
 
 ## Notes for backend wiring later
 

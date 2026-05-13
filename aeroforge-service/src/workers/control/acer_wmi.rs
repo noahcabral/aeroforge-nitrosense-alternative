@@ -70,7 +70,11 @@ pub const MISC_SETTING_SUPPORTED_PROFILES: u8 = 0x0A;
 pub const MISC_SETTING_PLATFORM_PROFILE: u8 = 0x0B;
 
 pub fn clamp_manual_fan_percent(percent: u8) -> u8 {
-    percent.clamp(MIN_MANUAL_FAN_PERCENT, 100)
+    if percent == 0 {
+        0
+    } else {
+        percent.clamp(MIN_MANUAL_FAN_PERCENT, 100)
+    }
 }
 
 pub fn decode_gm_output_byte(value: u64) -> u8 {
@@ -281,8 +285,9 @@ fn invoke_acer_gaming_u64_method_cim(
     com_error: String,
 ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
     let script = r#"
-$method = $args[0]
-$inputValue = [UInt64]$args[1]
+$method = $env:AEROFORGE_CIM_METHOD
+$inputValue = [UInt64]$env:AEROFORGE_CIM_INPUT
+if ([string]::IsNullOrWhiteSpace($method)) { throw 'AEROFORGE_CIM_METHOD was not provided.' }
 $gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
 if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
 if ($inputValue -le [UInt32]::MaxValue) {
@@ -302,14 +307,14 @@ if ($null -ne $result.gmOutput) {
 
     let output = Command::new("powershell")
         .creation_flags(CREATE_NO_WINDOW)
+        .env("AEROFORGE_CIM_METHOD", method)
+        .env("AEROFORGE_CIM_INPUT", input.to_string())
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
             script,
-            method,
-            &input.to_string(),
         ])
         .output()?;
 

@@ -29,17 +29,44 @@ if not "%AFD_EXIT%"=="0" (
 exit /b %AFD_EXIT%
 
 :: POWERSHELL_PAYLOAD
+[CmdletBinding(PositionalBinding=$false)]
 param(
   [switch]$NoPause,
   [switch]$NoElevate,
+  [switch]$Quick,
+  [switch]$Deep,
+  [switch]$Everything,
+  [switch]$ListOptions,
+  [switch]$NoZip,
+  [switch]$NoNvidiaSmi,
+  [string[]]$Poll = @("auto"),
   [int]$SampleSeconds = 0,
   [int]$SampleIntervalSeconds = 3,
-  [string]$OutputRoot = ""
+  [int]$PollSeconds = 0,
+  [int]$PollIntervalMs = 1000,
+  [string]$OutputRoot = "",
+  [Parameter(ValueFromRemainingArguments=$true)]
+  [string[]]$ExtraArgs = @()
 )
 
 $ErrorActionPreference = "Continue"
 $script:CommandIndex = 0
 $script:TranscriptStarted = $false
+$script:KnownPollCategories = @("auto", "none", "service", "pipe", "cpu", "power", "fans", "battery", "nvidia", "gpu-counters", "performance", "processes", "thermal", "acer", "all")
+
+$normalizedPoll = New-Object System.Collections.Generic.List[string]
+foreach ($rawPoll in @($Poll + $ExtraArgs)) {
+  foreach ($part in (($rawPoll -split '[,; ]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+    $value = $part.Trim().ToLowerInvariant()
+    if ($script:KnownPollCategories -contains $value) {
+      $normalizedPoll.Add($value) | Out-Null
+    }
+  }
+}
+if ($normalizedPoll.Count -eq 0) {
+  $normalizedPoll.Add("auto") | Out-Null
+}
+$Poll = @($normalizedPoll | Select-Object -Unique)
 
 trap {
   $message = $_.Exception.Message
@@ -136,6 +163,50 @@ function Test-IsAdmin {
   }
 }
 
+function Show-CollectorOptions {
+  $text = @"
+AeroForge Debug Collector options
+=================================
+
+Basic:
+  AeroForge-Debug-Collector.cmd
+  AeroForge-Debug-Collector.cmd -NoElevate
+  AeroForge-Debug-Collector.cmd -OutputRoot "C:\Temp\AeroForgeDebug"
+
+Timed polling:
+  -PollSeconds <seconds>       Enables timed polling. Use 60-180 seconds for most bug reports.
+  -PollIntervalMs <ms>         Poll interval. Default 1000. Use 250-500 for short lag captures.
+  -SampleSeconds <seconds>     Backward-compatible alias for timed polling.
+  -SampleIntervalSeconds <sec> Backward-compatible interval option.
+
+Polling presets:
+  -Quick                       Short low-noise poll: service pipe, CPU, power, fans.
+  -Deep                        Deep poll: service, CPU, power, fans, battery, NVIDIA, GPU counters, performance, processes, thermal, Acer.
+  -Everything                  Same as -Deep plus every currently known category.
+
+Polling categories:
+  -Poll service pipe cpu power fans battery nvidia gpu-counters performance processes thermal acer
+  -Poll all
+  -Poll none
+
+Useful examples:
+  AeroForge-Debug-Collector.cmd -Quick -PollSeconds 60
+  AeroForge-Debug-Collector.cmd -Deep -PollSeconds 120 -PollIntervalMs 1000
+  AeroForge-Debug-Collector.cmd -Poll fans pipe performance -PollSeconds 45 -PollIntervalMs 500
+  AeroForge-Debug-Collector.cmd -Poll nvidia gpu-counters processes -PollSeconds 90
+  AeroForge-Debug-Collector.cmd -Deep -NoNvidiaSmi
+
+Privacy / behavior:
+  -NoNvidiaSmi                 Skips nvidia-smi calls. Use this when testing whether NVIDIA queries keep the dGPU awake.
+  -NoZip                       Leaves the folder only and skips ZIP creation.
+  -NoPause                     Closes automatically when complete.
+  -ListOptions                 Prints this help text and exits.
+
+The collector is read-only. It does not apply fan, power, battery, EFI, display, registry, or firmware changes.
+"@
+  Write-Host $text
+}
+
 function Start-ElevatedCollectorIfNeeded {
   if ($script:IsAdmin -or $NoElevate) {
     return $false
@@ -150,6 +221,27 @@ function Start-ElevatedCollectorIfNeeded {
   if ($NoPause) {
     $argumentList.Add("-NoPause")
   }
+  if ($Quick) {
+    $argumentList.Add("-Quick")
+  }
+  if ($Deep) {
+    $argumentList.Add("-Deep")
+  }
+  if ($Everything) {
+    $argumentList.Add("-Everything")
+  }
+  if ($NoZip) {
+    $argumentList.Add("-NoZip")
+  }
+  if ($NoNvidiaSmi) {
+    $argumentList.Add("-NoNvidiaSmi")
+  }
+  if ($Poll.Count -gt 0) {
+    $argumentList.Add("-Poll")
+    foreach ($pollItem in $Poll) {
+      $argumentList.Add([string]$pollItem)
+    }
+  }
   if ($SampleSeconds -gt 0) {
     $argumentList.Add("-SampleSeconds")
     $argumentList.Add([string]$SampleSeconds)
@@ -157,6 +249,14 @@ function Start-ElevatedCollectorIfNeeded {
   if ($SampleIntervalSeconds -ne 3) {
     $argumentList.Add("-SampleIntervalSeconds")
     $argumentList.Add([string]$SampleIntervalSeconds)
+  }
+  if ($PollSeconds -gt 0) {
+    $argumentList.Add("-PollSeconds")
+    $argumentList.Add([string]$PollSeconds)
+  }
+  if ($PollIntervalMs -ne 1000) {
+    $argumentList.Add("-PollIntervalMs")
+    $argumentList.Add([string]$PollIntervalMs)
   }
   if (-not [string]::IsNullOrWhiteSpace($OutputRoot)) {
     $argumentList.Add("-OutputRoot")
@@ -531,7 +631,12 @@ function Get-AmdSmuAcpiWmiReadOnlyProbe {
   )) {
     $key = "HKLM\SYSTEM\CurrentControlSet\Services\$serviceName"
     "===== $key ====="
-    reg.exe query $key /s
+    $regOutput = & reg.exe query $key /s 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      $regOutput
+    } else {
+      "Registry key not present."
+    }
     ""
   }
 }
@@ -634,6 +739,18 @@ function Write-DebugSummaryJson {
   $summary = [ordered]@{
     generatedAt = (Get-Date -Format o)
     admin = $script:IsAdmin
+    collectorOptions = [ordered]@{
+      quick = [bool]$Quick
+      deep = [bool]$Deep
+      everything = [bool]$Everything
+      poll = @($Poll)
+      sampleSeconds = $SampleSeconds
+      sampleIntervalSeconds = $SampleIntervalSeconds
+      pollSeconds = $PollSeconds
+      pollIntervalMs = $PollIntervalMs
+      noNvidiaSmi = [bool]$NoNvidiaSmi
+      noZip = [bool]$NoZip
+    }
     os = $os
     computer = $computer
     processor = $processor
@@ -660,78 +777,387 @@ function Write-DebugSummaryJson {
   Write-TextFile -Path (Join-Path $script:BundleRoot "summary.json") -Text ($summary | ConvertTo-Json -Depth 8)
 }
 
+function Add-PollCategory {
+  param(
+    [System.Collections.Generic.List[string]]$Categories,
+    [string]$Category
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($Category) -and -not ($Categories -contains $Category)) {
+    $Categories.Add($Category) | Out-Null
+  }
+}
+
+function Resolve-PollCategories {
+  $categories = New-Object System.Collections.Generic.List[string]
+  $requested = @($Poll | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLowerInvariant() })
+
+  if ($requested.Count -eq 0) {
+    $requested = @("auto")
+  }
+
+  if ($requested -contains "none") {
+    return @()
+  }
+
+  if ($Everything -or $Deep -or ($requested -contains "all")) {
+    foreach ($category in @("service", "pipe", "cpu", "power", "fans", "battery", "nvidia", "gpu-counters", "performance", "processes", "thermal", "acer")) {
+      Add-PollCategory -Categories $categories -Category $category
+    }
+    return @($categories)
+  }
+
+  if ($Quick) {
+    foreach ($category in @("service", "pipe", "cpu", "power", "fans")) {
+      Add-PollCategory -Categories $categories -Category $category
+    }
+  }
+
+  foreach ($category in $requested) {
+    if ($category -eq "auto") {
+      foreach ($standardCategory in @("service", "pipe", "cpu", "power", "fans", "performance")) {
+        Add-PollCategory -Categories $categories -Category $standardCategory
+      }
+    } else {
+      Add-PollCategory -Categories $categories -Category $category
+    }
+  }
+
+  return @($categories)
+}
+
+function Get-EffectivePollSeconds {
+  if ($PollSeconds -gt 0) {
+    return $PollSeconds
+  }
+  if ($SampleSeconds -gt 0) {
+    return $SampleSeconds
+  }
+  return 0
+}
+
+function Get-EffectivePollIntervalMs {
+  if ($PollIntervalMs -gt 0) {
+    return [Math]::Max(100, $PollIntervalMs)
+  }
+  if ($SampleIntervalSeconds -gt 0) {
+    return [Math]::Max(100, $SampleIntervalSeconds * 1000)
+  }
+  return 1000
+}
+
+function Add-SamplingJsonLine {
+  param(
+    [string]$Path,
+    [object]$Object
+  )
+
+  $json = $Object | ConvertTo-Json -Depth 12 -Compress
+  Add-Content -LiteralPath $Path -Value (Redact-Text $json) -Encoding UTF8
+}
+
+function Get-PerformanceLogFiles {
+  $files = New-Object System.Collections.Generic.List[object]
+  foreach ($root in $script:AppDataCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique) {
+    Get-ChildItem -LiteralPath $root -Recurse -Force -Filter "performance.jsonl" -ErrorAction SilentlyContinue |
+      ForEach-Object { $files.Add($_) }
+  }
+  return @($files | Sort-Object FullName -Unique)
+}
+
+function Get-CpuPollSample {
+  $processor = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue |
+    Select-Object -First 1 Name, Manufacturer, CurrentClockSpeed, MaxClockSpeed, NumberOfCores, NumberOfLogicalProcessors
+  $total = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq "_Total" } |
+    Select-Object -First 1 Name, ProcessorFrequency, PercentProcessorPerformance, PercentProcessorTime, PercentPrivilegedTime, PercentUserTime
+  $perCore = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notmatch '^_Total$' -and $_.Name -notmatch ',_Total$' } |
+    Select-Object Name, ProcessorFrequency, PercentProcessorPerformance, PercentProcessorTime
+  [pscustomobject]@{
+    processor = $processor
+    total = $total
+    perCore = @($perCore)
+  }
+}
+
+function Get-PipePollSample {
+  [pscustomobject]@{
+    serviceStatus = Invoke-NamedPipeJsonRequest -Kind "getServiceStatus" -TimeoutMs 1500
+    capabilities = Invoke-NamedPipeJsonRequest -Kind "getCapabilities" -TimeoutMs 1500
+    telemetry = Invoke-NamedPipeJsonRequest -Kind "getTelemetrySnapshot" -TimeoutMs 1500
+    controls = Invoke-NamedPipeJsonRequest -Kind "getControlSnapshot" -TimeoutMs 1500
+  }
+}
+
+function Get-ServicePollSample {
+  $svc = Get-CimInstance Win32_Service -Filter "Name='AeroForgeService'" -ErrorAction SilentlyContinue |
+    Select-Object -First 1 Name, State, Status, StartMode, StartName, ProcessId, PathName
+  $process = $null
+  if ($svc -and $svc.ProcessId) {
+    $process = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $svc.ProcessId) -ErrorAction SilentlyContinue |
+      Select-Object -First 1 ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, VirtualSize, KernelModeTime, UserModeTime
+  }
+  [pscustomobject]@{
+    service = $svc
+    process = $process
+  }
+}
+
+function Get-PowerPollSample {
+  [pscustomobject]@{
+    activeScheme = (powercfg.exe /getactivescheme 2>&1 | Out-String).Trim()
+    battery = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object Name, BatteryStatus, EstimatedChargeRemaining, EstimatedRunTime, Status)
+    processorPower = @(Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "_Total" } | Select-Object Name, ProcessorFrequency, PercentProcessorPerformance, PercentProcessorTime)
+  }
+}
+
+function Get-FanPollSample {
+  [pscustomobject]@{
+    acerFanSnapshot = @(Get-AcerFanReadOnlySnapshot)
+    pipeTelemetry = Invoke-NamedPipeJsonRequest -Kind "getTelemetrySnapshot" -TimeoutMs 1500
+    pipeControls = Invoke-NamedPipeJsonRequest -Kind "getControlSnapshot" -TimeoutMs 1500
+  }
+}
+
+function Get-BatteryPollSample {
+  $batteryControls = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction SilentlyContinue)
+  $matrix = @()
+  if ($batteryControls.Count -gt 0) {
+    $batteryControl = $batteryControls | Select-Object -First 1
+    $matrix = foreach ($batteryNo in @(0,1,2,3)) {
+      foreach ($functionQuery in @(0,1,2,3,4,5)) {
+        try {
+          $get = Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
+            uBatteryNo = [byte]$batteryNo
+            uFunctionQuery = [byte]$functionQuery
+            uReserved = ([byte[]](0,0))
+          } -ErrorAction Stop
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            functionList = $get.uFunctionList
+            functionStatus = (@($get.uFunctionStatus) -join ",")
+            returnValue = (@($get.uReturn) -join ",")
+          }
+        } catch {
+          [pscustomobject]@{
+            batteryNo = $batteryNo
+            functionQuery = $functionQuery
+            error = $_.Exception.Message
+          }
+        }
+      }
+    }
+  }
+
+  [pscustomobject]@{
+    windowsBattery = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object *)
+    batteryControlPresent = ($batteryControls.Count -gt 0)
+    batteryControlMatrix = @($matrix)
+    smartChargeLogTail = @(Get-Content -LiteralPath (Join-Path $env:ProgramData "AeroForge\Service\logs\control-smart-charge.log") -Tail 30 -ErrorAction SilentlyContinue)
+  }
+}
+
+function Get-NvidiaPollSample {
+  if ($NoNvidiaSmi) {
+    return [pscustomobject]@{ skipped = "NoNvidiaSmi was set." }
+  }
+
+  $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+  if (-not $nvidiaSmi) {
+    return [pscustomobject]@{ missing = "nvidia-smi.exe not found in PATH." }
+  }
+
+  $query = "name,pci.bus_id,pstate,power.draw,power.limit,power.default_limit,power.min_limit,power.max_limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total"
+  try {
+    [pscustomobject]@{
+      csv = (& $nvidiaSmi.Source --query-gpu=$query --format=csv,noheader,nounits 2>&1 | Out-String).Trim()
+    }
+  } catch {
+    [pscustomobject]@{ error = $_.Exception.Message }
+  }
+}
+
+function Get-GpuCounterPollSample {
+  $engine = $null
+  $memory = $null
+  try {
+    $engine = Get-Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 1 |
+      Select-Object -ExpandProperty CounterSamples |
+      Where-Object { $_.CookedValue -gt 0 } |
+      Select-Object Path, CookedValue
+  } catch {
+    $engine = @([pscustomobject]@{ error = $_.Exception.Message })
+  }
+  try {
+    $memory = Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage' -SampleInterval 1 -MaxSamples 1 |
+      Select-Object -ExpandProperty CounterSamples |
+      Where-Object { $_.CookedValue -gt 0 } |
+      Select-Object Path, CookedValue
+  } catch {
+    $memory = @([pscustomobject]@{ error = $_.Exception.Message })
+  }
+  [pscustomobject]@{
+    engine = @($engine)
+    adapterMemory = @($memory)
+  }
+}
+
+function Get-PerformancePollSample {
+  $snapshots = foreach ($file in Get-PerformanceLogFiles) {
+    $tail = @(Get-Content -LiteralPath $file.FullName -Tail 40 -ErrorAction SilentlyContinue)
+    $events = @()
+    foreach ($line in $tail) {
+      try {
+        $events += ($line | ConvertFrom-Json -ErrorAction Stop)
+      } catch {
+      }
+    }
+    [pscustomobject]@{
+      path = $file.FullName
+      length = $file.Length
+      lastWriteUtc = $file.LastWriteTimeUtc.ToString("o")
+      eventTypeCounts = @($events | Group-Object eventType | Select-Object Name, Count)
+      recentEvents = @($events | Select-Object -Last 12 occurredAtUnixMs, activeTab, eventType, detail, payload)
+    }
+  }
+  @($snapshots)
+}
+
+function Get-ProcessPollSample {
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name + " " + $_.ExecutablePath + " " + $_.CommandLine) -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys|pawnio' } |
+    Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, VirtualSize, KernelModeTime, UserModeTime
+}
+
+function Get-ThermalPollSample {
+  [pscustomobject]@{
+    acpiZones = @(Get-CimInstance -Namespace root\wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
+      ForEach-Object {
+        $tempC = $null
+        if ($null -ne $_.CurrentTemperature) {
+          $tempC = [math]::Round((([double]$_.CurrentTemperature) / 10.0) - 273.15, 1)
+        }
+        [pscustomobject]@{
+          InstanceName = $_.InstanceName
+          CurrentTemperatureRaw = $_.CurrentTemperature
+          CurrentTemperatureC = $tempC
+          Active = $_.Active
+        }
+      })
+    thermalCounters = @(Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction SilentlyContinue | Select-Object Name, Temperature)
+  }
+}
+
+function Get-AcerPollSample {
+  $gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $gaming) {
+    return [pscustomobject]@{ missing = "AcerGamingFunction instance not found." }
+  }
+
+  $rows = foreach ($item in @(
+    @{ name = "SupportedProfiles"; method = "GetGamingMiscSetting"; input = [uint32]0x0A },
+    @{ name = "PlatformProfile"; method = "GetGamingMiscSetting"; input = [uint32]0x0B },
+    @{ name = "FanBehavior"; method = "GetGamingFanBehavior"; input = [uint32]0 },
+    @{ name = "CpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]1 },
+    @{ name = "GpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]4 },
+    @{ name = "CpuTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0101 },
+    @{ name = "CpuFan"; method = "GetGamingSysInfo"; input = [uint32]0x0201 },
+    @{ name = "SystemTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0301 },
+    @{ name = "GpuFan"; method = "GetGamingSysInfo"; input = [uint32]0x0601 },
+    @{ name = "GpuTemp"; method = "GetGamingSysInfo"; input = [uint32]0x0A01 }
+  )) {
+    try {
+      $result = Invoke-CimMethod -InputObject $gaming -MethodName $item.method -Arguments @{ gmInput = $item.input } -ErrorAction Stop
+      [pscustomobject]@{
+        name = $item.name
+        method = $item.method
+        input = ("0x{0:X}" -f [uint32]$item.input)
+        output = $result.gmOutput
+        outputHex = ("0x{0:X}" -f [uint64]$result.gmOutput)
+        decodedShiftedWord = ((([uint64]$result.gmOutput) -shr 8) -band 0xFFFF)
+      }
+    } catch {
+      [pscustomobject]@{
+        name = $item.name
+        method = $item.method
+        input = ("0x{0:X}" -f [uint32]$item.input)
+        error = $_.Exception.Message
+      }
+    }
+  }
+  @($rows)
+}
+
 function Invoke-OptionalSamplingCapture {
-  if ($SampleSeconds -le 0) {
+  $seconds = Get-EffectivePollSeconds
+  if ($seconds -le 0) {
     return
   }
 
-  $interval = [Math]::Max(1, $SampleIntervalSeconds)
-  $deadline = (Get-Date).AddSeconds($SampleSeconds)
-  $rows = New-Object System.Collections.Generic.List[object]
-  Write-LogLine "Starting optional $SampleSeconds second sampling capture at $interval second intervals."
-
-  while ((Get-Date) -lt $deadline) {
-    $cpuTotal = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue |
-      Where-Object { $_.Name -eq "_Total" } |
-      Select-Object -First 1 Name, ProcessorFrequency, PercentProcessorPerformance, PercentProcessorTime
-    $pipeTelemetry = Invoke-NamedPipeJsonRequest -Kind "getTelemetrySnapshot" -TimeoutMs 1500
-    $pipeControls = Invoke-NamedPipeJsonRequest -Kind "getControlSnapshot" -TimeoutMs 1500
-    $acerSensors = $null
-    $gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($gaming) {
-      $sensorRows = @()
-      foreach ($item in @(
-        @{ name = "FanBehavior"; method = "GetGamingFanBehavior"; input = [uint32]0 },
-        @{ name = "CpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]1 },
-        @{ name = "GpuFanSpeed"; method = "GetGamingFanSpeed"; input = [uint32]4 },
-        @{ name = "CpuTemp"; input = [uint32]0x0101 },
-        @{ name = "CpuFan"; input = [uint32]0x0201 },
-        @{ name = "SystemTemp"; input = [uint32]0x0301 },
-        @{ name = "GpuFan"; input = [uint32]0x0601 },
-        @{ name = "GpuTemp"; input = [uint32]0x0A01 }
-      )) {
-        try {
-          $method = if ($item.method) { $item.method } else { "GetGamingSysInfo" }
-          $result = Invoke-CimMethod -InputObject $gaming -MethodName $method -Arguments @{ gmInput = $item.input } -ErrorAction Stop
-          $sensorRows += [pscustomobject]@{
-            name = $item.name
-            method = $method
-            output = $result.gmOutput
-            outputHex = ("0x{0:X}" -f [uint64]$result.gmOutput)
-            decodedLowByte = (([uint64]$result.gmOutput) -band 0xFF)
-            decodedShiftedByte = ((([uint64]$result.gmOutput) -shr 8) -band 0xFF)
-            reading = ((([uint64]$result.gmOutput) -shr 8) -band 0xFFFF)
-          }
-        } catch {
-          $sensorRows += [pscustomobject]@{ name = $item.name; error = $_.Exception.Message }
-        }
-      }
-      $acerSensors = $sensorRows
-    }
-
-    $nvidiaSample = $null
-    $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
-    if ($nvidiaSmi) {
-      try {
-        $nvidiaSample = (& $nvidiaSmi.Source --query-gpu=name,pstate,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>&1 | Out-String).Trim()
-      } catch {
-        $nvidiaSample = "nvidia-smi sample failed: $($_.Exception.Message)"
-      }
-    }
-
-    $rows.Add([pscustomobject]@{
-      timestamp = (Get-Date -Format o)
-      cpu = $cpuTotal
-      acerSensors = $acerSensors
-      nvidiaSmi = $nvidiaSample
-      pipeTelemetry = $pipeTelemetry
-      pipeControls = $pipeControls
-    })
-    Start-Sleep -Seconds $interval
+  $categories = @(Resolve-PollCategories)
+  if ($categories.Count -eq 0) {
+    Write-LogLine "Timed polling was requested but no polling categories were selected."
+    return
   }
 
-  Write-TextFile -Path (Join-Path $script:BundleRoot "sampling.json") -Text ($rows | ConvertTo-Json -Depth 10)
-  Write-LogLine "Optional sampling capture complete."
+  $intervalMs = Get-EffectivePollIntervalMs
+  $deadline = (Get-Date).AddSeconds($seconds)
+  $samplingRoot = Join-Path $script:BundleRoot "sampling"
+  New-Item -ItemType Directory -Force -Path $samplingRoot | Out-Null
+
+  $manifest = [ordered]@{
+    startedAt = (Get-Date -Format o)
+    requestedSeconds = $seconds
+    intervalMs = $intervalMs
+    categories = @($categories)
+    noNvidiaSmi = [bool]$NoNvidiaSmi
+    notes = @(
+      "Each JSONL file is append-only and timestamped per sample.",
+      "Use -NoNvidiaSmi when diagnosing whether NVIDIA command-line polling wakes the dGPU."
+    )
+  }
+  Write-TextFile -Path (Join-Path $samplingRoot "manifest.json") -Text ($manifest | ConvertTo-Json -Depth 6)
+  Write-LogLine "Starting timed polling for $seconds seconds at $intervalMs ms intervals. Categories: $($categories -join ', ')."
+
+  while ((Get-Date) -lt $deadline) {
+    $timestamp = Get-Date -Format o
+    foreach ($category in $categories) {
+      $path = Join-Path $samplingRoot ("{0}.jsonl" -f $category)
+      try {
+        $sample = switch ($category) {
+          "service" { Get-ServicePollSample; break }
+          "pipe" { Get-PipePollSample; break }
+          "cpu" { Get-CpuPollSample; break }
+          "power" { Get-PowerPollSample; break }
+          "fans" { Get-FanPollSample; break }
+          "battery" { Get-BatteryPollSample; break }
+          "nvidia" { Get-NvidiaPollSample; break }
+          "gpu-counters" { Get-GpuCounterPollSample; break }
+          "performance" { Get-PerformancePollSample; break }
+          "processes" { Get-ProcessPollSample; break }
+          "thermal" { Get-ThermalPollSample; break }
+          "acer" { Get-AcerPollSample; break }
+          default { [pscustomobject]@{ error = "Unknown polling category: $category" }; break }
+        }
+        Add-SamplingJsonLine -Path $path -Object ([ordered]@{
+          timestamp = $timestamp
+          category = $category
+          sample = $sample
+        })
+      } catch {
+        Add-SamplingJsonLine -Path $path -Object ([ordered]@{
+          timestamp = $timestamp
+          category = $category
+          error = $_.Exception.Message
+        })
+      }
+    }
+    Start-Sleep -Milliseconds $intervalMs
+  }
+
+  Write-LogLine "Timed polling capture complete."
 }
 
 function ConvertTo-SafeRelativePath {
@@ -1169,6 +1595,10 @@ function Get-NvidiaIdleEvidence {
   ""
 
   "===== nvidia-smi idle-oriented sample ====="
+  if ($NoNvidiaSmi) {
+    "Skipped because -NoNvidiaSmi was set."
+    return
+  }
   $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
   if ($nvidiaSmi) {
     & $nvidiaSmi.Source --query-gpu=name,pci.bus_id,persistence_mode,pstate,power.draw,power.limit,clocks.current.graphics,clocks.current.memory,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader,nounits
@@ -1219,6 +1649,11 @@ function Get-BatteryLimitEvidence {
 
   "===== Smart-charge service log tail ====="
   Get-RecentTextTail -Path (Join-Path $env:ProgramData "AeroForge\Service\logs\control-smart-charge.log") -LineCount 220
+}
+
+if ($ListOptions) {
+  Show-CollectorOptions
+  exit 0
 }
 
 $stamp = Get-TimeStamp
@@ -1280,14 +1715,21 @@ Most useful files:
 - commands\*.txt: system, service, WMI, pipe, hardware, TDP/PL, shortcut, event-log, and updater probes.
 - commands\*-aeroforge_issue_evidence.txt: focused custom-fan, battery-limit, NVIDIA-idle, and service-log evidence.
 - commands\*-aeroforge_performance_evidence.txt: frame/mode-switch lag evidence from performance.jsonl.
-- sampling.json: optional timed telemetry capture when launched with -SampleSeconds 60.
+- commands\dxdiag-report.txt and WER inventory output: display/GPU driver state and recent crash-report breadcrumbs.
+- sampling\manifest.json: optional timed polling plan when launched with -PollSeconds or -SampleSeconds.
+- sampling\*.jsonl: per-category timed polling streams for service, pipe, CPU, power, fans, battery, NVIDIA, GPU counters, performance, processes, thermal, and Acer readback.
 - runtime-files\ProgramData-AeroForge-Service: AeroForge service logs and state snapshots.
 - runtime-files\Temp-AeroForge-Service: fallback service-installer logs, if Windows wrote them under Temp.
 - runtime-files\AppData-*: AeroForge app-owned state files, including performance.jsonl when present.
 - collector.log and collector-transcript.txt: collector progress and errors.
 
-Optional deeper capture:
-- Run AeroForge-Debug-Collector.cmd -SampleSeconds 60 to capture CPU frequency, Acer fan behavior/speed/sensor snapshots, NVIDIA idle samples, AeroForge pipe samples, and AMD SMU/ACPI/WMI context for intermittent AMD, power, battery, GPU idle, lag, or fan issues.
+Polling options:
+- Run AeroForge-Debug-Collector.cmd -Quick -PollSeconds 60 for a low-noise service, CPU, power, and fan timeline.
+- Run AeroForge-Debug-Collector.cmd -Deep -PollSeconds 120 -PollIntervalMs 1000 for the full support timeline.
+- Run AeroForge-Debug-Collector.cmd -Poll fans pipe performance -PollSeconds 45 -PollIntervalMs 500 when reproducing custom fan or mode-switch lag.
+- Run AeroForge-Debug-Collector.cmd -Poll nvidia gpu-counters processes -PollSeconds 90 for dGPU idle or power-limit reports.
+- Run AeroForge-Debug-Collector.cmd -Deep -NoNvidiaSmi when testing whether nvidia-smi itself keeps the NVIDIA GPU awake.
+- Run AeroForge-Debug-Collector.cmd -ListOptions to print every supported switch.
 - Maintainers can use -OutputRoot "C:\Some\Temp\Folder" to write the bundle somewhere other than the Desktop.
 "@
 Write-TextFile -Path (Join-Path $script:BundleRoot "README.txt") -Text $readme
@@ -1318,6 +1760,16 @@ Invoke-DiagCommand "collector context" {
     sourceCmd = $env:AFD_SOURCE
     sourceDir = $cmdRoot
     admin = $script:IsAdmin
+    quick = [bool]$Quick
+    deep = [bool]$Deep
+    everything = [bool]$Everything
+    poll = @($Poll)
+    sampleSeconds = $SampleSeconds
+    sampleIntervalSeconds = $SampleIntervalSeconds
+    pollSeconds = $PollSeconds
+    pollIntervalMs = $PollIntervalMs
+    noNvidiaSmi = [bool]$NoNvidiaSmi
+    noZip = [bool]$NoZip
     powershell = $PSVersionTable.PSVersion.ToString()
     executionPolicyProcess = Get-ExecutionPolicy -Scope Process
     executionPolicyCurrentUser = Get-ExecutionPolicy -Scope CurrentUser
@@ -1336,6 +1788,10 @@ Invoke-DiagCommand "os and computer" {
   Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, SystemType, TotalPhysicalMemory, UserName, Domain, PartOfDomain | Format-List
   Get-CimInstance Win32_BIOS | Select-Object Manufacturer, SMBIOSBIOSVersion, Version, ReleaseDate, SerialNumber | Format-List
   Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer, Product, Version, SerialNumber | Format-List
+}
+
+Invoke-DiagCommand "systeminfo full" {
+  systeminfo.exe
 }
 
 Invoke-DiagCommand "cpu and amd diagnostics" {
@@ -1515,7 +1971,32 @@ Invoke-DiagCommand "display and gpu" {
   Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | Format-List *
 }
 
+Invoke-DiagCommand "dxdiag text report" {
+  $dxdiagPath = Join-Path $script:CommandsDir "dxdiag-report.txt"
+  $dxdiag = Get-Command dxdiag.exe -ErrorAction SilentlyContinue
+  if (-not $dxdiag) {
+    "dxdiag.exe not found."
+    return
+  }
+  try {
+    $process = Start-Process -FilePath $dxdiag.Source -ArgumentList @("/whql:off", "/t", $dxdiagPath) -Wait -PassThru -WindowStyle Hidden
+    "dxdiag exit code: $($process.ExitCode)"
+    "dxdiag report: $dxdiagPath"
+    if (Test-Path -LiteralPath $dxdiagPath) {
+      Get-Content -LiteralPath $dxdiagPath -TotalCount 240 -ErrorAction SilentlyContinue
+      ""
+      "Full dxdiag report is stored beside this command output."
+    }
+  } catch {
+    "dxdiag failed: $($_.Exception.Message)"
+  }
+}
+
 Invoke-DiagCommand "nvidia smi" {
+  if ($NoNvidiaSmi) {
+    "Skipped because -NoNvidiaSmi was set."
+    return
+  }
   $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
   if ($nvidiaSmi) {
     & $nvidiaSmi.Source -q
@@ -1525,6 +2006,10 @@ Invoke-DiagCommand "nvidia smi" {
 }
 
 Invoke-DiagCommand "nvidia power limits" {
+  if ($NoNvidiaSmi) {
+    "Skipped because -NoNvidiaSmi was set."
+    return
+  }
   $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
   if ($nvidiaSmi) {
     "===== nvidia-smi -q -d POWER ====="
@@ -1572,6 +2057,39 @@ Invoke-DiagCommand "webview2 and edge update registry" {
   reg.exe query "HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients" /s
   reg.exe query "HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients" /s
   reg.exe query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients" /s
+}
+
+Invoke-DiagCommand "wer crash reports filtered" {
+  $werRoots = @(
+    (Join-Path $env:ProgramData "Microsoft\Windows\WER\ReportArchive"),
+    (Join-Path $env:ProgramData "Microsoft\Windows\WER\ReportQueue"),
+    (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportArchive"),
+    (Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportQueue")
+  )
+  foreach ($root in $werRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) }) {
+    "===== $root ====="
+    Get-ChildItem -LiteralPath $root -Recurse -Force -File -ErrorAction SilentlyContinue |
+      Where-Object { ($_.FullName + " " + $_.Name) -match 'AeroForge|aeroforge|WebView|msedgewebview2|Acer|Nitro|Predator|Application Error|AppCrash|BEX|CLR' } |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 120 FullName, Length, LastWriteTimeUtc |
+      Format-Table -AutoSize -Wrap
+    ""
+  }
+}
+
+Invoke-DiagCommand "wmi namespace map focused" {
+  foreach ($namespace in @("root", "root\wmi", "root\cimv2", "root\default", "root\StandardCimv2")) {
+    "===== Namespace: $namespace ====="
+    try {
+      Get-CimInstance -Namespace $namespace -ClassName __Namespace -ErrorAction Stop |
+        Select-Object Name |
+        Sort-Object Name |
+        Format-Table -AutoSize
+    } catch {
+      "Namespace child enumeration failed: $($_.Exception.Message)"
+    }
+    ""
+  }
 }
 
 Invoke-DiagCommand "network update reachability" {
@@ -1669,14 +2187,18 @@ if ($script:TranscriptStarted) {
 }
 
 $zipPath = "$script:BundleRoot.zip"
-try {
-  if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
+if ($NoZip) {
+  Write-LogLine "Skipping ZIP creation because -NoZip was set."
+} else {
+  try {
+    if (Test-Path -LiteralPath $zipPath) {
+      Remove-Item -LiteralPath $zipPath -Force
+    }
+    Compress-Archive -Path (Join-Path $script:BundleRoot "*") -DestinationPath $zipPath -Force -ErrorAction Stop
+    Write-LogLine "Created ZIP: $zipPath"
+  } catch {
+    Write-LogLine "ZIP creation failed: $($_.Exception.Message)"
   }
-  Compress-Archive -Path (Join-Path $script:BundleRoot "*") -DestinationPath $zipPath -Force -ErrorAction Stop
-  Write-LogLine "Created ZIP: $zipPath"
-} catch {
-  Write-LogLine "ZIP creation failed: $($_.Exception.Message)"
 }
 
 if ($script:TranscriptStarted) {
@@ -1691,6 +2213,8 @@ Write-Host "AeroForge debug collection complete."
 Write-Host "Folder: $script:BundleRoot"
 if (Test-Path -LiteralPath $zipPath) {
   Write-Host "ZIP:    $zipPath"
+} elseif ($NoZip) {
+  Write-Host "ZIP skipped because -NoZip was set."
 } else {
   Write-Host "ZIP was not created. Send the folder instead."
 }

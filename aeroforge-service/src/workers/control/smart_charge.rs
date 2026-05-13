@@ -273,11 +273,8 @@ function Find-DesiredStatus {
   foreach ($read in $reads) {
     if (-not $read.Contains('functionStatus')) { continue }
     $statuses = @($read.functionStatus)
-    if ($Requested -eq 0) {
-      if ($statuses.Count -ge 2 -and $statuses[0] -eq 0 -and $statuses[1] -eq 0) {
-        return [ordered]@{ ok = $true; health = 0; index = 0; read = $read }
-      }
-      continue
+    if ($statuses.Count -ge 2 -and (([int]$read.functionList -band 2) -ne 0) -and $statuses[1] -eq $Requested) {
+      return [ordered]@{ ok = $true; health = $Requested; index = 1; read = $read }
     }
 
     for ($index = 0; $index -lt $statuses.Count; $index++) {
@@ -301,38 +298,29 @@ function Find-DesiredStatus {
 function Add-BatteryHealthAttempts {
   param([System.Collections.Generic.List[object]]$Attempts, [int]$BatteryNo)
   $Attempts.Add(@{
+    Name = ('battery{0}-health-byte1-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]2
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $Attempts.Add(@{
+    Name = ('battery{0}-combined-byte0-byte1-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]3
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $Attempts.Add(@{
     Name = ('battery{0}-legacy-byte0-scalar' -f $BatteryNo)
     Arguments = @{
       uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]1
       uFunctionStatus = $status
-      uReservedIn = ([byte[]](0,0,0,0,0))
-    }
-  })
-  $attempts.Add(@{
-    Name = ('battery{0}-legacy-byte0-array' -f $BatteryNo)
-    Arguments = @{
-      uBatteryNo = [byte]$BatteryNo
-      uFunctionMask = [byte]1
-      uFunctionStatus = (New-StatusBytes -First $status -Second 0 -Third 255)
-      uReservedIn = ([byte[]](0,0,0,0,0))
-    }
-  })
-  $attempts.Add(@{
-    Name = ('battery{0}-health-byte1-array' -f $BatteryNo)
-    Arguments = @{
-      uBatteryNo = [byte]$BatteryNo
-      uFunctionMask = [byte]2
-      uFunctionStatus = (New-StatusBytes -First 0 -Second $status -Third 255)
-      uReservedIn = ([byte[]](0,0,0,0,0))
-    }
-  })
-  $attempts.Add(@{
-    Name = ('battery{0}-combined-byte0-byte1-array' -f $BatteryNo)
-    Arguments = @{
-      uBatteryNo = [byte]$BatteryNo
-      uFunctionMask = [byte]3
-      uFunctionStatus = (New-StatusBytes -First $status -Second $status -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
   })

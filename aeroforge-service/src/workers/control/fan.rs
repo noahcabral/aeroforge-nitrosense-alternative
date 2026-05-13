@@ -10,7 +10,7 @@ use super::{
     acer_wmi::{
         apply_fan_behavior, apply_fan_speed, clamp_manual_fan_percent, decode_gm_output_byte,
         FAN_BEHAVIOR_AUTO, FAN_BEHAVIOR_CUSTOM_MIXED, FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU,
-        FAN_SELECTOR_GPU,
+        FAN_SELECTOR_GPU, MIN_MANUAL_FAN_PERCENT,
     },
     models::{
         AppliedFanControlSnapshot, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
@@ -57,12 +57,11 @@ pub fn apply_custom_fan_curves(
     let gpu_temp = temperatures.gpu_temp_c.unwrap_or(65);
     let requested_cpu_speed = interpolate_curve_speed(&curves.cpu, cpu_temp);
     let requested_gpu_speed = interpolate_curve_speed(&curves.gpu, gpu_temp);
-    let cpu_speed = clamp_manual_fan_percent(requested_cpu_speed);
-    let gpu_speed = clamp_manual_fan_percent(requested_gpu_speed);
+    let cpu_speed = clamp_custom_curve_fan_percent(requested_cpu_speed, cpu_temp);
+    let gpu_speed = clamp_custom_curve_fan_percent(requested_gpu_speed, gpu_temp);
 
     let context = format!(
-        "Custom fan curves compressed to current-temperature targets: CPU {}C -> requested {}% / applied {}%, GPU {}C -> requested {}% / applied {}%. AcerGamingFunction accepts direct per-fan target speeds, not a full curve table.",
-        cpu_temp, requested_cpu_speed, cpu_speed, gpu_temp, requested_gpu_speed, gpu_speed
+        "Custom fan curves compressed to current-temperature targets: CPU {cpu_temp}C -> requested {requested_cpu_speed}% / applied {cpu_speed}%, GPU {gpu_temp}C -> requested {requested_gpu_speed}% / applied {gpu_speed}%. Zero-percent targets are allowed only at 50C or below; above that AeroForge keeps the {MIN_MANUAL_FAN_PERCENT}% firmware safety floor. AcerGamingFunction accepts direct per-fan target speeds, not a full curve table."
     );
 
     apply_custom_wmi_fan_control(
@@ -73,6 +72,16 @@ pub fn apply_custom_fan_curves(
         &context,
         !request.quiet_success_log,
     )
+}
+
+fn clamp_custom_curve_fan_percent(percent: u8, temp_c: u8) -> u8 {
+    if percent == 0 && temp_c <= 50 {
+        0
+    } else if percent == 0 {
+        MIN_MANUAL_FAN_PERCENT
+    } else {
+        clamp_manual_fan_percent(percent)
+    }
 }
 
 fn apply_firmware_wmi_fan_control(
