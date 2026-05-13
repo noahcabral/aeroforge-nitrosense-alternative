@@ -113,7 +113,7 @@ $health = [int]$get.uFunctionStatus[0]
         );
     }
 
-    let parsed = serde_json::from_slice::<Value>(&output.stdout)?;
+    let parsed = parse_first_json_value(&output.stdout)?;
     let verified_health_status = parsed
         .get("healthStatus")
         .and_then(Value::as_u64)
@@ -150,6 +150,60 @@ $health = [int]$get.uFunctionStatus[0]
         applied_at_unix: now_unix(),
         detail,
     })
+}
+
+fn parse_first_json_value(bytes: &[u8]) -> Result<Value, DynError> {
+    let text = String::from_utf8_lossy(bytes);
+    let object = first_json_object(&text).ok_or_else(|| {
+        io::Error::other(format!(
+            "PowerShell output did not contain a JSON object: {}",
+            text.trim()
+        ))
+    })?;
+    Ok(serde_json::from_str::<Value>(object)?)
+}
+
+fn first_json_object(text: &str) -> Option<&str> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = index + ch.len_utf8();
+                    return start.map(|start| &text[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 async fn apply_care_center_smart_charging(

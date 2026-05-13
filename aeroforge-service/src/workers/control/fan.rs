@@ -426,12 +426,12 @@ fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
 
     if system_model.contains("anv16-41") {
         return CustomFanStrategy {
-            id: "custom-direct-speed-only",
+            id: "custom-behavior-then-direct-speed",
             reason: format!(
-                "Direct-only selected for AMD/ANV16-family safety. Model '{}', CPU '{}'.",
+                "Acer Custom fan behavior latch selected for AMD/ANV16-family hardware because direct-only targets can be pulled back by firmware Auto behavior. Model '{}', CPU '{}'.",
                 identity.system_model, cpu_identity
             ),
-            behavior_input: None,
+            behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
         };
     }
 
@@ -451,12 +451,12 @@ fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
 
     if cpu_identity.contains("amd") || cpu_identity.contains("ryzen") {
         return CustomFanStrategy {
-            id: "custom-direct-speed-only",
+            id: "custom-behavior-then-direct-speed",
             reason: format!(
-                "Direct-only selected for unclassified AMD/Ryzen hardware. Model '{}', CPU '{}'.",
+                "Acer Custom fan behavior latch selected for unclassified AMD/Ryzen hardware because Linux Acer WMI implementations use the firmware custom behavior before per-fan speed writes. Model '{}', CPU '{}'.",
                 identity.system_model, cpu_identity
             ),
-            behavior_input: None,
+            behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
         };
     }
 

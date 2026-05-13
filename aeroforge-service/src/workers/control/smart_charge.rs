@@ -1,6 +1,6 @@
 use std::{io, os::windows::process::CommandExt, process::Command};
 
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 
 use super::models::{AppliedSmartChargeSnapshot, ApplySmartChargeRequest};
 use crate::{
@@ -298,45 +298,49 @@ function Find-DesiredStatus {
   return [ordered]@{ ok = $false; health = $health; index = $null; read = $best; reads = $reads }
 }
 
-$attempts = New-Object System.Collections.Generic.List[object]
-foreach ($batteryNo in @(0,1)) {
-  $attempts.Add(@{
-    Name = ('battery{0}-legacy-byte0-array' -f $batteryNo)
+function Add-BatteryHealthAttempts {
+  param([System.Collections.Generic.List[object]]$Attempts, [int]$BatteryNo)
+  $Attempts.Add(@{
+    Name = ('battery{0}-legacy-byte0-scalar' -f $BatteryNo)
     Arguments = @{
-      uBatteryNo = [byte]$batteryNo
-      uFunctionMask = [byte]1
-      uFunctionStatus = (New-StatusBytes -First $status -Second 0 -Third 255)
-      uReservedIn = ([byte[]](0,0,0,0,0))
-    }
-  })
-  $attempts.Add(@{
-    Name = ('battery{0}-legacy-byte0-scalar' -f $batteryNo)
-    Arguments = @{
-      uBatteryNo = [byte]$batteryNo
+      uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]1
       uFunctionStatus = $status
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
   })
   $attempts.Add(@{
-    Name = ('battery{0}-health-byte1-array' -f $batteryNo)
+    Name = ('battery{0}-legacy-byte0-array' -f $BatteryNo)
     Arguments = @{
-      uBatteryNo = [byte]$batteryNo
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]1
+      uFunctionStatus = (New-StatusBytes -First $status -Second 0 -Third 255)
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $attempts.Add(@{
+    Name = ('battery{0}-health-byte1-array' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]2
       uFunctionStatus = (New-StatusBytes -First 0 -Second $status -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
   })
   $attempts.Add(@{
-    Name = ('battery{0}-combined-byte0-byte1-array' -f $batteryNo)
+    Name = ('battery{0}-combined-byte0-byte1-array' -f $BatteryNo)
     Arguments = @{
-      uBatteryNo = [byte]$batteryNo
+      uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]3
       uFunctionStatus = (New-StatusBytes -First $status -Second $status -Third 255)
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
   })
 }
+
+$attempts = New-Object System.Collections.Generic.List[object]
+Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 1
+Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 0
 
 $errors = New-Object System.Collections.Generic.List[string]
 foreach ($attempt in $attempts) {
@@ -404,7 +408,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
         );
     }
 
-    let parsed = serde_json::from_slice::<BatteryControlApplyOutput>(&output.stdout)?;
+    let parsed = parse_first_json_object::<BatteryControlApplyOutput>(&output.stdout)?;
     if parsed.health_status != requested_health_status {
         return Err(io::Error::other(format!(
             "BatteryControl returned healthStatus {} after requesting {}.",
@@ -414,4 +418,84 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     }
 
     Ok(parsed)
+}
+
+fn parse_first_json_object<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    let text = String::from_utf8_lossy(bytes);
+    let object = first_json_object(&text).ok_or_else(|| {
+        io::Error::other(format!(
+            "PowerShell output did not contain a JSON object: {}",
+            text.trim()
+        ))
+    })?;
+    Ok(serde_json::from_str::<T>(object)?)
+}
+
+fn first_json_object(text: &str) -> Option<&str> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let end = index + ch.len_utf8();
+                    return start.map(|start| &text[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct Probe {
+        health_status: u8,
+    }
+
+    #[test]
+    fn extracts_json_object_from_extra_powershell_output() {
+        let parsed = parse_first_json_object::<Probe>(
+            br#"noise
+{"healthStatus":1}
+1
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed, Probe { health_status: 1 });
+    }
 }

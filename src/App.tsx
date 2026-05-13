@@ -4885,8 +4885,8 @@ function App() {
                               {nvidiaTelemetryPending
                                 ? 'Applying the telemetry polling rule now.'
                                 : nvidiaTelemetryEnabled
-                                  ? 'AeroForge may read NVIDIA clocks, power, and limits when Windows reports active dGPU memory.'
-                                  : 'AeroForge skips NVIDIA clock and power polling so the dGPU can stay idle; firmware fan and temperature readings remain available.'}
+                                  ? 'AeroForge may read NVIDIA clocks, power, limits, and apply Whisper hints when Windows reports active dGPU work.'
+                                  : 'AeroForge skips NVIDIA polling and Whisper hints so the dGPU can stay idle; firmware fan and temperature readings remain available.'}
                             </p>
                           </div>
 

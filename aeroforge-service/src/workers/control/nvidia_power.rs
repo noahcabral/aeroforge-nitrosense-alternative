@@ -147,12 +147,16 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn nvidia_power_readback_enabled(paths: &ServicePaths) -> bool {
+pub(crate) fn nvidia_access_enabled(paths: &ServicePaths) -> bool {
     env_flag_enabled(NVIDIA_POWER_READBACK_ENV)
         || fs::read_to_string(paths.worker_snapshot("control"))
             .ok()
             .and_then(|raw| parse_nvidia_telemetry_enabled(&raw))
             .unwrap_or(false)
+}
+
+fn nvidia_power_readback_enabled(paths: &ServicePaths) -> bool {
+    nvidia_access_enabled(paths)
 }
 
 fn parse_nvidia_telemetry_enabled(raw: &str) -> Option<bool> {

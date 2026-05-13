@@ -42,7 +42,7 @@ pub fn apply_power_profile(
     let processor_state_control_enabled = request.processor_state_control_enabled;
     let processor_state = sanitize_processor_state(request.processor_state)?;
     let power_before = nvidia_power::read_power_readback(paths);
-    let operating_mode = apply_operating_mode(&profile_id, custom_base_profile.as_ref())?;
+    let operating_mode = apply_operating_mode(paths, &profile_id, custom_base_profile.as_ref())?;
     let profile_label = profile_label(&profile_id);
 
     write_log_line(
@@ -163,6 +163,7 @@ fn sanitize_processor_state(
 }
 
 fn apply_operating_mode(
+    paths: &ServicePaths,
     profile_id: &PowerProfileId,
     custom_base_profile: Option<&CustomPowerBaseId>,
 ) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
@@ -175,36 +176,43 @@ fn apply_operating_mode(
                 None,
             );
             let direct_hid_detail = apply_direct_hid_mode_detail(SystemUsageMode::Quiet);
-            let whisper_detail = match set_whisper_mode(true) {
-                Ok(whisper) => {
-                    format_whisper_detail("Applied direct NVIDIA Whisper quiet state", &whisper)
-                }
-                Err(error) => format!(
-                    "NVIDIA Whisper quiet state was unavailable: {error}. Continuing with Windows processor policy."
-                ),
-            };
+            let whisper_detail = apply_whisper_mode_detail(
+                paths,
+                true,
+                "Applied direct NVIDIA Whisper quiet state",
+                "NVIDIA Whisper quiet state was unavailable",
+            );
             Ok(AppliedOperatingMode {
                 detail: format!("{firmware_detail} {direct_hid_detail} {whisper_detail}"),
             })
         }
-        PowerProfileId::Balanced => {
-            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_BALANCED, false, None)
-        }
+        PowerProfileId::Balanced => apply_acer_profile_with_whisper_clear(
+            paths,
+            profile_id,
+            GAMING_PROFILE_BALANCED,
+            false,
+            None,
+        ),
         PowerProfileId::Performance => apply_acer_profile_with_whisper_clear(
+            paths,
             profile_id,
             GAMING_PROFILE_PERFORMANCE,
             false,
             None,
         ),
-        PowerProfileId::Turbo => {
-            apply_acer_profile_with_whisper_clear(profile_id, GAMING_PROFILE_TURBO, false, None)
-        }
+        PowerProfileId::Turbo => apply_acer_profile_with_whisper_clear(
+            paths,
+            profile_id,
+            GAMING_PROFILE_TURBO,
+            false,
+            None,
+        ),
         PowerProfileId::Custom => {
             let custom_base = custom_base_profile
                 .cloned()
                 .unwrap_or(CustomPowerBaseId::Performance);
             let (input, label) = custom_base_profile_details(&custom_base);
-            apply_acer_profile_with_whisper_clear(profile_id, input, true, Some(label))
+            apply_acer_profile_with_whisper_clear(paths, profile_id, input, true, Some(label))
         }
     }
 }
@@ -224,6 +232,7 @@ struct AppliedOperatingMode {
 }
 
 fn apply_acer_profile_with_whisper_clear(
+    paths: &ServicePaths,
     profile_id: &PowerProfileId,
     input: u64,
     balanced_base_for_custom: bool,
@@ -242,10 +251,12 @@ fn apply_acer_profile_with_whisper_clear(
             "Direct Acer HID system-usage mode write skipped: no mode mapping.".into()
         });
 
-    let whisper_detail = match set_whisper_mode(false) {
-        Ok(whisper) => format_whisper_detail("Cleared NVIDIA Whisper state", &whisper),
-        Err(error) => format!("NVIDIA Whisper clear was unavailable: {error}."),
-    };
+    let whisper_detail = apply_whisper_mode_detail(
+        paths,
+        false,
+        "Cleared NVIDIA Whisper state",
+        "NVIDIA Whisper clear was unavailable",
+    );
     let turbo_oc_detail = if direct_hid_mode == Some(SystemUsageMode::Turbo) {
         apply_turbo_oc_profile_hint_detail()
     } else {
@@ -544,6 +555,22 @@ fn format_whisper_detail(prefix: &str, result: &NvApiWhisperResult) -> String {
         result.status,
         if result.enabled { "true" } else { "false" }
     )
+}
+
+fn apply_whisper_mode_detail(
+    paths: &ServicePaths,
+    enabled: bool,
+    success_prefix: &str,
+    error_prefix: &str,
+) -> String {
+    if !nvidia_power::nvidia_access_enabled(paths) {
+        return "NVIDIA Whisper control skipped because NVIDIA telemetry/control access is disabled; this avoids waking the dGPU during power-mode changes.".into();
+    }
+
+    match set_whisper_mode(enabled) {
+        Ok(whisper) => format_whisper_detail(success_prefix, &whisper),
+        Err(error) => format!("{error_prefix}: {error}."),
+    }
 }
 
 fn apply_scheme_value(
