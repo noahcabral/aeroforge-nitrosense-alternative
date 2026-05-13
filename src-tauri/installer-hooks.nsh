@@ -1,5 +1,29 @@
 Var NitroSenseDisplayName
 Var NitroSenseUninstallString
+Var AeroForgeInstallDirSafeToWipe
+
+Function CleanAeroForgeInstallDirForInstall
+  IfFileExists "$INSTDIR\aeroforge-control.exe" 0 check_display_exe_install
+    Goto clean_install_dir
+  check_display_exe_install:
+  IfFileExists "$INSTDIR\AeroForge Control.exe" 0 check_service_exe_install
+    Goto clean_install_dir
+  check_service_exe_install:
+  IfFileExists "$INSTDIR\aeroforge-service.exe" 0 check_helper_exe_install
+    Goto clean_install_dir
+  check_helper_exe_install:
+  IfFileExists "$INSTDIR\aeroforge-hotkey-helper.exe" 0 check_service_script_install
+    Goto clean_install_dir
+  check_service_script_install:
+  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 install_dir_clean_done
+    Goto clean_install_dir
+
+  clean_install_dir:
+    DetailPrint "Removing stale AeroForge install files from $INSTDIR..."
+    RMDir /r /REBOOTOK "$INSTDIR"
+
+  install_dir_clean_done:
+FunctionEnd
 
 Function StopAeroForgeRuntimeForInstall
   DetailPrint "Stopping existing AeroForge runtime processes..."
@@ -12,9 +36,13 @@ Function StopAeroForgeRuntimeForInstall
   FileWrite $9 "}$\r$\n"
   FileWrite $9 "$$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
   FileWrite $9 "if ($$svc) { Stop-Service -Name 'AeroForgeService' -Force -ErrorAction SilentlyContinue }$\r$\n"
-  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
-  FileWrite $9 "Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
-  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "for ($$i = 0; $$i -lt 30; $$i++) {$\r$\n"
+  FileWrite $9 "  $$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  $$procs = @(Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue)$\r$\n"
+  FileWrite $9 "  if ((-not $$svc -or $$svc.Status -eq 'Stopped') -and $$procs.Count -eq 0) { break }$\r$\n"
+  FileWrite $9 "  $$procs | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "}$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\StopAeroForgeRuntime.ps1"' $9
 FunctionEnd
@@ -27,12 +55,17 @@ Function un.StopAeroForgeRuntimeForUninstall
   FileWrite $9 "foreach ($$taskName in @('AeroForgeHotkeyHelper', 'AeroForgePrewarm')) {$\r$\n"
   FileWrite $9 "  $$task = Get-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
   FileWrite $9 "  if ($$task) { Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue }$\r$\n"
+  FileWrite $9 "  if ($$task) { Unregister-ScheduledTask -TaskName $$taskName -Confirm:$$false -ErrorAction SilentlyContinue }$\r$\n"
   FileWrite $9 "}$\r$\n"
   FileWrite $9 "$$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
   FileWrite $9 "if ($$svc) { Stop-Service -Name 'AeroForgeService' -Force -ErrorAction SilentlyContinue }$\r$\n"
-  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
-  FileWrite $9 "Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
-  FileWrite $9 "Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "for ($$i = 0; $$i -lt 30; $$i++) {$\r$\n"
+  FileWrite $9 "  $$svc = Get-Service -Name 'AeroForgeService' -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  $$procs = @(Get-Process aeroforge-control,aeroforge-hotkey-helper,aeroforge-update-bridge,aeroforge-service -ErrorAction SilentlyContinue)$\r$\n"
+  FileWrite $9 "  if ((-not $$svc -or $$svc.Status -eq 'Stopped') -and $$procs.Count -eq 0) { break }$\r$\n"
+  FileWrite $9 "  $$procs | Stop-Process -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "  Start-Sleep -Milliseconds 500$\r$\n"
+  FileWrite $9 "}$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\StopAeroForgeRuntime.ps1"' $9
 FunctionEnd
@@ -154,6 +187,7 @@ FunctionEnd
     Call RunNitroSenseUninstall
 
   nitro_preinstall_done:
+    Call CleanAeroForgeInstallDirForInstall
 !macroend
 
 Function InstallAeroForgeService
@@ -169,6 +203,16 @@ Function InstallAeroForgeService
   aeroforge_service_missing:
     MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not install AeroForgeService because bundled service resources are missing."
     Abort
+FunctionEnd
+
+Function InstallAeroForgeUserRuntime
+  IfFileExists "$INSTDIR\aeroforge-hotkey-helper.exe" 0 aeroforge_runtime_missing
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "AeroForgeHotkeyHelper" '"$INSTDIR\aeroforge-hotkey-helper.exe" --daemon'
+    Exec '"$INSTDIR\aeroforge-hotkey-helper.exe" --daemon'
+    Return
+
+  aeroforge_runtime_missing:
+    DetailPrint "AeroForge hotkey helper missing; background update checks will start after AeroForge opens."
 FunctionEnd
 
 Function un.UninstallAeroForgeService
@@ -194,11 +238,49 @@ Function un.UninstallAeroForgeService
     Abort
 FunctionEnd
 
+Function un.MarkAeroForgeInstallDirForWipe
+  StrCpy $AeroForgeInstallDirSafeToWipe "0"
+  IfFileExists "$INSTDIR\aeroforge-control.exe" 0 check_display_exe_uninstall
+    Goto mark_install_dir_safe
+  check_display_exe_uninstall:
+  IfFileExists "$INSTDIR\AeroForge Control.exe" 0 check_service_exe_uninstall
+    Goto mark_install_dir_safe
+  check_service_exe_uninstall:
+  IfFileExists "$INSTDIR\aeroforge-service.exe" 0 check_helper_exe_uninstall
+    Goto mark_install_dir_safe
+  check_helper_exe_uninstall:
+  IfFileExists "$INSTDIR\aeroforge-hotkey-helper.exe" 0 check_service_script_uninstall
+    Goto mark_install_dir_safe
+  check_service_script_uninstall:
+  IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 mark_install_dir_done
+    Goto mark_install_dir_safe
+
+  mark_install_dir_safe:
+    StrCpy $AeroForgeInstallDirSafeToWipe "1"
+
+  mark_install_dir_done:
+FunctionEnd
+
+Function un.RemoveAeroForgeInstallDir
+  StrCmp $AeroForgeInstallDirSafeToWipe "1" 0 remove_install_dir_done
+    DetailPrint "Removing remaining AeroForge install files from $INSTDIR..."
+    RMDir /r /REBOOTOK "$INSTDIR"
+
+  remove_install_dir_done:
+FunctionEnd
+
 !macro NSIS_HOOK_POSTINSTALL
   Call InstallAeroForgeService
+  Call InstallAeroForgeUserRuntime
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  Call un.MarkAeroForgeInstallDirForWipe
   Call un.StopAeroForgeRuntimeForUninstall
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "AeroForgeHotkeyHelper"
   Call un.UninstallAeroForgeService
+!macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  Call un.RemoveAeroForgeInstallDir
 !macroend

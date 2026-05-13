@@ -4,7 +4,7 @@
 use std::{
     collections::HashSet,
     env,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::Write,
     mem::size_of,
     path::{Path, PathBuf},
@@ -13,10 +13,16 @@ use std::{
         atomic::{AtomicU64, Ordering},
         OnceLock,
     },
-    thread::sleep,
+    thread::{self, sleep},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use aeroforge_control_lib::backend::{
+    commands::show_update_notification,
+    models::UpdateChannelId,
+    updater::{refresh_status, UpdaterStore},
+};
+use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, HANDLE, HWND,
@@ -56,6 +62,8 @@ const NITRO_KEY_SCAN: u16 = 0x0075;
 const RAW_KEY_BREAK: u16 = 0x0001;
 const DEBOUNCE_MS: u64 = 750;
 const ASFW_ANY: u32 = u32::MAX;
+const BACKGROUND_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(30);
+const BACKGROUND_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
 static APP_EXE: OnceLock<PathBuf> = OnceLock::new();
@@ -104,6 +112,7 @@ fn main() {
         &log_path,
         &format!("hotkey helper daemon started for {}", app_exe.display()),
     );
+    spawn_background_update_worker(&log_path);
 
     if let Err(error) = run_raw_input_loop(&log_path) {
         write_log(&log_path, &format!("raw-input loop stopped: {error}"));
@@ -142,6 +151,180 @@ fn helper_log_path() -> Option<PathBuf> {
         path.join("com.noah.aeroforgecontrol")
             .join("nitro-key-helper.log")
     })
+}
+
+fn spawn_background_update_worker(log_path: &Path) {
+    let log_path = log_path.to_path_buf();
+    thread::spawn(move || {
+        sleep(BACKGROUND_UPDATE_INITIAL_DELAY);
+        loop {
+            if let Err(error) = run_background_update_check(&log_path) {
+                write_log(
+                    &log_path,
+                    &format!("background update check failed: {error}"),
+                );
+            }
+            sleep(BACKGROUND_UPDATE_INTERVAL);
+        }
+    });
+}
+
+fn run_background_update_check(
+    log_path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
+        return Err("could not resolve AeroForge config root".into());
+    };
+    fs::create_dir_all(&config_root)?;
+
+    let settings = load_background_update_settings(&config_root);
+    if !settings.enabled {
+        write_log(
+            log_path,
+            "background update check skipped because update checks are disabled",
+        );
+        return Ok(());
+    }
+
+    let updater = UpdaterStore::load(&config_root)?;
+    let status = refresh_status(&updater, settings.channel.clone())?;
+    if !status.update_available {
+        write_log(
+            log_path,
+            &format!(
+                "background update check found no {} update",
+                settings.channel.as_str()
+            ),
+        );
+        return Ok(());
+    }
+
+    let notification_key = background_update_notification_key(&status);
+    let mut notify_state = load_background_update_state(&config_root);
+    if notify_state.last_notified_key.as_deref() == Some(notification_key.as_str()) {
+        write_log(
+            log_path,
+            &format!("background update notification already shown for {notification_key}"),
+        );
+        return Ok(());
+    }
+
+    let version_label = status
+        .latest_version
+        .clone()
+        .or_else(|| status.latest_title.clone())
+        .unwrap_or_else(|| "A new AeroForge update".into());
+    show_update_notification(version_label)
+        .map_err(|error| format!("Windows update notification failed: {error}"))?;
+
+    notify_state.last_notified_key = Some(notification_key.clone());
+    notify_state.last_notified_at_unix = Some(unix_now());
+    save_background_update_state(&config_root, &notify_state)?;
+    write_log(
+        log_path,
+        &format!("background update notification shown for {notification_key}"),
+    );
+
+    Ok(())
+}
+
+fn background_update_notification_key(
+    status: &aeroforge_control_lib::backend::models::UpdateStatus,
+) -> String {
+    let version = status
+        .latest_version
+        .as_deref()
+        .or(status.latest_title.as_deref())
+        .unwrap_or("unknown-version");
+    let asset = status.latest_asset_name.as_deref().unwrap_or("no-asset");
+    format!("{version}|{asset}")
+}
+
+fn load_background_update_settings(config_root: &Path) -> BackgroundUpdateSettings {
+    let control_file = config_root.join("control-state.json");
+    let Ok(raw) = fs::read_to_string(control_file) else {
+        return BackgroundUpdateSettings::default();
+    };
+    let Ok(parsed) = serde_json::from_str::<BackgroundControlState>(&raw) else {
+        return BackgroundUpdateSettings::default();
+    };
+    let Some(personal_settings) = parsed.personal_settings else {
+        return BackgroundUpdateSettings::default();
+    };
+
+    BackgroundUpdateSettings {
+        enabled: personal_settings.check_for_updates_on_launch,
+        channel: personal_settings.update_channel,
+    }
+}
+
+fn load_background_update_state(config_root: &Path) -> BackgroundUpdateNotificationState {
+    let state_file = config_root.join("background-update-notification.json");
+    fs::read_to_string(state_file)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_background_update_state(
+    config_root: &Path,
+    state: &BackgroundUpdateNotificationState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state_file = config_root.join("background-update-notification.json");
+    fs::write(state_file, serde_json::to_string_pretty(state)?)?;
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Debug, Clone)]
+struct BackgroundUpdateSettings {
+    enabled: bool,
+    channel: UpdateChannelId,
+}
+
+impl Default for BackgroundUpdateSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel: UpdateChannelId::Stable,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundControlState {
+    personal_settings: Option<BackgroundPersonalSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundPersonalSettings {
+    #[serde(default = "default_true")]
+    check_for_updates_on_launch: bool,
+    #[serde(default = "default_stable_channel")]
+    update_channel: UpdateChannelId,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackgroundUpdateNotificationState {
+    last_notified_key: Option<String>,
+    last_notified_at_unix: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_stable_channel() -> UpdateChannelId {
+    UpdateChannelId::Stable
 }
 
 fn run_raw_input_loop(log_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

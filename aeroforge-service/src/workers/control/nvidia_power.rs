@@ -1,6 +1,6 @@
+use crate::paths::ServicePaths;
 use serde::Serialize;
-use std::env;
-use std::process::Command;
+use std::{env, fs, process::Command};
 
 const NVIDIA_POWER_READBACK_ENV: &str = "AEROFORGE_ENABLE_NVIDIA_TELEMETRY";
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
@@ -17,12 +17,12 @@ pub(crate) struct NvidiaPowerReadback {
     pub error: Option<String>,
 }
 
-pub(crate) fn read_power_readback() -> NvidiaPowerReadback {
-    if !env_flag_enabled(NVIDIA_POWER_READBACK_ENV) {
+pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
+    if !nvidia_power_readback_enabled(paths) {
         return NvidiaPowerReadback {
             source: "disabled",
             error: Some(
-                "NVIDIA power readback disabled by default to avoid waking the dGPU. Set AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1 for diagnostics.".into(),
+                "NVIDIA power readback disabled by AeroForge NVIDIA Telemetry Polling. Enable Settings > NVIDIA Telemetry Polling or set AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1 for diagnostics.".into(),
             ),
             ..Default::default()
         };
@@ -147,6 +147,24 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn nvidia_power_readback_enabled(paths: &ServicePaths) -> bool {
+    env_flag_enabled(NVIDIA_POWER_READBACK_ENV)
+        || fs::read_to_string(paths.worker_snapshot("control"))
+            .ok()
+            .and_then(|raw| parse_nvidia_telemetry_enabled(&raw))
+            .unwrap_or(false)
+}
+
+fn parse_nvidia_telemetry_enabled(raw: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
+        .ok()
+        .and_then(|snapshot| {
+            snapshot
+                .get("nvidiaTelemetryEnabled")
+                .and_then(|value| value.as_bool())
+        })
+}
+
 fn command_error_detail(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stderr.is_empty() {
@@ -159,4 +177,33 @@ fn command_error_detail(output: &std::process::Output) -> String {
     }
 
     format!("nvidia-smi exited with status {}", output.status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nvidia_telemetry_enabled;
+
+    #[test]
+    fn parses_enabled_setting_from_control_snapshot() {
+        assert_eq!(
+            parse_nvidia_telemetry_enabled(r#"{"nvidiaTelemetryEnabled":true}"#),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parses_disabled_setting_from_control_snapshot() {
+        assert_eq!(
+            parse_nvidia_telemetry_enabled(r#"{"nvidiaTelemetryEnabled":false}"#),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn handles_bom_prefixed_control_snapshot() {
+        assert_eq!(
+            parse_nvidia_telemetry_enabled("\u{feff}{\"nvidiaTelemetryEnabled\":true}"),
+            Some(true)
+        );
+    }
 }

@@ -89,7 +89,7 @@ fn apply_firmware_wmi_fan_control(
         &format!("Applying fan profile {}. {}", profile_id.as_str(), context),
     )?;
 
-    let power_before = read_power_readback();
+    let power_before = read_power_readback(paths);
     let behavior_input = behavior_input_for_profile(&profile_id);
     let behavior_result = apply_fan_behavior(behavior_input)?;
 
@@ -102,7 +102,7 @@ fn apply_firmware_wmi_fan_control(
     }
 
     thread::sleep(Duration::from_millis(500));
-    let power_after = read_power_readback();
+    let power_after = read_power_readback(paths);
     let power_detail = format_power_limit_delta(&power_before, &power_after);
 
     let readback = Some(json!({

@@ -1,4 +1,4 @@
-mod backend;
+pub mod backend;
 
 use backend::{
     blue_light, commands, nitro_guard, nitro_key, service_pipe, single_instance, smart_charge,

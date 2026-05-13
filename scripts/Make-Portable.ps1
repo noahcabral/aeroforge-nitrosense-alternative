@@ -7,6 +7,7 @@ $version = $package.version
 $releaseDir = Join-Path $projectRoot 'src-tauri\target\release'
 $releaseExe = Join-Path $releaseDir 'aeroforge-control.exe'
 $hotkeyHelperExe = Join-Path $releaseDir 'aeroforge-hotkey-helper.exe'
+$installerExe = Join-Path $releaseDir "bundle\nsis\AeroForge Control_${version}_x64-setup.exe"
 $debugCollectorCmd = Join-Path $projectRoot 'scripts\AeroForge-Debug-Collector.cmd'
 if (-not (Test-Path -LiteralPath $releaseExe)) {
   throw "Release executable not found at $releaseExe. Run 'npm.cmd run tauri:build' first."
@@ -17,10 +18,14 @@ if (-not (Test-Path -LiteralPath $hotkeyHelperExe)) {
 if (-not (Test-Path -LiteralPath $debugCollectorCmd)) {
   throw "Debug collector not found at $debugCollectorCmd."
 }
+if (-not (Test-Path -LiteralPath $installerExe)) {
+  throw "Installer executable not found at $installerExe. Run 'npm.cmd run tauri:build' first."
+}
 
 $portableRoot = Join-Path $projectRoot 'portable'
 $portableDir = Join-Path $portableRoot 'AeroForge Control Portable'
 $portableZip = Join-Path $portableRoot "AeroForge-Control-Portable-$version.zip"
+$installerCopy = Join-Path $portableRoot "AeroForge-Control-Setup-$version.exe"
 
 New-Item -ItemType Directory -Force -Path $portableRoot | Out-Null
 
@@ -67,7 +72,7 @@ Notes:
 - WebView2 must be present on the machine. It is already installed on most modern Windows systems.
 - For a first install on a fresh machine, use the Setup EXE so AeroForgeService is installed.
 - Release builds do not bundle or auto-load WinRing0. CPU MSR/RAPL diagnostics require an explicit external driver opt-in.
-- NVIDIA temperature/utilization/VRAM monitoring is gated by Windows dedicated-GPU activity. NVIDIA power readback is opt-in with AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1.
+- NVIDIA temperature/utilization/VRAM monitoring is gated by Windows dedicated-GPU activity. NVIDIA power readback follows Settings > NVIDIA Telemetry Polling; AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1 can still force diagnostics.
 
 Installer builds:
 - NSIS: src-tauri\target\release\bundle\nsis
@@ -80,6 +85,8 @@ if (Test-Path -LiteralPath $portableZip) {
 }
 
 Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZip -Force
+Copy-Item -LiteralPath $installerExe -Destination $installerCopy -Force
 
 Write-Output "Portable folder: $portableDir"
 Write-Output "Portable zip: $portableZip"
+Write-Output "Installer copy: $installerCopy"

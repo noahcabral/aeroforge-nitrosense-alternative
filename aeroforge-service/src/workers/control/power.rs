@@ -41,7 +41,7 @@ pub fn apply_power_profile(
     let custom_base_profile = request.custom_base_profile.clone();
     let processor_state_control_enabled = request.processor_state_control_enabled;
     let processor_state = sanitize_processor_state(request.processor_state)?;
-    let power_before = nvidia_power::read_power_readback();
+    let power_before = nvidia_power::read_power_readback(paths);
     let operating_mode = apply_operating_mode(&profile_id, custom_base_profile.as_ref())?;
     let profile_label = profile_label(&profile_id);
 
@@ -95,7 +95,7 @@ pub fn apply_power_profile(
         rapl_power::apply_profile_package_limit(paths, &profile_id, custom_base_profile.as_ref());
 
     thread::sleep(Duration::from_millis(500));
-    let power_after = nvidia_power::read_power_readback();
+    let power_after = nvidia_power::read_power_readback(paths);
     let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
 
     let processor_detail = if processor_state_control_enabled {
