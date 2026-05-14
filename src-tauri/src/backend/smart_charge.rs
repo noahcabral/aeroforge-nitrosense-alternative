@@ -22,6 +22,7 @@ const CARE_CENTER_AUTH_DATA: &str = "OO24T5iPpUKxfxjPZW4ddo3uGeIJXC+ZbJPzCNGMBen
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\CC\settings.json";
 const CARE_CENTER_TIMEOUT: Duration = Duration::from_secs(5);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
 pub struct SmartChargeApplyPayload {
     pub enabled: bool,
@@ -64,26 +65,238 @@ fn apply_battery_control_direct(enabled: bool) -> Result<SmartChargeApplyPayload
 $status = [byte]$args[0]
 $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
-$set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments @{
-  uBatteryNo = [byte]1
-  uFunctionMask = [byte]1
-  uFunctionStatus = $status
-  uReservedIn = ([byte[]](0,0,0,0,0))
-} -ErrorAction Stop
-$get = Invoke-CimMethod -InputObject $battery -MethodName GetBatteryHealthControlStatus -Arguments @{
-  uBatteryNo = [byte]1
-  uFunctionQuery = [byte]1
-  uReserved = ([byte[]](0,0))
-} -ErrorAction Stop
-$health = [int]$get.uFunctionStatus[0]
-[ordered]@{
-  requestedHealthStatus = [int]$status
-  healthStatus = $health
-  functionList = [int]$get.uFunctionList
-  getReturn = @($get.uReturn)
-  setReturn = $set.uReturn
-  setReservedOut = $set.uReservedOut
-} | ConvertTo-Json -Compress
+
+function Emit-AeroForgeResult {
+  param($Payload)
+  Write-Output ('AEROFORGE_BATTERY_CONTROL_RESULT:' + ($Payload | ConvertTo-Json -Compress -Depth 8))
+  exit 0
+}
+
+function Read-HealthStatus {
+  param($Battery, [int]$BatteryNo, [int]$FunctionQuery)
+  Invoke-CimMethod -InputObject $Battery -MethodName GetBatteryHealthControlStatus -Arguments @{
+    uBatteryNo = [byte]$BatteryNo
+    uFunctionQuery = [byte]$FunctionQuery
+    uReserved = ([byte[]](0,0))
+  } -ErrorAction Stop
+}
+
+function Find-DesiredStatus {
+  param($Battery, [int]$Requested)
+  $reads = New-Object System.Collections.Generic.List[object]
+  foreach ($batteryNo in @(0,1,2,3)) {
+    foreach ($query in @(0,1,2,3,4,5)) {
+      try {
+        $get = Read-HealthStatus -Battery $Battery -BatteryNo $batteryNo -FunctionQuery $query
+        $statuses = @($get.uFunctionStatus | ForEach-Object { [int]$_ })
+        $reads.Add([ordered]@{
+          batteryNo = $batteryNo
+          functionQuery = $query
+          functionList = [int]$get.uFunctionList
+          functionStatus = $statuses
+          getReturn = @($get.uReturn)
+          result = $get
+        })
+      } catch {
+        $reads.Add([ordered]@{
+          batteryNo = $batteryNo
+          functionQuery = $query
+          error = $_.Exception.Message
+        })
+      }
+    }
+  }
+
+  foreach ($read in $reads) {
+    if (-not $read.Contains('functionStatus')) { continue }
+    $statuses = @($read.functionStatus)
+    if ($statuses.Count -ge 2 -and (([int]$read.functionList -band 2) -ne 0) -and $statuses[1] -eq $Requested) {
+      return [ordered]@{ ok = $true; health = $Requested; index = 1; read = $read }
+    }
+
+    for ($index = 0; $index -lt $statuses.Count; $index++) {
+      if ($statuses[$index] -eq $Requested) {
+        return [ordered]@{ ok = $true; health = $Requested; index = $index; read = $read }
+      }
+    }
+  }
+
+  $best = $reads | Where-Object { $_.Contains('functionStatus') } | Select-Object -First 1
+  $health = -1
+  if ($best) {
+    $usable = @($best.functionStatus | Where-Object { $_ -ne 255 })
+    if ($usable.Count -gt 0) {
+      $health = [int]($usable | Measure-Object -Maximum).Maximum
+    }
+  }
+  return [ordered]@{ ok = $false; health = $health; index = $null; read = $best; reads = $reads }
+}
+
+function Read-FunctionData {
+  param($Battery, [int]$FunctionMask)
+  Invoke-CimMethod -InputObject $Battery -MethodName GetBatteryFunctionData -Arguments @{
+    uFunctionMask = [byte]$FunctionMask
+    uReservedIn = ([byte[]](0,0,0,0,0))
+  } -ErrorAction Stop
+}
+
+function Find-DesiredFunctionData {
+  param($Battery, [int]$Requested)
+  $reads = New-Object System.Collections.Generic.List[object]
+  foreach ($mask in @(0,1,2,3,4,5,7,255)) {
+    try {
+      $get = Read-FunctionData -Battery $Battery -FunctionMask $mask
+      $reads.Add([ordered]@{
+        functionMask = $mask
+        bacStatus = [int]$get.uBACStatus
+        bacStartTime = @($get.uBACStartTime)
+        bacStopTime = @($get.uBACStopTime)
+        returnCode = @($get.uReturnCode)
+        reservedOut = @($get.uReservedOut)
+        result = $get
+      })
+    } catch {
+      $reads.Add([ordered]@{
+        functionMask = $mask
+        error = $_.Exception.Message
+      })
+    }
+  }
+
+  foreach ($read in $reads) {
+    if (-not $read.Contains('bacStatus')) { continue }
+    if ([int]$read.bacStatus -eq $Requested) {
+      return [ordered]@{ ok = $true; health = $Requested; read = $read }
+    }
+  }
+
+  $best = $reads | Where-Object { $_.Contains('bacStatus') } | Select-Object -First 1
+  $health = -1
+  if ($best) { $health = [int]$best.bacStatus }
+  return [ordered]@{ ok = $false; health = $health; read = $best; reads = $reads }
+}
+
+function Add-BatteryHealthAttempts {
+  param([System.Collections.Generic.List[object]]$Attempts, [int]$BatteryNo)
+  $Attempts.Add(@{
+    Name = ('battery{0}-health-byte1-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]2
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $Attempts.Add(@{
+    Name = ('battery{0}-combined-byte0-byte1-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]3
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $Attempts.Add(@{
+    Name = ('battery{0}-legacy-byte0-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]1
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+}
+
+function Add-BatteryFunctionDataAttempts {
+  param([System.Collections.Generic.List[object]]$Attempts)
+  foreach ($mask in @(2,1,3,0,4,5,7)) {
+    $Attempts.Add(@{
+      Name = ('battery-function-data-mask{0}' -f $mask)
+      FunctionMask = $mask
+      Arguments = @{
+        uBACSwitch = $status
+        uFunctionMask = [byte]$mask
+        uReservedIn = ([byte[]](0,0,0,0,0))
+      }
+    })
+  }
+}
+
+$attempts = New-Object System.Collections.Generic.List[object]
+Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 1
+Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 0
+
+$errors = New-Object System.Collections.Generic.List[string]
+foreach ($attempt in $attempts) {
+  try {
+    $set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments $attempt.Arguments -ErrorAction Stop
+    Start-Sleep -Milliseconds 250
+    $match = Find-DesiredStatus -Battery $battery -Requested ([int]$status)
+    $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
+    if ($match.ok) {
+      $read = $match.read
+      Emit-AeroForgeResult ([ordered]@{
+        requestedHealthStatus = [int]$status
+        healthStatus = $health
+        setAttempt = $attempt.Name
+        matchedStatusIndex = $match.index
+        matchedBatteryNo = $read.batteryNo
+        matchedFunctionQuery = $read.functionQuery
+        functionList = [int]$read.functionList
+        functionStatus = @($read.functionStatus)
+        getReturn = @($read.getReturn)
+        setReturn = @($set.uReturn)
+        setReservedOut = @($set.uReservedOut)
+      })
+    }
+    $read = $match.read
+    $readDetail = if ($read -and $read.Contains('functionStatus')) {
+      ('batteryNo {0} query {1} statuses [{2}]' -f $read.batteryNo, $read.functionQuery, (@($read.functionStatus) -join ','))
+    } else {
+      'no readable health-status rows'
+    }
+    $errors.Add(('{0}: readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
+  } catch {
+    $errors.Add(('{0}: {1}' -f $attempt.Name, $_.Exception.Message))
+  }
+}
+
+$functionDataAttempts = New-Object System.Collections.Generic.List[object]
+Add-BatteryFunctionDataAttempts -Attempts $functionDataAttempts
+foreach ($attempt in $functionDataAttempts) {
+  try {
+    $set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryFunctionData -Arguments $attempt.Arguments -ErrorAction Stop
+    Start-Sleep -Milliseconds 350
+    $match = Find-DesiredFunctionData -Battery $battery -Requested ([int]$status)
+    $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
+    if ($match.ok) {
+      $read = $match.read
+      Emit-AeroForgeResult ([ordered]@{
+        requestedHealthStatus = [int]$status
+        healthStatus = [int]$status
+        setAttempt = $attempt.Name
+        mode = 'battery-function-data'
+        matchedFunctionMask = [int]$read.functionMask
+        bacStatus = [int]$read.bacStatus
+        functionDataReturn = @($read.returnCode)
+        functionDataReservedOut = @($read.reservedOut)
+        setReturnCode = @($set.uReturnCode)
+        setReservedOut = @($set.uReservedOut)
+      })
+    }
+    $read = $match.read
+    $readDetail = if ($read -and $read.Contains('bacStatus')) {
+      ('mask {0} bacStatus {1}' -f $read.functionMask, $read.bacStatus)
+    } else {
+      'no readable function-data rows'
+    }
+    $errors.Add(('{0}: function data readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
+  } catch {
+    $errors.Add(('{0}: {1}' -f $attempt.Name, $_.Exception.Message))
+  }
+}
+
+throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
 "#;
 
     let output = Command::new("powershell")
@@ -113,7 +326,7 @@ $health = [int]$get.uFunctionStatus[0]
         );
     }
 
-    let parsed = parse_first_json_value(&output.stdout)?;
+    let parsed = parse_battery_control_result_value(&output.stdout)?;
     let verified_health_status = parsed
         .get("healthStatus")
         .and_then(Value::as_u64)
@@ -134,13 +347,15 @@ $health = [int]$get.uFunctionStatus[0]
     let care_center_battery_healthy_semantic = if verified_health_status == 1 { 0 } else { 1 };
     let detail = if enabled {
         format!(
-            "Applied optimized charging through direct BatteryControl WMI health mode. Health limiter status {} keeps the 80% ceiling active.",
-            verified_health_status
+            "Applied optimized charging through direct BatteryControl WMI. Health limiter status {} keeps the 80% ceiling active. {}",
+            verified_health_status,
+            battery_control_attempt_detail(&parsed)
         )
     } else {
         format!(
-            "Applied full battery charging through direct BatteryControl WMI health mode. Health limiter status {} allows full charge.",
-            verified_health_status
+            "Applied full battery charging through direct BatteryControl WMI. Health limiter status {} allows full charge. {}",
+            verified_health_status,
+            battery_control_attempt_detail(&parsed)
         )
     };
 
@@ -152,58 +367,63 @@ $health = [int]$get.uFunctionStatus[0]
     })
 }
 
-fn parse_first_json_value(bytes: &[u8]) -> Result<Value, DynError> {
-    let text = String::from_utf8_lossy(bytes);
-    let object = first_json_object(&text).ok_or_else(|| {
-        io::Error::other(format!(
-            "PowerShell output did not contain a JSON object: {}",
-            text.trim()
-        ))
-    })?;
-    Ok(serde_json::from_str::<Value>(object)?)
-}
-
-fn first_json_object(text: &str) -> Option<&str> {
-    let mut start = None;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, ch) in text.char_indices() {
-        if start.is_none() {
-            if ch == '{' {
-                start = Some(index);
-                depth = 1;
-            }
-            continue;
-        }
-
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    let end = index + ch.len_utf8();
-                    return start.map(|start| &text[start..end]);
-                }
-            }
-            _ => {}
-        }
+fn battery_control_attempt_detail(output: &Value) -> String {
+    let attempt = output
+        .get("setAttempt")
+        .and_then(Value::as_str)
+        .unwrap_or("BatteryControl attempt");
+    let mode = output.get("mode").and_then(Value::as_str);
+    if mode == Some("battery-function-data") {
+        let mask = output
+            .get("matchedFunctionMask")
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let status = output
+            .get("bacStatus")
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        return format!(
+            "Matched BatteryControl function-data mask {mask} BAC status {status} with {attempt}."
+        );
     }
 
-    None
+    let index = output
+        .get("matchedStatusIndex")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let battery_no = output
+        .get("matchedBatteryNo")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let query = output
+        .get("matchedFunctionQuery")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    format!("Matched BatteryControl battery {battery_no} query {query} status byte {index} with {attempt}.")
+}
+
+fn parse_battery_control_result_value(bytes: &[u8]) -> Result<Value, DynError> {
+    let text = String::from_utf8_lossy(bytes);
+    let payload = text
+        .lines()
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix(BATTERY_CONTROL_RESULT_PREFIX)
+        })
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "PowerShell output did not contain an AeroForge BatteryControl result line: {}",
+                text.trim()
+            ))
+        })?
+        .trim();
+
+    Ok(serde_json::from_str::<Value>(payload)?)
 }
 
 async fn apply_care_center_smart_charging(

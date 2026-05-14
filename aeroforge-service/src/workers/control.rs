@@ -14,9 +14,12 @@ mod state;
 
 use crate::{
     paths::{write_log_line, ServicePaths},
-    workers::{run_periodic_worker, unix_timestamp, WorkerEventSender, WorkerRegistration},
+    workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
 };
-use std::sync::{Mutex, OnceLock};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 pub use models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
@@ -27,9 +30,10 @@ pub use models::{
 };
 
 const WORKER_NAME: &str = "control-worker";
-const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-const CUSTOM_FAN_REFRESH_INTERVAL_SECS: u64 = 1;
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+const CUSTOM_FAN_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 static FAN_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static LAST_CUSTOM_FAN_REFRESH: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new(WORKER_NAME, run)
@@ -193,6 +197,7 @@ fn apply_custom_fan_curves_unlocked(
     match fan::apply_custom_fan_curves(paths, request) {
         Ok(applied) => {
             state::persist_fan_apply_success(paths, &applied)?;
+            note_custom_fan_refresh_now();
             Ok(applied)
         }
         Err(error) => {
@@ -252,7 +257,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     };
 
-    if !custom_fan_refresh_due(snapshot.last_fan_applied_at_unix) {
+    if !custom_fan_refresh_due()? {
         return Ok(());
     }
 
@@ -279,12 +284,30 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     Ok(())
 }
 
-fn custom_fan_refresh_due(last_applied_at_unix: Option<u64>) -> bool {
-    let Some(last_applied_at_unix) = last_applied_at_unix else {
-        return true;
-    };
+fn custom_fan_refresh_due() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let mut last_refresh = LAST_CUSTOM_FAN_REFRESH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "Custom fan refresh timer lock was poisoned.")?;
 
-    unix_timestamp().saturating_sub(last_applied_at_unix) >= CUSTOM_FAN_REFRESH_INTERVAL_SECS
+    if last_refresh
+        .as_ref()
+        .is_some_and(|last_refresh| last_refresh.elapsed() < CUSTOM_FAN_REFRESH_INTERVAL)
+    {
+        return Ok(false);
+    }
+
+    *last_refresh = Some(Instant::now());
+    Ok(true)
+}
+
+fn note_custom_fan_refresh_now() {
+    if let Ok(mut last_refresh) = LAST_CUSTOM_FAN_REFRESH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *last_refresh = Some(Instant::now());
+    }
 }
 
 fn restore_startup_state(

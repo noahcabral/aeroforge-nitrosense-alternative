@@ -9,6 +9,7 @@ use crate::{
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,6 +267,12 @@ $status = [byte]$args[0]
 $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
+function Emit-AeroForgeResult {
+  param($Payload)
+  Write-Output ('AEROFORGE_BATTERY_CONTROL_RESULT:' + ($Payload | ConvertTo-Json -Compress -Depth 8))
+  exit 0
+}
+
 function Read-HealthStatus {
   param($Battery, [int]$BatteryNo, [int]$FunctionQuery)
   $get = Invoke-CimMethod -InputObject $Battery -MethodName GetBatteryHealthControlStatus -Arguments @{
@@ -436,7 +443,7 @@ foreach ($attempt in $attempts) {
     $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
     if ($match.ok) {
       $read = $match.read
-      [ordered]@{
+      Emit-AeroForgeResult ([ordered]@{
         requestedHealthStatus = [int]$status
         healthStatus = $health
         setAttempt = $attempt.Name
@@ -448,8 +455,7 @@ foreach ($attempt in $attempts) {
         getReturn = @($read.getReturn)
         setReturn = @($set.uReturn)
         setReservedOut = @($set.uReservedOut)
-      } | ConvertTo-Json -Compress
-      exit 0
+      })
     }
     $read = $match.read
     $readDetail = if ($read -and $read.Contains('functionStatus')) {
@@ -473,7 +479,7 @@ foreach ($attempt in $functionDataAttempts) {
     $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
     if ($match.ok) {
       $read = $match.read
-      [ordered]@{
+      Emit-AeroForgeResult ([ordered]@{
         requestedHealthStatus = [int]$status
         healthStatus = [int]$status
         setAttempt = $attempt.Name
@@ -484,8 +490,7 @@ foreach ($attempt in $functionDataAttempts) {
         functionDataReservedOut = @($read.reservedOut)
         setReturnCode = @($set.uReturnCode)
         setReservedOut = @($set.uReservedOut)
-      } | ConvertTo-Json -Compress
-      exit 0
+      })
     }
     $read = $match.read
     $readDetail = if ($read -and $read.Contains('bacStatus')) {
@@ -529,7 +534,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
         );
     }
 
-    let parsed = parse_first_json_object::<BatteryControlApplyOutput>(&output.stdout)?;
+    let parsed = parse_battery_control_result::<BatteryControlApplyOutput>(&output.stdout)?;
     if parsed.health_status != requested_health_status {
         return Err(io::Error::other(format!(
             "BatteryControl returned healthStatus {} after requesting {}.",
@@ -541,60 +546,25 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     Ok(parsed)
 }
 
-fn parse_first_json_object<T: DeserializeOwned>(
+fn parse_battery_control_result<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
     let text = String::from_utf8_lossy(bytes);
-    let object = first_json_object(&text).ok_or_else(|| {
-        io::Error::other(format!(
-            "PowerShell output did not contain a JSON object: {}",
-            text.trim()
-        ))
-    })?;
-    Ok(serde_json::from_str::<T>(object)?)
-}
+    let payload = text
+        .lines()
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix(BATTERY_CONTROL_RESULT_PREFIX)
+        })
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "PowerShell output did not contain an AeroForge BatteryControl result line: {}",
+                text.trim()
+            ))
+        })?
+        .trim();
 
-fn first_json_object(text: &str) -> Option<&str> {
-    let mut start = None;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, ch) in text.char_indices() {
-        if start.is_none() {
-            if ch == '{' {
-                start = Some(index);
-                depth = 1;
-            }
-            continue;
-        }
-
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    let end = index + ch.len_utf8();
-                    return start.map(|start| &text[start..end]);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
+    Ok(serde_json::from_str::<T>(payload)?)
 }
 
 #[cfg(test)]
@@ -608,11 +578,11 @@ mod tests {
     }
 
     #[test]
-    fn extracts_json_object_from_extra_powershell_output() {
-        let parsed = parse_first_json_object::<Probe>(
+    fn parses_only_sentinel_prefixed_battery_control_result() {
+        let parsed = parse_battery_control_result::<Probe>(
             br#"noise
-{"healthStatus":1}
-1
+A stray object that must be ignored: {"healthStatus":0}
+AEROFORGE_BATTERY_CONTROL_RESULT:{"healthStatus":1}
 "#,
         )
         .unwrap();
