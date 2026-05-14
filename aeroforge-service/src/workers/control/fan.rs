@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::{env, thread, time::Duration};
+use std::{env, io, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -188,48 +188,22 @@ fn apply_custom_wmi_fan_control(
     }
 
     let strategy = select_custom_fan_strategy(paths);
-    let behavior_result = if let Some(behavior_input) = strategy.behavior_input {
-        let result = apply_fan_behavior(behavior_input)?;
+    let mut behavior_results = Vec::new();
+    if let Some(behavior_input) = strategy.behavior_input {
+        let result = apply_custom_behavior_latch(paths, &strategy, behavior_input, "before")?;
         if wmi_output_accepted(&result) {
-            thread::sleep(Duration::from_millis(200));
-        } else {
-            write_log_line(
-                &paths.component_log("control-fan"),
-                "WARN",
-                &format!(
-                    "Custom fan strategy {} requested SetGamingFanBehavior(0x{behavior_input:08X}), but AcerGamingFunction returned gmOutput {:?}. Continuing with direct speed writes. {}",
-                    strategy.id, result.output, strategy.reason
-                ),
-            )?;
+            thread::sleep(Duration::from_millis(150));
         }
-        Some(result)
-    } else {
-        None
-    };
+        behavior_results.push(result);
+    }
 
     let speed_results = match apply_direct_speed_targets(cpu_speed_percent, gpu_speed_percent) {
         Ok(results) => results,
         Err(error) => {
-            let rollback = apply_fan_behavior(FAN_BEHAVIOR_AUTO)?;
-            let detail = format!(
-                "Custom fan speed write failed before all targets were accepted: {error}. Restored Auto fan behavior with SetGamingFanBehavior({}) and gmOutput {:?}.",
-                rollback.input, rollback.output
-            );
+            let detail =
+                format!("Custom fan speed write failed before all targets were accepted: {error}.");
             write_log_line(&paths.component_log("control-fan"), "WARN", &detail)?;
-            return Ok(AppliedFanControlSnapshot {
-                profile_id: FanProfileId::Auto,
-                curves: Some(curves),
-                cpu_speed_percent: None,
-                gpu_speed_percent: None,
-                readback: Some(json!({
-                    "backend": "acer-gaming-wmi",
-                    "strategy": "custom-direct-speed-rejected-restored-auto",
-                    "error": error.to_string(),
-                    "rollbackBehavior": wmi_result_json(&rollback),
-                })),
-                applied_at_unix: unix_timestamp(),
-                detail,
-            });
+            return Err(io::Error::other(detail).into());
         }
     };
 
@@ -237,26 +211,37 @@ fn apply_custom_wmi_fan_control(
         .iter()
         .find(|result| !wmi_output_accepted(result))
     {
-        let rollback = apply_fan_behavior(FAN_BEHAVIOR_AUTO)?;
         let detail = format!(
-            "Custom fan speed target was rejected by AcerGamingFunction {} input {} gmOutput {:?}. Restored Auto fan behavior with SetGamingFanBehavior({}) and gmOutput {:?}.",
-            rejected.method, rejected.input, rejected.output, rollback.input, rollback.output
+            "Custom fan speed target was rejected by AcerGamingFunction {} input {} gmOutput {:?}.",
+            rejected.method, rejected.input, rejected.output
         );
         write_log_line(&paths.component_log("control-fan"), "WARN", &detail)?;
-        return Ok(AppliedFanControlSnapshot {
-            profile_id: FanProfileId::Auto,
-            curves: Some(curves),
-            cpu_speed_percent: None,
-            gpu_speed_percent: None,
-            readback: Some(json!({
-                "backend": "acer-gaming-wmi",
-                "strategy": "custom-direct-speed-rejected-restored-auto",
-                "rejectedSpeed": wmi_result_json(rejected),
-                "rollbackBehavior": wmi_result_json(&rollback),
-            })),
-            applied_at_unix: unix_timestamp(),
-            detail,
-        });
+        return Err(io::Error::other(detail).into());
+    }
+
+    let mut speed_results = speed_results;
+    if let Some(behavior_input) = strategy.behavior_input {
+        thread::sleep(Duration::from_millis(150));
+        behavior_results.push(apply_custom_behavior_latch(
+            paths,
+            &strategy,
+            behavior_input,
+            "after",
+        )?);
+        thread::sleep(Duration::from_millis(150));
+        let reinforcement = apply_direct_speed_targets(cpu_speed_percent, gpu_speed_percent)?;
+        if let Some(rejected) = reinforcement
+            .iter()
+            .find(|result| !wmi_output_accepted(result))
+        {
+            let detail = format!(
+                "Custom fan reinforcement target was rejected by AcerGamingFunction {} input {} gmOutput {:?}.",
+                rejected.method, rejected.input, rejected.output
+            );
+            write_log_line(&paths.component_log("control-fan"), "WARN", &detail)?;
+            return Err(io::Error::other(detail).into());
+        }
+        speed_results.extend(reinforcement);
     }
 
     let readback = Some(json!({
@@ -266,7 +251,7 @@ fn apply_custom_wmi_fan_control(
         "instance": "ACPI\\PNP0C14\\APGe_0",
         "strategy": strategy.id,
         "strategyReason": strategy.reason,
-        "behavior": behavior_result.as_ref().map(wmi_result_json),
+        "behavior": behavior_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "verification": build_fan_verification(),
     }));
@@ -275,7 +260,7 @@ fn apply_custom_wmi_fan_control(
     let detail = build_custom_apply_detail(
         context,
         &strategy,
-        behavior_result.as_ref(),
+        &behavior_results,
         cpu_speed_percent,
         gpu_speed_percent,
         &verification,
@@ -293,6 +278,26 @@ fn apply_custom_wmi_fan_control(
         applied_at_unix: unix_timestamp(),
         detail,
     })
+}
+
+fn apply_custom_behavior_latch(
+    paths: &ServicePaths,
+    strategy: &CustomFanStrategy,
+    behavior_input: u64,
+    phase: &str,
+) -> Result<super::acer_wmi::AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    let result = apply_fan_behavior(behavior_input)?;
+    if !wmi_output_accepted(&result) {
+        write_log_line(
+            &paths.component_log("control-fan"),
+            "WARN",
+            &format!(
+                "Custom fan strategy {} requested {phase}-speed SetGamingFanBehavior(0x{behavior_input:08X}), but AcerGamingFunction returned gmOutput {:?}. Continuing with direct speed writes. {}",
+                strategy.id, result.output, strategy.reason
+            ),
+        )?;
+    }
+    Ok(result)
 }
 
 fn apply_direct_speed_targets(
@@ -362,7 +367,7 @@ fn build_apply_detail(
 fn build_custom_apply_detail(
     context: &str,
     strategy: &CustomFanStrategy,
-    behavior_result: Option<&super::acer_wmi::AcerWmiMethodResult>,
+    behavior_results: &[super::acer_wmi::AcerWmiMethodResult],
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     verification: &str,
@@ -374,15 +379,21 @@ fn build_custom_apply_detail(
         _ => "No explicit per-fan speed write was requested.".into(),
     };
 
-    let behavior_detail = match behavior_result {
-        Some(result) => format!(
-            "SetGamingFanBehavior(0x{:08X}) was sent first by strategy {} and returned gmOutput {:?}. {}",
-            result.input, strategy.id, result.output, strategy.reason
-        ),
-        None => format!(
+    let behavior_detail = if behavior_results.is_empty() {
+        format!(
             "No SetGamingFanBehavior write was sent by strategy {}. {}",
             strategy.id, strategy.reason
-        ),
+        )
+    } else {
+        let outputs = behavior_results
+            .iter()
+            .map(|result| format!("0x{:08X}->{:?}", result.input, result.output))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "SetGamingFanBehavior was sent before and after direct speeds by strategy {} with outputs [{}]. {}",
+            strategy.id, outputs, strategy.reason
+        )
     };
 
     format!(

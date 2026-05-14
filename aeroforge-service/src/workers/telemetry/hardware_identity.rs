@@ -62,7 +62,7 @@ pub fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentitySnapshot 
         paths,
         "telemetry-identity",
         &cache,
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60 * 30),
         |state| state.last_refresh().is_none(),
         query_hardware_identity_snapshot,
         |state, result| {

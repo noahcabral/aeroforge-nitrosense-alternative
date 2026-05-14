@@ -17,11 +17,17 @@ struct BatteryControlApplyOutput {
     #[serde(default)]
     set_attempt: Option<String>,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     matched_status_index: Option<usize>,
     #[serde(default)]
     matched_battery_no: Option<u8>,
     #[serde(default)]
     matched_function_query: Option<u8>,
+    #[serde(default)]
+    matched_function_mask: Option<u8>,
+    #[serde(default)]
+    bac_status: Option<u8>,
 }
 
 pub fn apply_smart_charging(
@@ -65,17 +71,25 @@ pub fn apply_smart_charging(
 fn battery_control_attempt_detail(output: &BatteryControlApplyOutput) -> String {
     match (
         &output.set_attempt,
+        output.mode.as_deref(),
         output.matched_status_index,
         output.matched_battery_no,
         output.matched_function_query,
+        output.matched_function_mask,
+        output.bac_status,
     ) {
-        (Some(attempt), Some(index), Some(battery_no), Some(query)) => {
+        (Some(attempt), Some("battery-function-data"), _, _, _, Some(mask), Some(status)) => {
+            format!("Matched BatteryControl function-data mask {mask} BAC status {status} with {attempt}.")
+        }
+        (Some(attempt), _, Some(index), Some(battery_no), Some(query), _, _) => {
             format!("Matched BatteryControl battery {battery_no} query {query} status byte {index} with {attempt}.")
         }
-        (Some(attempt), Some(index), _, _) => {
+        (Some(attempt), _, Some(index), _, _, _, _) => {
             format!("Matched BatteryControl status byte {index} with {attempt}.")
         }
-        (Some(attempt), None, _, _) => format!("Matched BatteryControl readback with {attempt}."),
+        (Some(attempt), _, None, _, _, _, _) => {
+            format!("Matched BatteryControl readback with {attempt}.")
+        }
         _ => "Matched BatteryControl readback.".into(),
     }
 }
@@ -111,6 +125,7 @@ $result = [ordered]@{
   classes = @()
   instances = @()
   statusReads = @()
+  functionDataReads = @()
   errors = @()
 }
 
@@ -185,6 +200,28 @@ if ($instances.Count -gt 0) {
           functionQuery = $query
           error = $_.Exception.Message
         }
+      }
+    }
+  }
+
+  foreach ($mask in @(0,1,2,3,4,5,7,255)) {
+    try {
+      $get = Invoke-CimMethod -InputObject $battery -MethodName GetBatteryFunctionData -Arguments @{
+        uFunctionMask = [byte]$mask
+        uReservedIn = ([byte[]](0,0,0,0,0))
+      } -ErrorAction Stop
+      $result.functionDataReads += [ordered]@{
+        functionMask = $mask
+        bacStatus = [int]$get.uBACStatus
+        bacStartTime = @($get.uBACStartTime | ForEach-Object { [int]$_ })
+        bacStopTime = @($get.uBACStopTime | ForEach-Object { [int]$_ })
+        returnCode = @($get.uReturnCode | ForEach-Object { [int]$_ })
+        reservedOut = @($get.uReservedOut | ForEach-Object { [int]$_ })
+      }
+    } catch {
+      $result.functionDataReads += [ordered]@{
+        functionMask = $mask
+        error = $_.Exception.Message
       }
     }
   }
@@ -295,6 +332,51 @@ function Find-DesiredStatus {
   return [ordered]@{ ok = $false; health = $health; index = $null; read = $best; reads = $reads }
 }
 
+function Read-FunctionData {
+  param($Battery, [int]$FunctionMask)
+  $get = Invoke-CimMethod -InputObject $Battery -MethodName GetBatteryFunctionData -Arguments @{
+    uFunctionMask = [byte]$FunctionMask
+    uReservedIn = ([byte[]](0,0,0,0,0))
+  } -ErrorAction Stop
+  return $get
+}
+
+function Find-DesiredFunctionData {
+  param($Battery, [int]$Requested)
+  $reads = New-Object System.Collections.Generic.List[object]
+  foreach ($mask in @(0,1,2,3,4,5,7,255)) {
+    try {
+      $get = Read-FunctionData -Battery $Battery -FunctionMask $mask
+      $reads.Add([ordered]@{
+        functionMask = $mask
+        bacStatus = [int]$get.uBACStatus
+        bacStartTime = @($get.uBACStartTime)
+        bacStopTime = @($get.uBACStopTime)
+        returnCode = @($get.uReturnCode)
+        reservedOut = @($get.uReservedOut)
+        result = $get
+      })
+    } catch {
+      $reads.Add([ordered]@{
+        functionMask = $mask
+        error = $_.Exception.Message
+      })
+    }
+  }
+
+  foreach ($read in $reads) {
+    if (-not $read.Contains('bacStatus')) { continue }
+    if ([int]$read.bacStatus -eq $Requested) {
+      return [ordered]@{ ok = $true; health = $Requested; read = $read }
+    }
+  }
+
+  $best = $reads | Where-Object { $_.Contains('bacStatus') } | Select-Object -First 1
+  $health = -1
+  if ($best) { $health = [int]$best.bacStatus }
+  return [ordered]@{ ok = $false; health = $health; read = $best; reads = $reads }
+}
+
 function Add-BatteryHealthAttempts {
   param([System.Collections.Generic.List[object]]$Attempts, [int]$BatteryNo)
   $Attempts.Add(@{
@@ -324,6 +406,21 @@ function Add-BatteryHealthAttempts {
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
   })
+}
+
+function Add-BatteryFunctionDataAttempts {
+  param([System.Collections.Generic.List[object]]$Attempts)
+  foreach ($mask in @(2,1,3,0,4,5,7)) {
+    $Attempts.Add(@{
+      Name = ('battery-function-data-mask{0}' -f $mask)
+      FunctionMask = $mask
+      Arguments = @{
+        uBACSwitch = $status
+        uFunctionMask = [byte]$mask
+        uReservedIn = ([byte[]](0,0,0,0,0))
+      }
+    })
+  }
 }
 
 $attempts = New-Object System.Collections.Generic.List[object]
@@ -361,6 +458,42 @@ foreach ($attempt in $attempts) {
       'no readable health-status rows'
     }
     $errors.Add(('{0}: readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
+  } catch {
+    $errors.Add(('{0}: {1}' -f $attempt.Name, $_.Exception.Message))
+  }
+}
+
+$functionDataAttempts = New-Object System.Collections.Generic.List[object]
+Add-BatteryFunctionDataAttempts -Attempts $functionDataAttempts
+foreach ($attempt in $functionDataAttempts) {
+  try {
+    $set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryFunctionData -Arguments $attempt.Arguments -ErrorAction Stop
+    Start-Sleep -Milliseconds 350
+    $match = Find-DesiredFunctionData -Battery $battery -Requested ([int]$status)
+    $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
+    if ($match.ok) {
+      $read = $match.read
+      [ordered]@{
+        requestedHealthStatus = [int]$status
+        healthStatus = [int]$status
+        setAttempt = $attempt.Name
+        mode = 'battery-function-data'
+        matchedFunctionMask = [int]$read.functionMask
+        bacStatus = [int]$read.bacStatus
+        functionDataReturn = @($read.returnCode)
+        functionDataReservedOut = @($read.reservedOut)
+        setReturnCode = @($set.uReturnCode)
+        setReservedOut = @($set.uReservedOut)
+      } | ConvertTo-Json -Compress
+      exit 0
+    }
+    $read = $match.read
+    $readDetail = if ($read -and $read.Contains('bacStatus')) {
+      ('mask {0} bacStatus {1}' -f $read.functionMask, $read.bacStatus)
+    } else {
+      'no readable function-data rows'
+    }
+    $errors.Add(('{0}: function data readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
   } catch {
     $errors.Add(('{0}: {1}' -f $attempt.Name, $_.Exception.Message))
   }
