@@ -34,7 +34,7 @@ foreach ($asset in $assets) {
 
 $bodyWasProvided = -not [string]::IsNullOrWhiteSpace($BodyFile)
 if ($bodyWasProvided) {
-  $body = Get-Content -LiteralPath $BodyFile -Raw
+  $body = [string](Get-Content -LiteralPath $BodyFile -Raw)
 } else {
   $body = @"
 AeroForge Control v$version
@@ -74,7 +74,7 @@ try {
   }
   $release = Invoke-RestMethod -Headers $headers -Uri "$apiBase/releases/$($release.id)" -Method Patch -ContentType 'application/json' -Body (@{
     name = $Name
-    body = $body
+    body = [string]$body
     draft = $false
     prerelease = [bool]$Prerelease
     make_latest = 'true'
@@ -91,7 +91,7 @@ try {
     tag_name = $Tag
     target_commitish = $TargetCommitish
     name = $Name
-    body = $body
+    body = [string]$body
     draft = $false
     prerelease = [bool]$Prerelease
     make_latest = 'true'
