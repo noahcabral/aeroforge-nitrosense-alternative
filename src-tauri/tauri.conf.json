@@ -34,14 +34,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": {
-      "../aeroforge-service/target/release/aeroforge-service.exe": "aeroforge-service.exe",
-      "target/release/aeroforge-hotkey-helper.exe": "aeroforge-hotkey-helper.exe",
-      "resources/Install-AeroForgeBundledService.ps1": "Install-AeroForgeBundledService.ps1",
-      "../scripts/AeroForge-Debug-Collector.cmd": "AeroForge-Debug-Collector.cmd",
-      "../third_party/pawnio-modules/IntelMSR.bin": "IntelMSR.bin",
-      "../third_party/pawnio-modules/COPYING": "PawnIO.Modules.COPYING"
-    },
+    "resources": {},
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper",
