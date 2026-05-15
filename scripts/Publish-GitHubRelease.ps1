@@ -1,5 +1,3 @@
-$ErrorActionPreference = 'Stop'
-
 param(
   [string]$Repo = 'noahcabral/aeroforge-nitrosense-alternative',
   [string]$Tag = '',
@@ -8,6 +6,8 @@ param(
   [string]$BodyFile = '',
   [switch]$Prerelease
 )
+
+$ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $package = Get-Content (Join-Path $projectRoot 'package.json') | ConvertFrom-Json
