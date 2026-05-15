@@ -231,7 +231,8 @@ fn run(
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
-    let snapshot = match state::load_snapshot(paths) {
+    // İLK OKUMA: Lock almaya değer mi diye check et
+    let initial_snapshot = match state::load_snapshot(paths) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             let _ = write_log_line(
@@ -244,7 +245,44 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
             return Ok(());
         }
     };
+
+    // Hızlı exit check'leri - lock almadan
+    if !matches!(initial_snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
+        return Ok(());
+    }
+
+    if initial_snapshot.active_fan_curves.is_none() {
+        return Ok(());
+    }
+
+    if !custom_fan_refresh_due(initial_snapshot.last_fan_applied_at_unix) {
+        return Ok(());
+    }
+
+    // Lock al
+    let _fan_apply_guard = FAN_APPLY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Fan apply lock was poisoned.")?;
+
+    // *** KRITIK FIX: Lock'tan SONRA tekrar oku ***
+    let snapshot = match state::load_snapshot(paths) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = write_log_line(
+                &paths.component_log("control-worker"),
+                "ERROR",
+                &format!(
+                    "Control snapshot unavailable after lock acquisition: {error}"
+                ),
+            );
+            return Ok(());
+        }
+    };
+
+    // Tekrar check et - mode değişmiş olabilir
     if !matches!(snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
+        // Auto'ya geçmiş, exit
         return Ok(());
     }
 
@@ -252,15 +290,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     };
 
-    if !custom_fan_refresh_due(snapshot.last_fan_applied_at_unix) {
-        return Ok(());
-    }
-
-    let _fan_apply_guard = FAN_APPLY_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| "Fan apply lock was poisoned.")?;
-
+    // Şimdi güvenli - güncel state ile apply et
     match fan::apply_custom_fan_curves(
         paths,
         ApplyCustomFanCurvesRequest {
