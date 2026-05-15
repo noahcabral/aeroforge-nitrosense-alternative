@@ -116,9 +116,12 @@ pub fn apply_fan_speed(
     selector: u8,
     percent: u8,
 ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    invoke_acer_gaming_u64_method("SetGamingFanSpeed", fan_speed_input(selector, percent))
+}
+
+pub fn fan_speed_input(selector: u8, percent: u8) -> u64 {
     let clamped = clamp_manual_fan_percent(percent);
-    let input = (u64::from(clamped) << 8) | u64::from(selector);
-    invoke_acer_gaming_u64_method("SetGamingFanSpeed", input)
+    (u64::from(clamped) << 8) | u64::from(selector)
 }
 
 pub fn read_firmware_sensor_snapshot(
@@ -1077,7 +1080,10 @@ extern "system" {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_gm_output_byte;
+    use super::{
+        decode_gm_output_byte, fan_speed_input, FAN_BEHAVIOR_AUTO, FAN_BEHAVIOR_CUSTOM_MIXED,
+        FAN_BEHAVIOR_MAX, FAN_SELECTOR_CPU, FAN_SELECTOR_GPU,
+    };
 
     #[test]
     fn decodes_amd_shifted_gm_output_bytes() {
@@ -1092,5 +1098,22 @@ mod tests {
         assert_eq!(decode_gm_output_byte(0x00), 0x00);
         assert_eq!(decode_gm_output_byte(0x01), 0x01);
         assert_eq!(decode_gm_output_byte(0x64), 0x64);
+    }
+
+    #[test]
+    fn uses_confirmed_acer_fan_behavior_inputs() {
+        assert_eq!(FAN_BEHAVIOR_AUTO, 0x0041_0009);
+        assert_eq!(FAN_BEHAVIOR_MAX, 0x0082_0009);
+        assert_eq!(FAN_BEHAVIOR_CUSTOM_MIXED, 0x00C3_0009);
+    }
+
+    #[test]
+    fn encodes_manual_fan_speed_as_percent_byte_plus_fan_index() {
+        assert_eq!(fan_speed_input(FAN_SELECTOR_CPU, 0), 0x0001);
+        assert_eq!(fan_speed_input(FAN_SELECTOR_GPU, 0), 0x0004);
+        assert_eq!(fan_speed_input(FAN_SELECTOR_CPU, 20), 0x1401);
+        assert_eq!(fan_speed_input(FAN_SELECTOR_GPU, 80), 0x5004);
+        assert_eq!(fan_speed_input(FAN_SELECTOR_CPU, 100), 0x6401);
+        assert_eq!(fan_speed_input(FAN_SELECTOR_GPU, 100), 0x6404);
     }
 }
