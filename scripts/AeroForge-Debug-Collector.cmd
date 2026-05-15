@@ -39,6 +39,7 @@ param(
   [switch]$ListOptions,
   [switch]$NoZip,
   [switch]$NoNvidiaSmi,
+  [switch]$NoBatteryFunctionData,
   [string[]]$Poll = @("auto"),
   [int]$SampleSeconds = 0,
   [int]$SampleIntervalSeconds = 3,
@@ -198,6 +199,7 @@ Useful examples:
 
 Privacy / behavior:
   -NoNvidiaSmi                 Skips nvidia-smi calls. Use this when testing whether NVIDIA queries keep the dGPU awake.
+  -NoBatteryFunctionData       Skips BatteryControl GetBatteryFunctionData probes if a machine has unstable battery WMI reads.
   -NoZip                       Leaves the folder only and skips ZIP creation.
   -NoPause                     Closes automatically when complete.
   -ListOptions                 Prints this help text and exits.
@@ -235,6 +237,9 @@ function Start-ElevatedCollectorIfNeeded {
   }
   if ($NoNvidiaSmi) {
     $argumentList.Add("-NoNvidiaSmi")
+  }
+  if ($NoBatteryFunctionData) {
+    $argumentList.Add("-NoBatteryFunctionData")
   }
   if ($Poll.Count -gt 0) {
     $argumentList.Add("-Poll")
@@ -477,6 +482,9 @@ function Get-AcerDirectWmiReadOnlyProbe {
       }
     }
     $batteryRows | Format-Table -AutoSize -Wrap
+    ""
+    "===== BatteryControl function-data read matrix ====="
+    Get-BatteryFunctionDataReadMatrix -BatteryControl $batteryControl | Format-Table -AutoSize -Wrap
   } else {
     "BatteryControl instance not found."
     ""
@@ -912,6 +920,65 @@ function Get-PowerPollSample {
   }
 }
 
+function Get-BatteryHealthStatusReadMatrix {
+  param($BatteryControl)
+
+  foreach ($batteryNo in @(0,1,2,3)) {
+    foreach ($functionQuery in @(0,1,2,3,4,5)) {
+      try {
+        $get = Invoke-CimMethod -InputObject $BatteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
+          uBatteryNo = [byte]$batteryNo
+          uFunctionQuery = [byte]$functionQuery
+          uReserved = ([byte[]](0,0))
+        } -ErrorAction Stop
+        [pscustomobject]@{
+          batteryNo = $batteryNo
+          functionQuery = $functionQuery
+          functionList = $get.uFunctionList
+          functionStatus = (@($get.uFunctionStatus) -join ",")
+          returnValue = (@($get.uReturn) -join ",")
+        }
+      } catch {
+        [pscustomobject]@{
+          batteryNo = $batteryNo
+          functionQuery = $functionQuery
+          error = $_.Exception.Message
+        }
+      }
+    }
+  }
+}
+
+function Get-BatteryFunctionDataReadMatrix {
+  param($BatteryControl)
+
+  if ($NoBatteryFunctionData) {
+    return [pscustomobject]@{ skipped = "NoBatteryFunctionData was set." }
+  }
+
+  foreach ($mask in @(0,1,2,3,4,5,7,255)) {
+    try {
+      $get = Invoke-CimMethod -InputObject $BatteryControl -MethodName GetBatteryFunctionData -Arguments @{
+        uFunctionMask = [byte]$mask
+        uReservedIn = ([byte[]](0,0,0,0,0))
+      } -ErrorAction Stop
+      [pscustomobject]@{
+        functionMask = $mask
+        bacStatus = [int]$get.uBACStatus
+        bacStartTime = (@($get.uBACStartTime) -join ",")
+        bacStopTime = (@($get.uBACStopTime) -join ",")
+        returnCode = (@($get.uReturnCode) -join ",")
+        reservedOut = (@($get.uReservedOut) -join ",")
+      }
+    } catch {
+      [pscustomobject]@{
+        functionMask = $mask
+        error = $_.Exception.Message
+      }
+    }
+  }
+}
+
 function Get-FanPollSample {
   [pscustomobject]@{
     acerFanSnapshot = @(Get-AcerFanReadOnlySnapshot)
@@ -923,38 +990,18 @@ function Get-FanPollSample {
 function Get-BatteryPollSample {
   $batteryControls = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction SilentlyContinue)
   $matrix = @()
+  $functionDataMatrix = @()
   if ($batteryControls.Count -gt 0) {
     $batteryControl = $batteryControls | Select-Object -First 1
-    $matrix = foreach ($batteryNo in @(0,1,2,3)) {
-      foreach ($functionQuery in @(0,1,2,3,4,5)) {
-        try {
-          $get = Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
-            uBatteryNo = [byte]$batteryNo
-            uFunctionQuery = [byte]$functionQuery
-            uReserved = ([byte[]](0,0))
-          } -ErrorAction Stop
-          [pscustomobject]@{
-            batteryNo = $batteryNo
-            functionQuery = $functionQuery
-            functionList = $get.uFunctionList
-            functionStatus = (@($get.uFunctionStatus) -join ",")
-            returnValue = (@($get.uReturn) -join ",")
-          }
-        } catch {
-          [pscustomobject]@{
-            batteryNo = $batteryNo
-            functionQuery = $functionQuery
-            error = $_.Exception.Message
-          }
-        }
-      }
-    }
+    $matrix = @(Get-BatteryHealthStatusReadMatrix -BatteryControl $batteryControl)
+    $functionDataMatrix = @(Get-BatteryFunctionDataReadMatrix -BatteryControl $batteryControl)
   }
 
   [pscustomobject]@{
     windowsBattery = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object *)
     batteryControlPresent = ($batteryControls.Count -gt 0)
     batteryControlMatrix = @($matrix)
+    batteryFunctionDataMatrix = @($functionDataMatrix)
     smartChargeLogTail = @(Get-Content -LiteralPath (Join-Path $env:ProgramData "AeroForge\Service\logs\control-smart-charge.log") -Tail 30 -ErrorAction SilentlyContinue)
   }
 }
@@ -1113,6 +1160,7 @@ function Invoke-OptionalSamplingCapture {
     intervalMs = $intervalMs
     categories = @($categories)
     noNvidiaSmi = [bool]$NoNvidiaSmi
+    noBatteryFunctionData = [bool]$NoBatteryFunctionData
     notes = @(
       "Each JSONL file is append-only and timestamped per sample.",
       "Use -NoNvidiaSmi when diagnosing whether NVIDIA command-line polling wakes the dGPU."
@@ -1619,31 +1667,10 @@ function Get-BatteryLimitEvidence {
   } else {
     $batteryControl = $batteryControls | Select-Object -First 1
     $batteryControl | Format-List *
-    $rows = foreach ($batteryNo in @(0,1,2,3)) {
-      foreach ($functionQuery in @(0,1,2,3,4,5)) {
-        try {
-          $get = Invoke-CimMethod -InputObject $batteryControl -MethodName GetBatteryHealthControlStatus -Arguments @{
-            uBatteryNo = [byte]$batteryNo
-            uFunctionQuery = [byte]$functionQuery
-            uReserved = ([byte[]](0,0))
-          } -ErrorAction Stop
-          [pscustomobject]@{
-            batteryNo = $batteryNo
-            functionQuery = $functionQuery
-            functionList = $get.uFunctionList
-            functionStatus = (@($get.uFunctionStatus) -join ",")
-            'return' = (@($get.uReturn) -join ",")
-          }
-        } catch {
-          [pscustomobject]@{
-            batteryNo = $batteryNo
-            functionQuery = $functionQuery
-            error = $_.Exception.Message
-          }
-        }
-      }
-    }
-    $rows | Format-Table -AutoSize -Wrap
+    Get-BatteryHealthStatusReadMatrix -BatteryControl $batteryControl | Format-Table -AutoSize -Wrap
+    ""
+    "===== BatteryControl function-data read matrix ====="
+    Get-BatteryFunctionDataReadMatrix -BatteryControl $batteryControl | Format-Table -AutoSize -Wrap
   }
   ""
 
@@ -1708,6 +1735,7 @@ Privacy notes:
 - It asks for administrator permission so read-only Acer WMI instance probes can see the same hardware surface as the AeroForge service.
 - It intentionally skips images, ZIP/EXE installers, staged update packages, and filenames that look like tokens, passwords, credentials, private keys, or secrets.
 - Text copied into the bundle is redacted for GitHub-token-like strings and common Authorization/password/secret fields.
+- Battery diagnostics include both BatteryControl health-status reads and GetBatteryFunctionData reads because AeroForge may use either surface depending on firmware behavior.
 - Review the ZIP before posting it publicly.
 
 Most useful files:
@@ -1729,6 +1757,7 @@ Polling options:
 - Run AeroForge-Debug-Collector.cmd -Poll fans pipe performance -PollSeconds 45 -PollIntervalMs 500 when reproducing custom fan or mode-switch lag.
 - Run AeroForge-Debug-Collector.cmd -Poll nvidia gpu-counters processes -PollSeconds 90 for dGPU idle or power-limit reports.
 - Run AeroForge-Debug-Collector.cmd -Deep -NoNvidiaSmi when testing whether nvidia-smi itself keeps the NVIDIA GPU awake.
+- Run AeroForge-Debug-Collector.cmd -Deep -NoBatteryFunctionData only if BatteryControl function-data probes appear to hang or crash on a specific machine.
 - Run AeroForge-Debug-Collector.cmd -ListOptions to print every supported switch.
 - Maintainers can use -OutputRoot "C:\Some\Temp\Folder" to write the bundle somewhere other than the Desktop.
 "@

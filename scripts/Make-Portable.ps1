@@ -9,6 +9,7 @@ $releaseExe = Join-Path $releaseDir 'aeroforge-control.exe'
 $hotkeyHelperExe = Join-Path $releaseDir 'aeroforge-hotkey-helper.exe'
 $installerExe = Join-Path $releaseDir "bundle\nsis\AeroForge Control_${version}_x64-setup.exe"
 $debugCollectorCmd = Join-Path $projectRoot 'scripts\AeroForge-Debug-Collector.cmd'
+$makeDebugCollectorScript = Join-Path $projectRoot 'scripts\Make-DebugCollector.ps1'
 if (-not (Test-Path -LiteralPath $releaseExe)) {
   throw "Release executable not found at $releaseExe. Run 'npm.cmd run tauri:build' first."
 }
@@ -17,6 +18,9 @@ if (-not (Test-Path -LiteralPath $hotkeyHelperExe)) {
 }
 if (-not (Test-Path -LiteralPath $debugCollectorCmd)) {
   throw "Debug collector not found at $debugCollectorCmd."
+}
+if (-not (Test-Path -LiteralPath $makeDebugCollectorScript)) {
+  throw "Debug collector packaging script not found at $makeDebugCollectorScript."
 }
 if (-not (Test-Path -LiteralPath $installerExe)) {
   throw "Installer executable not found at $installerExe. Run 'npm.cmd run tauri:build' first."
@@ -86,6 +90,7 @@ if (Test-Path -LiteralPath $portableZip) {
 
 Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZip -Force
 Copy-Item -LiteralPath $installerExe -Destination $installerCopy -Force
+& $makeDebugCollectorScript
 
 Write-Output "Portable folder: $portableDir"
 Write-Output "Portable zip: $portableZip"
