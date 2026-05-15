@@ -236,6 +236,11 @@ fn run(
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
+    let _fan_apply_guard = FAN_APPLY_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Fan apply lock was poisoned.")?;
+
     let snapshot = match state::load_snapshot(paths) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -260,11 +265,6 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     if !custom_fan_refresh_due()? {
         return Ok(());
     }
-
-    let _fan_apply_guard = FAN_APPLY_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| "Fan apply lock was poisoned.")?;
 
     match fan::apply_custom_fan_curves(
         paths,

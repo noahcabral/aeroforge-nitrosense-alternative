@@ -79,6 +79,17 @@ fn battery_control_attempt_detail(output: &BatteryControlApplyOutput) -> String 
         output.matched_function_mask,
         output.bac_status,
     ) {
+        (
+            Some(attempt),
+            Some("battery-health-direct-write"),
+            _,
+            Some(battery_no),
+            _,
+            Some(mask),
+            _,
+        ) => {
+            format!("BatteryControl direct write was accepted by firmware with battery {battery_no} mask {mask} using {attempt}; health-status readback did not confirm on this firmware.")
+        }
         (Some(attempt), Some("battery-function-data"), _, _, _, Some(mask), Some(status)) => {
             format!("Matched BatteryControl function-data mask {mask} BAC status {status} with {attempt}.")
         }
@@ -283,6 +294,16 @@ function Read-HealthStatus {
   return $get
 }
 
+function Test-DirectHealthWriteTrustAllowed {
+  try {
+    $model = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1).Model
+    $cpu = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name
+    return (($model -match 'ANV16-41') -or ($cpu -match 'AMD|Ryzen'))
+  } catch {
+    return $false
+  }
+}
+
 function New-StatusBytes {
   param([int]$First, [int]$Second, [int]$Third)
   return ([byte[]]@([byte]$First,[byte]$Second,[byte]$Third,0,0))
@@ -454,6 +475,7 @@ $attempts = New-Object System.Collections.Generic.List[object]
 Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 1
 Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 0
 
+$trustDirectHealthWrite = Test-DirectHealthWriteTrustAllowed
 $errors = New-Object System.Collections.Generic.List[string]
 foreach ($attempt in $attempts) {
   try {
@@ -483,6 +505,22 @@ foreach ($attempt in $attempts) {
       ('batteryNo {0} query {1} mask {2} statuses [{3}]' -f $read.batteryNo, $read.functionQuery, [int]$attempt.FunctionMask, (@($read.functionStatus) -join ','))
     } else {
       'no readable health-status rows'
+    }
+    $setReturnValues = @($set.uReturn | ForEach-Object { [int]$_ })
+    $setReturnedOk = ($setReturnValues.Count -eq 0 -or (($setReturnValues | Where-Object { $_ -ne 0 } | Select-Object -First 1) -eq $null))
+    if ($trustDirectHealthWrite -and $setReturnedOk -and [int]$attempt.BatteryNo -eq 1 -and [int]$attempt.FunctionMask -eq 1) {
+      Emit-AeroForgeResult ([ordered]@{
+        requestedHealthStatus = [int]$status
+        healthStatus = [int]$status
+        setAttempt = $attempt.Name
+        mode = 'battery-health-direct-write'
+        matchedBatteryNo = [int]$attempt.BatteryNo
+        matchedFunctionMask = [int]$attempt.FunctionMask
+        readbackHealthStatus = $health
+        readbackDetail = $readDetail
+        setReturn = $setReturnValues
+        setReservedOut = @($set.uReservedOut)
+      })
     }
     $errors.Add(('{0}: readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
   } catch {
