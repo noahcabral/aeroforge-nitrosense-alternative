@@ -231,7 +231,7 @@ fn run(
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
-    // İLK OKUMA: Lock almaya değer mi diye check et
+    // INITIAL READ: Check if acquiring the lock is worth it
     let initial_snapshot = match state::load_snapshot(paths) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -246,7 +246,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         }
     };
 
-    // Hızlı exit check'leri - lock almadan
+    // Quick exit checks - before acquiring lock
     if !matches!(initial_snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
         return Ok(());
     }
@@ -259,13 +259,13 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     }
 
-    // Lock al
+    // Acquire lock
     let _fan_apply_guard = FAN_APPLY_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "Fan apply lock was poisoned.")?;
 
-    // *** KRITIK FIX: Lock'tan SONRA tekrar oku ***
+    // *** CRITICAL FIX: Re-read after acquiring lock ***
     let snapshot = match state::load_snapshot(paths) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -280,9 +280,9 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         }
     };
 
-    // Tekrar check et - mode değişmiş olabilir
+    // Re-check - mode may have changed.
     if !matches!(snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
-        // Auto'ya geçmiş, exit
+        // Switched to Auto, exit
         return Ok(());
     }
 
@@ -290,7 +290,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     };
 
-    // Şimdi güvenli - güncel state ile apply et
+    // Now safe - apply with fresh state
     match fan::apply_custom_fan_curves(
         paths,
         ApplyCustomFanCurvesRequest {
