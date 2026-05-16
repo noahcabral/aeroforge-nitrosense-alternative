@@ -1,16 +1,10 @@
 use std::{
     ffi::c_void,
-    ptr::{null, null_mut},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use libloading::{Library, Symbol};
-use windows_sys::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-    PDH_MORE_DATA,
-};
 
 use super::{
     cache::{refresh_cached_value, RefreshState},
@@ -21,21 +15,27 @@ use crate::paths::{write_log_line, ServicePaths};
 const NVML_SUCCESS: i32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
 const NVML_CLOCK_GRAPHICS: u32 = 0;
+
+/// Poll interval while an active GPU session is detected (gaming / compute).
 const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long to keep polling at 1 s after the last active sample before reverting
+/// to idle probes. Gives the UI a chance to show the GPU winding down cleanly.
 const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(15);
+
+/// How often to do a single NVML probe while the GPU appears idle.
+/// Each probe is a full nvmlInit → query → nvmlShutdown cycle which momentarily
+/// wakes the GPU; 30 s gives the driver enough time to re-enter RTD3/D3cold
+/// between probes and keeps average power impact negligible.
+const NVIDIA_GPU_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
-// Dedicated VRAM threshold for considering the dGPU active.
-// Querying \GPU Engine utilization forces the GPU to wake from D3cold to respond;
-// dedicated memory allocation is tracked by the WDDM kernel driver in system RAM
-// and can be read without powering the GPU.
-// 200 MiB threshold avoids false triggers from browsers, Discord, and other
-// GPU-accelerated apps that allocate modest VRAM. Games and heavy GPU workloads
-// reliably exceed this. When the gate is closed no NVML session is held, allowing
-// the dGPU to enter RTD3/D3cold.
-const GPU_ACTIVE_DEDICATED_MIB: f64 = 200.0;
-const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
-const ERROR_SUCCESS: u32 = 0;
+
+/// Power draw threshold above which the dGPU is considered active.
+const GPU_ACTIVE_POWER_W: f32 = 5.0;
+
+/// Core utilisation threshold above which the dGPU is considered active.
+const GPU_ACTIVE_USAGE_PERCENT: u8 = 1;
 
 type NvmlDevice = *mut c_void;
 type NvmlInitV2 = unsafe extern "C" fn() -> i32;
@@ -91,22 +91,12 @@ struct GpuTelemetryCache {
     snapshot: GpuSnapshot,
     refresh_in_flight: bool,
     last_error: Option<String>,
-    last_activity_check: Option<Instant>,
+    /// Deadline until which the GPU is in "active" mode — NVML is polled every second.
     active_until: Option<Instant>,
-    last_gate_error: Option<String>,
-    last_gate_allows_nvml: Option<bool>,
-    last_gate_detail: Option<String>,
-}
-
-struct GpuActivitySample {
-    active: bool,
-    adapter_count: usize,
-    max_dedicated_mib: f64,
-    total_dedicated_mib: f64,
-}
-
-struct PdhCounterSample {
-    value: f64,
+    /// When the last idle probe was issued. None means probe immediately on first call.
+    last_idle_probe: Option<Instant>,
+    /// Tracks the last logged active/idle state so we only log on transitions.
+    last_logged_active: Option<bool>,
 }
 
 impl RefreshState for GpuTelemetryCache {
@@ -143,133 +133,120 @@ pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
                 snapshot: GpuSnapshot::default(),
                 refresh_in_flight: false,
                 last_error: None,
-                last_activity_check: None,
                 active_until: None,
-                last_gate_error: None,
-                last_gate_allows_nvml: None,
-                last_gate_detail: None,
+                last_idle_probe: None,
+                last_logged_active: None,
             }))
         })
         .clone();
 
-    if !gpu_activity_gate_allows_nvml(paths, &cache) {
-        return GpuSnapshot::default();
-    }
-
-    refresh_cached_value(
-        paths,
-        "telemetry-nvidia-gpu",
-        &cache,
-        NVIDIA_GPU_REFRESH_INTERVAL,
-        |state| state.last_refresh().is_none(),
-        query_gpu_snapshot,
-        |state, result| {
-            if let Ok(snapshot) = result {
-                state.snapshot = *snapshot;
-            }
-        },
-        |state| state.snapshot,
-    )
-}
-
-fn gpu_activity_gate_allows_nvml(
-    paths: &ServicePaths,
-    cache: &Arc<Mutex<GpuTelemetryCache>>,
-) -> bool {
     let now = Instant::now();
-    let should_check = {
+
+    let (in_cooldown, probe_due) = {
         let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-        guard
-            .last_activity_check
-            .map(|instant| instant.elapsed() >= WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL)
-            .unwrap_or(true)
+        let in_cooldown = guard.active_until.map(|t| now <= t).unwrap_or(false);
+        let probe_due = !in_cooldown
+            && guard
+                .last_idle_probe
+                .map(|t| t.elapsed() >= NVIDIA_GPU_IDLE_PROBE_INTERVAL)
+                .unwrap_or(true);
+        (in_cooldown, probe_due)
     };
 
-    if should_check {
-        let activity = query_windows_discrete_gpu_activity();
-        let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-        guard.last_activity_check = Some(now);
+    if in_cooldown {
+        // Active mode: non-blocking 1 s refresh via background thread.
+        // The on_update callback extends active_until whenever the GPU is still busy,
+        // so polling continues as long as the workload lasts.
+        return refresh_cached_value(
+            paths,
+            "telemetry-nvidia-gpu",
+            &cache,
+            NVIDIA_GPU_REFRESH_INTERVAL,
+            |state| state.last_refresh().is_none(),
+            query_gpu_snapshot,
+            |state, result| {
+                if let Ok(snapshot) = result {
+                    if is_gpu_active(snapshot) {
+                        state.active_until = Some(Instant::now() + NVIDIA_GPU_ACTIVE_COOLDOWN);
+                    }
+                    state.snapshot = *snapshot;
+                }
+            },
+            |state| state.snapshot,
+        );
+    }
 
-        match activity {
-            Ok(sample) => {
-                if sample.active {
+    if probe_due {
+        // Idle probe: a single synchronous NVML init → query → shutdown to check
+        // whether a game or compute session has started.
+        // We record the probe time *before* the query so that even a slow or
+        // failed probe still backs off for the full interval.
+        {
+            let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
+            guard.last_idle_probe = Some(now);
+        }
+
+        match query_gpu_snapshot() {
+            Ok(snapshot) => {
+                let active = is_gpu_active(&snapshot);
+                let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
+                guard.snapshot = snapshot;
+                guard.last_refresh = Some(now);
+                if active {
                     guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
                 }
-                let cooldown_active = gate_cooldown_active(&guard, now);
-                let allows_nvml = sample.active || cooldown_active;
-                let reason = if sample.active {
-                    "gpu-engine-active"
-                } else if cooldown_active {
-                    "recent-dgpu-activity-cooldown"
-                } else {
-                    "idle"
-                };
-                let detail = sample.format_gate_detail(allows_nvml, reason);
-                guard.last_gate_error = None;
-                log_gate_detail(paths, &mut guard, &detail);
-                log_gate_transition(paths, &mut guard, allows_nvml, &detail);
+                log_activity_transition(paths, &mut guard, active);
+                guard.snapshot
             }
             Err(error) => {
-                let detail = format!("Windows GPU activity gate unavailable: {error}");
-                if guard.last_gate_error.as_deref() != Some(detail.as_str()) {
-                    let _ = write_log_line(
-                        &paths.component_log("telemetry-nvidia-gpu"),
-                        "WARN",
-                        &detail,
-                    );
-                }
-                guard.last_gate_error = Some(detail);
-                guard.active_until = None;
-                let gate_detail =
-                    "GPU activity gate sample: allowsNvml=false reason=gate-error-fail-closed."
-                        .to_string();
-                log_gate_detail(paths, &mut guard, &gate_detail);
-                log_gate_transition(paths, &mut guard, false, &gate_detail);
+                let _ = write_log_line(
+                    &paths.component_log("telemetry-nvidia-gpu"),
+                    "WARN",
+                    &format!("GPU idle probe failed: {error}"),
+                );
+                GpuSnapshot::default()
             }
         }
-    }
-
-    let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-    gate_cooldown_active(&guard, now)
-}
-
-fn gate_cooldown_active(cache: &GpuTelemetryCache, now: Instant) -> bool {
-    cache
-        .active_until
-        .map(|instant| now <= instant)
-        .unwrap_or(false)
-}
-
-fn log_gate_detail(paths: &ServicePaths, cache: &mut GpuTelemetryCache, detail: &str) {
-    if cache.last_gate_detail.as_deref() == Some(detail) {
-        return;
-    }
-
-    cache.last_gate_detail = Some(detail.to_string());
-    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
-}
-
-fn log_gate_transition(
-    paths: &ServicePaths,
-    cache: &mut GpuTelemetryCache,
-    allows_nvml: bool,
-    detail: &str,
-) {
-    if cache.last_gate_allows_nvml == Some(allows_nvml) {
-        return;
-    }
-
-    cache.last_gate_allows_nvml = Some(allows_nvml);
-    let message = if allows_nvml {
-        format!("Windows GPU activity gate opened NVML polling. {detail}")
     } else {
-        format!("Windows GPU activity gate paused NVML polling. {detail}")
+        // Between idle probes: return the last cached snapshot without touching the GPU.
+        // No NVML, no PDH, no dxgkrnl — the dGPU is free to stay in RTD3/D3cold.
+        let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
+        guard.snapshot
+    }
+}
+
+/// Returns true when the snapshot suggests the dGPU is running a real workload.
+fn is_gpu_active(snapshot: &GpuSnapshot) -> bool {
+    snapshot
+        .power_draw_w
+        .map(|p| p >= GPU_ACTIVE_POWER_W)
+        .unwrap_or(false)
+        || snapshot
+            .usage_percent
+            .map(|u| u >= GPU_ACTIVE_USAGE_PERCENT)
+            .unwrap_or(false)
+}
+
+/// Logs a message only when the active/idle state changes.
+fn log_activity_transition(paths: &ServicePaths, cache: &mut GpuTelemetryCache, active: bool) {
+    if cache.last_logged_active == Some(active) {
+        return;
+    }
+    cache.last_logged_active = Some(active);
+    let message = if active {
+        format!(
+            "GPU became active (power={:.1}W usage={}%). Switching to {}s polling.",
+            cache.snapshot.power_draw_w.unwrap_or(0.0),
+            cache.snapshot.usage_percent.unwrap_or(0),
+            NVIDIA_GPU_REFRESH_INTERVAL.as_secs(),
+        )
+    } else {
+        format!(
+            "GPU appears idle. Switching to {}s idle probes; RTD3/D3cold unrestricted.",
+            NVIDIA_GPU_IDLE_PROBE_INTERVAL.as_secs(),
+        )
     };
-    let _ = write_log_line(
-        &paths.component_log("telemetry-nvidia-gpu"),
-        "INFO",
-        &message,
-    );
+    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", &message);
 }
 
 fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
@@ -280,141 +257,6 @@ fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send 
     }
 
     query_nvidia_smi_snapshot()
-}
-
-fn query_windows_discrete_gpu_activity(
-) -> Result<GpuActivitySample, Box<dyn std::error::Error + Send + Sync>> {
-    let adapter_samples = read_pdh_counter_samples(GPU_ADAPTER_DEDICATED_USAGE_COUNTER)?;
-    Ok(GpuActivitySample::from_pdh_samples(adapter_samples))
-}
-
-impl GpuActivitySample {
-    fn from_pdh_samples(adapter_samples: Vec<PdhCounterSample>) -> Self {
-        let adapter_count = adapter_samples.len();
-        let max_dedicated_bytes = adapter_samples
-            .iter()
-            .map(|sample| sample.value)
-            .fold(0.0, f64::max);
-        let total_dedicated_bytes: f64 = adapter_samples.iter().map(|sample| sample.value).sum();
-        let max_dedicated_mib = bytes_to_mib(max_dedicated_bytes);
-        let active = max_dedicated_mib >= GPU_ACTIVE_DEDICATED_MIB;
-
-        Self {
-            active,
-            adapter_count,
-            max_dedicated_mib,
-            total_dedicated_mib: bytes_to_mib(total_dedicated_bytes),
-        }
-    }
-
-    fn format_gate_detail(&self, allows_nvml: bool, reason: &str) -> String {
-        format!(
-            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} maxDedicatedMiB={:.1} totalDedicatedMiB={:.1} dedicatedThresholdMiB={:.0}.",
-            self.active,
-            allows_nvml,
-            reason,
-            self.adapter_count,
-            self.max_dedicated_mib,
-            self.total_dedicated_mib,
-            GPU_ACTIVE_DEDICATED_MIB,
-        )
-    }
-}
-
-fn bytes_to_mib(bytes: f64) -> f64 {
-    bytes / 1024.0 / 1024.0
-}
-
-fn read_pdh_counter_samples(
-    counter: &str,
-) -> Result<Vec<PdhCounterSample>, Box<dyn std::error::Error + Send + Sync>> {
-    let counter_path = wide_null(counter);
-    let mut query: PDH_HQUERY = null_mut();
-    pdh_call(
-        unsafe { PdhOpenQueryW(null(), 0, &mut query) },
-        "PdhOpenQueryW",
-    )?;
-    let query = PdhQuery(query);
-
-    let mut counter: PDH_HCOUNTER = null_mut();
-    pdh_call(
-        unsafe { PdhAddEnglishCounterW(query.0, counter_path.as_ptr(), 0, &mut counter) },
-        "PdhAddEnglishCounterW",
-    )?;
-    pdh_call(
-        unsafe { PdhCollectQueryData(query.0) },
-        "PdhCollectQueryData",
-    )?;
-
-    let mut buffer_size = 0u32;
-    let mut item_count = 0u32;
-    let status = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buffer_size,
-            &mut item_count,
-            null_mut(),
-        )
-    };
-    if status != PDH_MORE_DATA {
-        pdh_call(status, "PdhGetFormattedCounterArrayW(size)")?;
-    }
-
-    if buffer_size == 0 || item_count == 0 {
-        return Ok(Vec::new());
-    }
-
-    let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-    let item_capacity = (buffer_size as usize + item_size - 1) / item_size;
-    let mut buffer = vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); item_capacity.max(1)];
-    pdh_call(
-        unsafe {
-            PdhGetFormattedCounterArrayW(
-                counter,
-                PDH_FMT_DOUBLE,
-                &mut buffer_size,
-                &mut item_count,
-                buffer.as_mut_ptr(),
-            )
-        },
-        "PdhGetFormattedCounterArrayW(data)",
-    )?;
-
-    let items = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize) };
-    let mut samples = Vec::with_capacity(items.len());
-    for item in items {
-        if item.FmtValue.CStatus == ERROR_SUCCESS {
-            let value = unsafe { item.FmtValue.Anonymous.doubleValue };
-            if value.is_finite() && value >= 0.0 {
-                samples.push(PdhCounterSample { value });
-            }
-        }
-    }
-
-    Ok(samples)
-}
-
-struct PdhQuery(PDH_HQUERY);
-
-impl Drop for PdhQuery {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            let _ = unsafe { PdhCloseQuery(self.0) };
-        }
-    }
-}
-
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn pdh_call(status: u32, call_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if status == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(format!("{call_name} failed with PDH status 0x{status:08X}").into())
-    }
 }
 
 fn load_nvml_api() -> Option<NvmlApi> {
@@ -487,7 +329,7 @@ fn read_nvml_snapshot(
 ) -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     // Init and shutdown per-query so no persistent NVML session is held.
     // A permanent session would prevent the dGPU from entering RTD3/D3cold
-    // even when the activity gate is closed and no game is running.
+    // even when no game is running.
     nvml_call(unsafe { (api.init_v2)() }, "nvmlInit_v2")?;
 
     let result = (|| {
