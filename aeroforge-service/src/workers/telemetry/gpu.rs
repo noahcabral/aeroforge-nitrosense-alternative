@@ -234,11 +234,11 @@ pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
             }
         } else {
             // No NVIDIA dGPU DLL found in any process: GPU is truly idle.
-            log_active_transition(
-                paths,
-                &mut cache.lock().expect("gpu cache lock"),
-                false,
-            );
+            // Clear the cached snapshot so the UI shows default values instead
+            // of stale data from the last active session.
+            let mut g = cache.lock().expect("gpu cache lock");
+            g.snapshot = GpuSnapshot::default();
+            log_active_transition(paths, &mut g, false);
         }
     }
 
