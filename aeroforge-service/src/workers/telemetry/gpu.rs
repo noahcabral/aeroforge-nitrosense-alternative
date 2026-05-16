@@ -22,12 +22,15 @@ const NVML_SUCCESS: i32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(30);
+const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(15);
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
-const GPU_ACTIVE_ENGINE_PERCENT: f64 = 1.0;
+// Dedicated VRAM threshold for considering the dGPU active.
+// Querying \GPU Engine utilization forces the GPU to wake from D3cold to respond;
+// dedicated memory allocation is tracked by the WDDM kernel driver in system RAM
+// and can be read without powering the GPU.
+const GPU_ACTIVE_DEDICATED_MIB: f64 = 50.0;
 const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
-const GPU_ENGINE_UTILIZATION_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
 const ERROR_SUCCESS: u32 = 0;
 
 type NvmlDevice = *mut c_void;
@@ -76,6 +79,14 @@ struct NvmlApi {
 }
 
 static NVML_API: OnceLock<Option<NvmlApi>> = OnceLock::new();
+
+impl Drop for NvmlApi {
+    fn drop(&mut self) {
+        // Safety: shutdown is called before _library is dropped (fields drop in declaration order,
+        // but Drop::drop runs first), so the function pointer is still valid here.
+        let _ = unsafe { (self.shutdown)() };
+    }
+}
 static GPU_TELEMETRY_CACHE: OnceLock<Arc<Mutex<GpuTelemetryCache>>> = OnceLock::new();
 
 struct GpuTelemetryCache {
@@ -93,16 +104,11 @@ struct GpuTelemetryCache {
 struct GpuActivitySample {
     active: bool,
     adapter_count: usize,
-    engine_sample_count: usize,
-    active_engine_sample_count: usize,
-    max_dedicated_bytes: f64,
-    total_dedicated_bytes: f64,
-    max_engine_utilization_percent: f64,
-    target_adapter_key: Option<String>,
+    max_dedicated_mib: f64,
+    total_dedicated_mib: f64,
 }
 
 struct PdhCounterSample {
-    name: String,
     value: f64,
 }
 
@@ -281,95 +287,45 @@ fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send 
 
 fn query_windows_discrete_gpu_activity(
 ) -> Result<GpuActivitySample, Box<dyn std::error::Error + Send + Sync>> {
-    let adapter_samples = read_pdh_counter_samples(GPU_ADAPTER_DEDICATED_USAGE_COUNTER)
-        .unwrap_or_else(|_| Vec::new());
-    let engine_samples = read_pdh_counter_samples(GPU_ENGINE_UTILIZATION_COUNTER)?;
-    Ok(GpuActivitySample::from_pdh_samples(
-        adapter_samples,
-        engine_samples,
-    ))
+    let adapter_samples = read_pdh_counter_samples(GPU_ADAPTER_DEDICATED_USAGE_COUNTER)?;
+    Ok(GpuActivitySample::from_pdh_samples(adapter_samples))
 }
 
 impl GpuActivitySample {
-    fn from_pdh_samples(
-        adapter_samples: Vec<PdhCounterSample>,
-        engine_samples: Vec<PdhCounterSample>,
-    ) -> Self {
+    fn from_pdh_samples(adapter_samples: Vec<PdhCounterSample>) -> Self {
         let adapter_count = adapter_samples.len();
-        let engine_sample_count = engine_samples.len();
         let max_dedicated_bytes = adapter_samples
             .iter()
             .map(|sample| sample.value)
             .fold(0.0, f64::max);
-        let total_dedicated_bytes = adapter_samples.iter().map(|sample| sample.value).sum();
-        let target_adapter_key = adapter_samples
-            .iter()
-            .max_by(|left, right| {
-                left.value
-                    .partial_cmp(&right.value)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .and_then(|sample| extract_gpu_adapter_key(&sample.name));
-
-        let matching_engine_samples = engine_samples
-            .iter()
-            .filter(|sample| match target_adapter_key.as_deref() {
-                Some(target) => extract_gpu_adapter_key(&sample.name)
-                    .as_deref()
-                    .map(|key| key == target)
-                    .unwrap_or(false),
-                None => true,
-            })
-            .collect::<Vec<_>>();
-        let max_engine_utilization_percent = matching_engine_samples
-            .iter()
-            .map(|sample| sample.value)
-            .fold(0.0, f64::max);
-        let active_engine_sample_count = matching_engine_samples
-            .iter()
-            .filter(|sample| sample.value >= GPU_ACTIVE_ENGINE_PERCENT)
-            .count();
-        let active = active_engine_sample_count > 0;
+        let total_dedicated_bytes: f64 = adapter_samples.iter().map(|sample| sample.value).sum();
+        let max_dedicated_mib = bytes_to_mib(max_dedicated_bytes);
+        let active = max_dedicated_mib >= GPU_ACTIVE_DEDICATED_MIB;
 
         Self {
             active,
             adapter_count,
-            engine_sample_count,
-            active_engine_sample_count,
-            max_dedicated_bytes,
-            total_dedicated_bytes,
-            max_engine_utilization_percent,
-            target_adapter_key,
+            max_dedicated_mib,
+            total_dedicated_mib: bytes_to_mib(total_dedicated_bytes),
         }
     }
 
     fn format_gate_detail(&self, allows_nvml: bool, reason: &str) -> String {
         format!(
-            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} engineSamples={} activeEngineSamples={} targetAdapter={} maxEngine={:.1}% engineThreshold={:.1}% maxDedicated={:.1}MB totalDedicated={:.1}MB. Dedicated memory is diagnostic only and does not open the NVML gate.",
+            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} maxDedicatedMiB={:.1} totalDedicatedMiB={:.1} dedicatedThresholdMiB={:.0}.",
             self.active,
             allows_nvml,
             reason,
             self.adapter_count,
-            self.engine_sample_count,
-            self.active_engine_sample_count,
-            self.target_adapter_key.as_deref().unwrap_or("unknown"),
-            self.max_engine_utilization_percent,
-            GPU_ACTIVE_ENGINE_PERCENT,
-            bytes_to_mib(self.max_dedicated_bytes),
-            bytes_to_mib(self.total_dedicated_bytes),
+            self.max_dedicated_mib,
+            self.total_dedicated_mib,
+            GPU_ACTIVE_DEDICATED_MIB,
         )
     }
 }
 
 fn bytes_to_mib(bytes: f64) -> f64 {
     bytes / 1024.0 / 1024.0
-}
-
-fn extract_gpu_adapter_key(name: &str) -> Option<String> {
-    let start = name.find("luid_")?;
-    let tail = &name[start..];
-    let end = tail.find("_eng_").unwrap_or(tail.len());
-    Some(tail[..end].to_string())
 }
 
 fn read_pdh_counter_samples(
@@ -434,28 +390,12 @@ fn read_pdh_counter_samples(
         if item.FmtValue.CStatus == ERROR_SUCCESS {
             let value = unsafe { item.FmtValue.Anonymous.doubleValue };
             if value.is_finite() && value >= 0.0 {
-                samples.push(PdhCounterSample {
-                    name: unsafe { wide_ptr_to_string(item.szName) },
-                    value,
-                });
+                samples.push(PdhCounterSample { value });
             }
         }
     }
 
     Ok(samples)
-}
-
-unsafe fn wide_ptr_to_string(value: *const u16) -> String {
-    if value.is_null() {
-        return String::new();
-    }
-
-    let mut len = 0usize;
-    while *value.add(len) != 0 {
-        len += 1;
-    }
-
-    String::from_utf16_lossy(std::slice::from_raw_parts(value, len))
 }
 
 struct PdhQuery(PDH_HQUERY);
@@ -527,7 +467,7 @@ fn load_nvml_api() -> Option<NvmlApi> {
             .ok()
             .map(|symbol| **symbol);
 
-        Some(NvmlApi {
+        let api = NvmlApi {
             _library: library,
             init_v2,
             shutdown,
@@ -541,15 +481,19 @@ fn load_nvml_api() -> Option<NvmlApi> {
             device_get_enforced_power_limit,
             device_get_power_management_default_limit,
             device_get_power_management_limit_constraints,
-        })
+        };
+
+        if (api.init_v2)() != NVML_SUCCESS {
+            return None;
+        }
+
+        Some(api)
     }
 }
 
 fn read_nvml_snapshot(
     api: &NvmlApi,
 ) -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    nvml_call(unsafe { (api.init_v2)() }, "nvmlInit_v2")?;
-
     let result = (|| {
         let mut device_count = 0u32;
         nvml_call(
@@ -644,7 +588,6 @@ fn read_nvml_snapshot(
         })
     })();
 
-    let _ = unsafe { (api.shutdown)() };
     result
 }
 

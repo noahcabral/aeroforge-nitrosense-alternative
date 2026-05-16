@@ -23,7 +23,7 @@ use crate::{
 };
 
 const WORKER_NAME: &str = "lowlevel-worker";
-const SAMPLE_INTERVAL: Duration = Duration::from_millis(333);
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const LOAD_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 pub fn registration() -> WorkerRegistration {
