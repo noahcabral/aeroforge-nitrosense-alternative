@@ -29,7 +29,11 @@ const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
 // Querying \GPU Engine utilization forces the GPU to wake from D3cold to respond;
 // dedicated memory allocation is tracked by the WDDM kernel driver in system RAM
 // and can be read without powering the GPU.
-const GPU_ACTIVE_DEDICATED_MIB: f64 = 50.0;
+// 200 MiB threshold avoids false triggers from browsers, Discord, and other
+// GPU-accelerated apps that allocate modest VRAM. Games and heavy GPU workloads
+// reliably exceed this. When the gate is closed no NVML session is held, allowing
+// the dGPU to enter RTD3/D3cold.
+const GPU_ACTIVE_DEDICATED_MIB: f64 = 200.0;
 const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
 const ERROR_SUCCESS: u32 = 0;
 
@@ -80,13 +84,6 @@ struct NvmlApi {
 
 static NVML_API: OnceLock<Option<NvmlApi>> = OnceLock::new();
 
-impl Drop for NvmlApi {
-    fn drop(&mut self) {
-        // Safety: shutdown is called before _library is dropped (fields drop in declaration order,
-        // but Drop::drop runs first), so the function pointer is still valid here.
-        let _ = unsafe { (self.shutdown)() };
-    }
-}
 static GPU_TELEMETRY_CACHE: OnceLock<Arc<Mutex<GpuTelemetryCache>>> = OnceLock::new();
 
 struct GpuTelemetryCache {
@@ -467,7 +464,7 @@ fn load_nvml_api() -> Option<NvmlApi> {
             .ok()
             .map(|symbol| **symbol);
 
-        let api = NvmlApi {
+        Some(NvmlApi {
             _library: library,
             init_v2,
             shutdown,
@@ -481,19 +478,18 @@ fn load_nvml_api() -> Option<NvmlApi> {
             device_get_enforced_power_limit,
             device_get_power_management_default_limit,
             device_get_power_management_limit_constraints,
-        };
-
-        if (api.init_v2)() != NVML_SUCCESS {
-            return None;
-        }
-
-        Some(api)
+        })
     }
 }
 
 fn read_nvml_snapshot(
     api: &NvmlApi,
 ) -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    // Init and shutdown per-query so no persistent NVML session is held.
+    // A permanent session would prevent the dGPU from entering RTD3/D3cold
+    // even when the activity gate is closed and no game is running.
+    nvml_call(unsafe { (api.init_v2)() }, "nvmlInit_v2")?;
+
     let result = (|| {
         let mut device_count = 0u32;
         nvml_call(
@@ -588,6 +584,7 @@ fn read_nvml_snapshot(
         })
     })();
 
+    let _ = unsafe { (api.shutdown)() };
     result
 }
 
