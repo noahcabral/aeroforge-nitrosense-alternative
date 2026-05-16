@@ -111,7 +111,7 @@ pub fn read_cpu_clock_mhz(paths: &ServicePaths) -> u16 {
         paths,
         "telemetry-cpu-clock",
         &cache,
-        std::time::Duration::from_millis(333),
+        std::time::Duration::from_secs(10),
         |state| state.last_refresh().is_none(),
         query_cpu_clock_mhz,
         |state, result| {

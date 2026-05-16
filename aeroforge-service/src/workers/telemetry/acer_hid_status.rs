@@ -3,6 +3,7 @@ use std::{
     mem::{size_of, zeroed},
     os::windows::ffi::OsStringExt,
     ptr::{null, null_mut},
+    sync::Mutex,
 };
 
 use windows_sys::Win32::{
@@ -34,14 +35,25 @@ const STATUS_DEVICE_MARKER: &str = "hid#1025174b&col01#";
 const STATUS_REPORT_LEN: usize = 65;
 const STATUS_GROUP: u8 = 8;
 
+static CACHED_DEVICE_PATH: Mutex<Option<String>> = Mutex::new(None);
+
 pub fn read_status_snapshot() -> AcerHidStatusSnapshot {
     query_status_snapshot().unwrap_or_default()
 }
 
 fn query_status_snapshot() -> Result<AcerHidStatusSnapshot, Box<dyn std::error::Error + Send + Sync>>
 {
-    let device_path = find_status_device_path()?;
-    let handle = open_hid_handle(&device_path, GENERIC_READ | GENERIC_WRITE)?;
+    let device_path = get_or_find_device_path()?;
+    let handle = match open_hid_handle(&device_path, GENERIC_READ | GENERIC_WRITE) {
+        Ok(handle) => handle,
+        Err(_) => {
+            if let Ok(mut guard) = CACHED_DEVICE_PATH.lock() {
+                *guard = None;
+            }
+            let fresh_path = get_or_find_device_path()?;
+            open_hid_handle(&fresh_path, GENERIC_READ | GENERIC_WRITE)?
+        }
+    };
 
     let snapshot = AcerHidStatusSnapshot {
         cpu_temp_c: query_selector(handle, 1).ok().and_then(to_u8),
@@ -59,6 +71,22 @@ fn query_status_snapshot() -> Result<AcerHidStatusSnapshot, Box<dyn std::error::
 
 fn to_u8(value: u16) -> Option<u8> {
     u8::try_from(value).ok()
+}
+
+fn get_or_find_device_path() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(guard) = CACHED_DEVICE_PATH.lock() {
+        if let Some(path) = guard.as_ref() {
+            return Ok(path.clone());
+        }
+    }
+
+    let path = find_status_device_path()?;
+
+    if let Ok(mut guard) = CACHED_DEVICE_PATH.lock() {
+        *guard = Some(path.clone());
+    }
+
+    Ok(path)
 }
 
 fn find_status_device_path() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

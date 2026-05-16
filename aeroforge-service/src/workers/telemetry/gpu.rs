@@ -1,15 +1,19 @@
 use std::{
     ffi::c_void,
-    ptr::{null, null_mut},
+    mem::{size_of, zeroed},
+    ptr::null_mut,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use libloading::{Library, Symbol};
-use windows_sys::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-    PDH_MORE_DATA,
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW, Process32NextW,
+        MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+        TH32CS_SNAPPROCESS,
+    },
 };
 
 use super::{
@@ -21,14 +25,11 @@ use crate::paths::{write_log_line, ServicePaths};
 const NVML_SUCCESS: i32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
 const NVML_CLOCK_GRAPHICS: u32 = 0;
-const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
-const GPU_ACTIVE_ENGINE_PERCENT: f64 = 1.0;
-const GPU_ADAPTER_DEDICATED_USAGE_COUNTER: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
-const GPU_ENGINE_UTILIZATION_COUNTER: &str = r"\GPU Engine(*)\Utilization Percentage";
-const ERROR_SUCCESS: u32 = 0;
+const GPU_PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(15);
+const NVIDIA_DGPU_DLLS: &[&str] = &["nvwgf2umx.dll", "nvoglv64.dll", "nvcuda.dll", "nvvk64.dll"];
 
 type NvmlDevice = *mut c_void;
 type NvmlInitV2 = unsafe extern "C" fn() -> i32;
@@ -83,27 +84,9 @@ struct GpuTelemetryCache {
     snapshot: GpuSnapshot,
     refresh_in_flight: bool,
     last_error: Option<String>,
-    last_activity_check: Option<Instant>,
     active_until: Option<Instant>,
-    last_gate_error: Option<String>,
-    last_gate_allows_nvml: Option<bool>,
-    last_gate_detail: Option<String>,
-}
-
-struct GpuActivitySample {
-    active: bool,
-    adapter_count: usize,
-    engine_sample_count: usize,
-    active_engine_sample_count: usize,
-    max_dedicated_bytes: f64,
-    total_dedicated_bytes: f64,
-    max_engine_utilization_percent: f64,
-    target_adapter_key: Option<String>,
-}
-
-struct PdhCounterSample {
-    name: String,
-    value: f64,
+    last_process_scan: Option<Instant>,
+    last_logged_active: Option<bool>,
 }
 
 impl RefreshState for GpuTelemetryCache {
@@ -140,127 +123,186 @@ pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
                 snapshot: GpuSnapshot::default(),
                 refresh_in_flight: false,
                 last_error: None,
-                last_activity_check: None,
                 active_until: None,
-                last_gate_error: None,
-                last_gate_allows_nvml: None,
-                last_gate_detail: None,
+                last_process_scan: None,
+                last_logged_active: None,
             }))
         })
         .clone();
 
-    if !gpu_activity_gate_allows_nvml(paths, &cache) {
-        return GpuSnapshot::default();
-    }
-
-    refresh_cached_value(
-        paths,
-        "telemetry-nvidia-gpu",
-        &cache,
-        NVIDIA_GPU_REFRESH_INTERVAL,
-        |state| state.last_refresh().is_none(),
-        query_gpu_snapshot,
-        |state, result| {
-            if let Ok(snapshot) = result {
-                state.snapshot = *snapshot;
-            }
-        },
-        |state| state.snapshot,
-    )
-}
-
-fn gpu_activity_gate_allows_nvml(
-    paths: &ServicePaths,
-    cache: &Arc<Mutex<GpuTelemetryCache>>,
-) -> bool {
     let now = Instant::now();
-    let should_check = {
+
+    let (in_cooldown, scan_due) = {
         let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-        guard
-            .last_activity_check
-            .map(|instant| instant.elapsed() >= WINDOWS_GPU_ACTIVITY_REFRESH_INTERVAL)
-            .unwrap_or(true)
+        let in_cooldown = guard
+            .active_until
+            .map(|deadline| now <= deadline)
+            .unwrap_or(false);
+        let scan_due = !in_cooldown
+            && guard
+                .last_process_scan
+                .map(|last_scan| last_scan.elapsed() >= GPU_PROCESS_SCAN_INTERVAL)
+                .unwrap_or(true);
+        (in_cooldown, scan_due)
     };
 
-    if should_check {
-        let activity = query_windows_discrete_gpu_activity();
-        let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-        guard.last_activity_check = Some(now);
-
-        match activity {
-            Ok(sample) => {
-                if sample.active {
-                    guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
+    if in_cooldown {
+        return refresh_cached_value(
+            paths,
+            "telemetry-nvidia-gpu",
+            &cache,
+            NVIDIA_GPU_REFRESH_INTERVAL,
+            |state| state.last_refresh().is_none(),
+            query_nvml_snapshot,
+            |state, result| {
+                if let Ok(snapshot) = result {
+                    if is_gpu_active(snapshot) {
+                        state.active_until = Some(Instant::now() + NVIDIA_GPU_ACTIVE_COOLDOWN);
+                    }
+                    state.snapshot = *snapshot;
                 }
-                let cooldown_active = gate_cooldown_active(&guard, now);
-                let allows_nvml = sample.active || cooldown_active;
-                let reason = if sample.active {
-                    "gpu-engine-active"
-                } else if cooldown_active {
-                    "recent-dgpu-activity-cooldown"
-                } else {
-                    "idle"
-                };
-                let detail = sample.format_gate_detail(allows_nvml, reason);
-                guard.last_gate_error = None;
-                log_gate_detail(paths, &mut guard, &detail);
-                log_gate_transition(paths, &mut guard, allows_nvml, &detail);
-            }
-            Err(error) => {
-                let detail = format!("Windows GPU activity gate unavailable: {error}");
-                if guard.last_gate_error.as_deref() != Some(detail.as_str()) {
+            },
+            |state| state.snapshot,
+        );
+    }
+
+    if scan_due {
+        {
+            cache
+                .lock()
+                .expect("gpu telemetry cache lock poisoned")
+                .last_process_scan = Some(now);
+        }
+
+        if scan_for_nvidia_dgpu_process() {
+            match query_nvml_snapshot() {
+                Ok(snapshot) => {
+                    let active = is_gpu_active(&snapshot);
+                    let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
+                    guard.snapshot = snapshot;
+                    guard.last_refresh = Some(now);
+                    if active {
+                        guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
+                    }
+                    log_active_transition(paths, &mut guard, active);
+                    return guard.snapshot;
+                }
+                Err(error) => {
                     let _ = write_log_line(
                         &paths.component_log("telemetry-nvidia-gpu"),
                         "WARN",
-                        &detail,
+                        &format!(
+                            "NVML query failed after process scan detected dGPU usage: {error}"
+                        ),
                     );
                 }
-                guard.last_gate_error = Some(detail);
-                guard.active_until = None;
-                let gate_detail =
-                    "GPU activity gate sample: allowsNvml=false reason=gate-error-fail-closed."
-                        .to_string();
-                log_gate_detail(paths, &mut guard, &gate_detail);
-                log_gate_transition(paths, &mut guard, false, &gate_detail);
+            }
+        } else {
+            let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
+            guard.snapshot = GpuSnapshot::default();
+            log_active_transition(paths, &mut guard, false);
+        }
+    }
+
+    let snapshot = cache
+        .lock()
+        .expect("gpu telemetry cache lock poisoned")
+        .snapshot;
+    snapshot
+}
+
+fn scan_for_nvidia_dgpu_process() -> bool {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return false;
+    }
+
+    let mut process_entry: PROCESSENTRY32W = unsafe { zeroed() };
+    process_entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+
+    let mut found = false;
+    if unsafe { Process32FirstW(snapshot, &mut process_entry) } != 0 {
+        loop {
+            let process_id = process_entry.th32ProcessID;
+            if process_id > 4 && process_has_nvidia_dgpu_dll(process_id) {
+                found = true;
+                break;
+            }
+
+            if unsafe { Process32NextW(snapshot, &mut process_entry) } == 0 {
+                break;
             }
         }
     }
 
-    let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-    gate_cooldown_active(&guard, now)
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    found
 }
 
-fn gate_cooldown_active(cache: &GpuTelemetryCache, now: Instant) -> bool {
-    cache
-        .active_until
-        .map(|instant| now <= instant)
+fn process_has_nvidia_dgpu_dll(process_id: u32) -> bool {
+    let snapshot =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return false;
+    }
+
+    let mut module_entry: MODULEENTRY32W = unsafe { zeroed() };
+    module_entry.dwSize = size_of::<MODULEENTRY32W>() as u32;
+
+    let mut found = false;
+    if unsafe { Module32FirstW(snapshot, &mut module_entry) } != 0 {
+        loop {
+            if module_name_matches(&module_entry.szModule) {
+                found = true;
+                break;
+            }
+
+            if unsafe { Module32NextW(snapshot, &mut module_entry) } == 0 {
+                break;
+            }
+        }
+    }
+
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    found
+}
+
+fn module_name_matches(raw: &[u16; 256]) -> bool {
+    let len = raw.iter().position(|&value| value == 0).unwrap_or(256);
+    let name = String::from_utf16_lossy(&raw[..len]);
+    let lower = name.to_ascii_lowercase();
+    NVIDIA_DGPU_DLLS.contains(&lower.as_str())
+}
+
+fn is_gpu_active(snapshot: &GpuSnapshot) -> bool {
+    snapshot
+        .power_draw_w
+        .map(|power| power >= 5.0)
         .unwrap_or(false)
+        || snapshot
+            .usage_percent
+            .map(|usage| usage >= 1)
+            .unwrap_or(false)
 }
 
-fn log_gate_detail(paths: &ServicePaths, cache: &mut GpuTelemetryCache, detail: &str) {
-    if cache.last_gate_detail.as_deref() == Some(detail) {
+fn log_active_transition(paths: &ServicePaths, cache: &mut GpuTelemetryCache, active: bool) {
+    if cache.last_logged_active == Some(active) {
         return;
     }
 
-    cache.last_gate_detail = Some(detail.to_string());
-    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
-}
-
-fn log_gate_transition(
-    paths: &ServicePaths,
-    cache: &mut GpuTelemetryCache,
-    allows_nvml: bool,
-    detail: &str,
-) {
-    if cache.last_gate_allows_nvml == Some(allows_nvml) {
-        return;
-    }
-
-    cache.last_gate_allows_nvml = Some(allows_nvml);
-    let message = if allows_nvml {
-        format!("Windows GPU activity gate opened NVML polling. {detail}")
+    cache.last_logged_active = Some(active);
+    let message = if active {
+        format!(
+            "NVIDIA dGPU active (power={:.1}W usage={}%). Starting 1s NVML polling.",
+            cache.snapshot.power_draw_w.unwrap_or(0.0),
+            cache.snapshot.usage_percent.unwrap_or(0),
+        )
     } else {
-        format!("Windows GPU activity gate paused NVML polling. {detail}")
+        "No NVIDIA dGPU process detected. GPU free to idle in RTD3/D3cold.".to_string()
     };
     let _ = write_log_line(
         &paths.component_log("telemetry-nvidia-gpu"),
@@ -269,7 +311,7 @@ fn log_gate_transition(
     );
 }
 
-fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_nvml_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(api) = NVML_API.get_or_init(load_nvml_api).as_ref() {
         if let Ok(snapshot) = read_nvml_snapshot(api) {
             return Ok(snapshot);
@@ -277,207 +319,6 @@ fn query_gpu_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send 
     }
 
     query_nvidia_smi_snapshot()
-}
-
-fn query_windows_discrete_gpu_activity(
-) -> Result<GpuActivitySample, Box<dyn std::error::Error + Send + Sync>> {
-    let adapter_samples = read_pdh_counter_samples(GPU_ADAPTER_DEDICATED_USAGE_COUNTER)
-        .unwrap_or_else(|_| Vec::new());
-    let engine_samples = read_pdh_counter_samples(GPU_ENGINE_UTILIZATION_COUNTER)?;
-    Ok(GpuActivitySample::from_pdh_samples(
-        adapter_samples,
-        engine_samples,
-    ))
-}
-
-impl GpuActivitySample {
-    fn from_pdh_samples(
-        adapter_samples: Vec<PdhCounterSample>,
-        engine_samples: Vec<PdhCounterSample>,
-    ) -> Self {
-        let adapter_count = adapter_samples.len();
-        let engine_sample_count = engine_samples.len();
-        let max_dedicated_bytes = adapter_samples
-            .iter()
-            .map(|sample| sample.value)
-            .fold(0.0, f64::max);
-        let total_dedicated_bytes = adapter_samples.iter().map(|sample| sample.value).sum();
-        let target_adapter_key = adapter_samples
-            .iter()
-            .max_by(|left, right| {
-                left.value
-                    .partial_cmp(&right.value)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .and_then(|sample| extract_gpu_adapter_key(&sample.name));
-
-        let matching_engine_samples = engine_samples
-            .iter()
-            .filter(|sample| match target_adapter_key.as_deref() {
-                Some(target) => extract_gpu_adapter_key(&sample.name)
-                    .as_deref()
-                    .map(|key| key == target)
-                    .unwrap_or(false),
-                None => true,
-            })
-            .collect::<Vec<_>>();
-        let max_engine_utilization_percent = matching_engine_samples
-            .iter()
-            .map(|sample| sample.value)
-            .fold(0.0, f64::max);
-        let active_engine_sample_count = matching_engine_samples
-            .iter()
-            .filter(|sample| sample.value >= GPU_ACTIVE_ENGINE_PERCENT)
-            .count();
-        let active = active_engine_sample_count > 0;
-
-        Self {
-            active,
-            adapter_count,
-            engine_sample_count,
-            active_engine_sample_count,
-            max_dedicated_bytes,
-            total_dedicated_bytes,
-            max_engine_utilization_percent,
-            target_adapter_key,
-        }
-    }
-
-    fn format_gate_detail(&self, allows_nvml: bool, reason: &str) -> String {
-        format!(
-            "GPU activity gate sample: active={} allowsNvml={} reason={} adapterSamples={} engineSamples={} activeEngineSamples={} targetAdapter={} maxEngine={:.1}% engineThreshold={:.1}% maxDedicated={:.1}MB totalDedicated={:.1}MB. Dedicated memory is diagnostic only and does not open the NVML gate.",
-            self.active,
-            allows_nvml,
-            reason,
-            self.adapter_count,
-            self.engine_sample_count,
-            self.active_engine_sample_count,
-            self.target_adapter_key.as_deref().unwrap_or("unknown"),
-            self.max_engine_utilization_percent,
-            GPU_ACTIVE_ENGINE_PERCENT,
-            bytes_to_mib(self.max_dedicated_bytes),
-            bytes_to_mib(self.total_dedicated_bytes),
-        )
-    }
-}
-
-fn bytes_to_mib(bytes: f64) -> f64 {
-    bytes / 1024.0 / 1024.0
-}
-
-fn extract_gpu_adapter_key(name: &str) -> Option<String> {
-    let start = name.find("luid_")?;
-    let tail = &name[start..];
-    let end = tail.find("_eng_").unwrap_or(tail.len());
-    Some(tail[..end].to_string())
-}
-
-fn read_pdh_counter_samples(
-    counter: &str,
-) -> Result<Vec<PdhCounterSample>, Box<dyn std::error::Error + Send + Sync>> {
-    let counter_path = wide_null(counter);
-    let mut query: PDH_HQUERY = null_mut();
-    pdh_call(
-        unsafe { PdhOpenQueryW(null(), 0, &mut query) },
-        "PdhOpenQueryW",
-    )?;
-    let query = PdhQuery(query);
-
-    let mut counter: PDH_HCOUNTER = null_mut();
-    pdh_call(
-        unsafe { PdhAddEnglishCounterW(query.0, counter_path.as_ptr(), 0, &mut counter) },
-        "PdhAddEnglishCounterW",
-    )?;
-    pdh_call(
-        unsafe { PdhCollectQueryData(query.0) },
-        "PdhCollectQueryData",
-    )?;
-
-    let mut buffer_size = 0u32;
-    let mut item_count = 0u32;
-    let status = unsafe {
-        PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut buffer_size,
-            &mut item_count,
-            null_mut(),
-        )
-    };
-    if status != PDH_MORE_DATA {
-        pdh_call(status, "PdhGetFormattedCounterArrayW(size)")?;
-    }
-
-    if buffer_size == 0 || item_count == 0 {
-        return Ok(Vec::new());
-    }
-
-    let item_size = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-    let item_capacity = (buffer_size as usize + item_size - 1) / item_size;
-    let mut buffer = vec![PDH_FMT_COUNTERVALUE_ITEM_W::default(); item_capacity.max(1)];
-    pdh_call(
-        unsafe {
-            PdhGetFormattedCounterArrayW(
-                counter,
-                PDH_FMT_DOUBLE,
-                &mut buffer_size,
-                &mut item_count,
-                buffer.as_mut_ptr(),
-            )
-        },
-        "PdhGetFormattedCounterArrayW(data)",
-    )?;
-
-    let items = unsafe { std::slice::from_raw_parts(buffer.as_ptr(), item_count as usize) };
-    let mut samples = Vec::with_capacity(items.len());
-    for item in items {
-        if item.FmtValue.CStatus == ERROR_SUCCESS {
-            let value = unsafe { item.FmtValue.Anonymous.doubleValue };
-            if value.is_finite() && value >= 0.0 {
-                samples.push(PdhCounterSample {
-                    name: unsafe { wide_ptr_to_string(item.szName) },
-                    value,
-                });
-            }
-        }
-    }
-
-    Ok(samples)
-}
-
-unsafe fn wide_ptr_to_string(value: *const u16) -> String {
-    if value.is_null() {
-        return String::new();
-    }
-
-    let mut len = 0usize;
-    while *value.add(len) != 0 {
-        len += 1;
-    }
-
-    String::from_utf16_lossy(std::slice::from_raw_parts(value, len))
-}
-
-struct PdhQuery(PDH_HQUERY);
-
-impl Drop for PdhQuery {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            let _ = unsafe { PdhCloseQuery(self.0) };
-        }
-    }
-}
-
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn pdh_call(status: u32, call_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if status == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(format!("{call_name} failed with PDH status 0x{status:08X}").into())
-    }
 }
 
 fn load_nvml_api() -> Option<NvmlApi> {
@@ -560,7 +401,7 @@ fn read_nvml_snapshot(
             return Err("NVML reported zero NVIDIA devices".into());
         }
 
-        let mut device: NvmlDevice = std::ptr::null_mut();
+        let mut device: NvmlDevice = null_mut();
         nvml_call(
             unsafe { (api.device_get_handle_by_index_v2)(0, &mut device) },
             "nvmlDeviceGetHandleByIndex_v2",
@@ -603,33 +444,18 @@ fn read_nvml_snapshot(
         } else {
             None
         };
-        let (
-            power_draw_w,
-            power_limit_w,
-            power_default_limit_w,
-            power_min_limit_w,
-            power_max_limit_w,
-        ) = {
-            let power_draw_w = read_nvml_power_mw(api.device_get_power_usage, device)
+        let power_draw_w = read_nvml_power_mw(api.device_get_power_usage, device)
+            .map(milliwatts_to_watts)
+            .and_then(sanitize_power_w);
+        let power_limit_w = read_nvml_power_mw(api.device_get_enforced_power_limit, device)
+            .map(milliwatts_to_watts)
+            .and_then(sanitize_power_w);
+        let power_default_limit_w =
+            read_nvml_power_mw(api.device_get_power_management_default_limit, device)
                 .map(milliwatts_to_watts)
                 .and_then(sanitize_power_w);
-            let power_limit_w = read_nvml_power_mw(api.device_get_enforced_power_limit, device)
-                .map(milliwatts_to_watts)
-                .and_then(sanitize_power_w);
-            let power_default_limit_w =
-                read_nvml_power_mw(api.device_get_power_management_default_limit, device)
-                    .map(milliwatts_to_watts)
-                    .and_then(sanitize_power_w);
-            let (power_min_limit_w, power_max_limit_w) =
-                read_nvml_power_limit_constraints(api, device).unwrap_or((None, None));
-            (
-                power_draw_w,
-                power_limit_w,
-                power_default_limit_w,
-                power_min_limit_w,
-                power_max_limit_w,
-            )
-        };
+        let (power_min_limit_w, power_max_limit_w) =
+            read_nvml_power_limit_constraints(api, device).unwrap_or((None, None));
 
         Ok(GpuSnapshot {
             usage_percent: Some(utilization.gpu.clamp(0, 100) as u8),
@@ -654,8 +480,7 @@ fn read_nvml_power_mw(
 ) -> Option<u32> {
     let function = function?;
     let mut value = 0u32;
-    let status = unsafe { function(device, &mut value) };
-    if status == NVML_SUCCESS {
+    if unsafe { function(device, &mut value) } == NVML_SUCCESS {
         Some(value)
     } else {
         None
@@ -669,8 +494,7 @@ fn read_nvml_power_limit_constraints(
     let function = api.device_get_power_management_limit_constraints?;
     let mut min_limit = 0u32;
     let mut max_limit = 0u32;
-    let status = unsafe { function(device, &mut min_limit, &mut max_limit) };
-    if status == NVML_SUCCESS {
+    if unsafe { function(device, &mut min_limit, &mut max_limit) } == NVML_SUCCESS {
         Some((
             sanitize_power_w(milliwatts_to_watts(min_limit)),
             sanitize_power_w(milliwatts_to_watts(max_limit)),

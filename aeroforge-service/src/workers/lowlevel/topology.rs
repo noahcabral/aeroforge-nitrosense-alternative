@@ -1,4 +1,4 @@
-use std::mem::size_of;
+use std::{mem::size_of, sync::OnceLock};
 
 use windows_sys::Win32::{
     Foundation::ERROR_INSUFFICIENT_BUFFER,
@@ -9,6 +9,8 @@ use crate::{
     paths::{write_log_line, ServicePaths},
     workers::lowlevel::winring::RELATION_PROCESSOR_CORE,
 };
+
+static TOPOLOGY_CACHE: OnceLock<(Vec<usize>, usize)> = OnceLock::new();
 
 #[repr(C)]
 struct LogicalProcessorInfoHeader {
@@ -33,21 +35,25 @@ struct ProcessorRelationship {
 }
 
 pub fn discover_cpu_topology(paths: &ServicePaths) -> (Vec<usize>, usize) {
-    let core_affinity_masks = query_core_affinity_masks().unwrap_or_else(|error| {
-        let _ = write_log_line(
-            &paths.component_log("lowlevel-topology"),
-            "ERROR",
-            &format!("Falling back to synthetic affinity masks: {error}"),
-        );
-        fallback_affinity_masks()
-    });
+    TOPOLOGY_CACHE
+        .get_or_init(|| {
+            let core_affinity_masks = query_core_affinity_masks().unwrap_or_else(|error| {
+                let _ = write_log_line(
+                    &paths.component_log("lowlevel-topology"),
+                    "ERROR",
+                    &format!("Falling back to synthetic affinity masks: {error}"),
+                );
+                fallback_affinity_masks()
+            });
 
-    let logical_processor_count = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(core_affinity_masks.len())
-        .min(64);
+            let logical_processor_count = std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(core_affinity_masks.len())
+                .min(64);
 
-    (core_affinity_masks, logical_processor_count)
+            (core_affinity_masks, logical_processor_count)
+        })
+        .clone()
 }
 
 fn fallback_affinity_masks() -> Vec<usize> {

@@ -12,7 +12,69 @@ use crate::paths::ServicePaths;
 use crate::workers::control::acer_wmi;
 
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
+static THERMAL_ZONE_CACHE: OnceLock<Arc<Mutex<ThermalZoneCache>>> = OnceLock::new();
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+struct ThermalZoneCache {
+    last_refresh: Option<Instant>,
+    value: Option<u8>,
+    refresh_in_flight: bool,
+    last_error: Option<String>,
+}
+
+impl RefreshState for ThermalZoneCache {
+    fn last_refresh(&self) -> Option<Instant> {
+        self.last_refresh
+    }
+
+    fn set_last_refresh(&mut self, value: Option<Instant>) {
+        self.last_refresh = value;
+    }
+
+    fn refresh_in_flight(&self) -> bool {
+        self.refresh_in_flight
+    }
+
+    fn set_refresh_in_flight(&mut self, value: bool) {
+        self.refresh_in_flight = value;
+    }
+
+    fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    fn set_last_error(&mut self, value: Option<String>) {
+        self.last_error = value;
+    }
+}
+
+fn read_thermal_zone_temp_c(paths: &ServicePaths) -> Option<u8> {
+    let cache = THERMAL_ZONE_CACHE
+        .get_or_init(|| {
+            Arc::new(Mutex::new(ThermalZoneCache {
+                last_refresh: None,
+                value: None,
+                refresh_in_flight: false,
+                last_error: None,
+            }))
+        })
+        .clone();
+
+    refresh_cached_value(
+        paths,
+        "telemetry-thermal-zone",
+        &cache,
+        std::time::Duration::from_secs(30),
+        |state| state.last_refresh().is_none(),
+        query_windows_thermal_zone_temp_c,
+        |state, result| {
+            if let Ok(value) = result {
+                state.value = *value;
+            }
+        },
+        |state| state.value,
+    )
+}
 
 struct FirmwareSensorCache {
     last_refresh: Option<Instant>,
@@ -59,7 +121,7 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
         })
         .clone();
 
-    refresh_cached_value(
+    let mut snapshot = refresh_cached_value(
         paths,
         "telemetry-firmware",
         &cache,
@@ -72,15 +134,19 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
             }
         },
         |state| state.snapshot,
-    )
+    );
+
+    let thermal_zone_temp_c = read_thermal_zone_temp_c(paths);
+    snapshot.thermal_zone_temp_c = thermal_zone_temp_c;
+    snapshot.has_thermal_zone = thermal_zone_temp_c.is_some();
+    snapshot
 }
 
 fn query_firmware_sensor_snapshot(
 ) -> Result<FirmwareSensorSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(acer) = acer_wmi::read_firmware_sensor_snapshot() {
-        let thermal_zone_temp_c = query_windows_thermal_zone_temp_c().ok().flatten();
         return Ok(FirmwareSensorSnapshot {
-            thermal_zone_temp_c,
+            thermal_zone_temp_c: None,
             cpu_temp_c: to_u8(acer.cpu_temp_c),
             gpu_temp_c: to_u8(acer.gpu_temp_c),
             system_temp_c: to_u8(acer.system_temp_c),
@@ -89,13 +155,12 @@ fn query_firmware_sensor_snapshot(
             supported_sensor_mask: acer.supported_sensors,
             acer_battery_status_raw: acer.battery_status,
             has_acer_firmware: true,
-            has_thermal_zone: thermal_zone_temp_c.is_some(),
+            has_thermal_zone: false,
         });
     }
 
-    let thermal_zone_temp_c = query_windows_thermal_zone_temp_c()?;
     Ok(FirmwareSensorSnapshot {
-        thermal_zone_temp_c,
+        thermal_zone_temp_c: None,
         cpu_temp_c: None,
         gpu_temp_c: None,
         system_temp_c: None,
@@ -104,7 +169,7 @@ fn query_firmware_sensor_snapshot(
         supported_sensor_mask: None,
         acer_battery_status_raw: None,
         has_acer_firmware: false,
-        has_thermal_zone: thermal_zone_temp_c.is_some(),
+        has_thermal_zone: false,
     })
 }
 
