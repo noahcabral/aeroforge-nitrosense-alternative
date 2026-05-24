@@ -35,6 +35,7 @@ const STATUS_DEVICE_MARKER: &str = "hid#1025174b&col01#";
 const STATUS_REPORT_LEN: usize = 65;
 const STATUS_GROUP: u8 = 8;
 
+// made by faxcon
 static CACHED_DEVICE_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn read_status_snapshot() -> AcerHidStatusSnapshot {
@@ -47,6 +48,7 @@ fn query_status_snapshot() -> Result<AcerHidStatusSnapshot, Box<dyn std::error::
     let handle = match open_hid_handle(&device_path, GENERIC_READ | GENERIC_WRITE) {
         Ok(handle) => handle,
         Err(_) => {
+            // Device may have been reconnected with a new path - clear cache and retry once.
             if let Ok(mut guard) = CACHED_DEVICE_PATH.lock() {
                 *guard = None;
             }

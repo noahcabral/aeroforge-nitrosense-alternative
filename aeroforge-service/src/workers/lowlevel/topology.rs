@@ -10,6 +10,7 @@ use crate::{
     workers::lowlevel::winring::RELATION_PROCESSOR_CORE,
 };
 
+// made by faxcon
 static TOPOLOGY_CACHE: OnceLock<(Vec<usize>, usize)> = OnceLock::new();
 
 #[repr(C)]

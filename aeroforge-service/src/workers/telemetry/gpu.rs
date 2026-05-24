@@ -22,14 +22,40 @@ use super::{
 };
 use crate::paths::{write_log_line, ServicePaths};
 
+// NVML constants
+
 const NVML_SUCCESS: i32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
+
+// Intervals
+
+/// How often to scan running process modules for NVIDIA dGPU DLLs.
+/// The scan is CPU-only; no GPU interaction occurs.
+// made by faxcon
 const GPU_PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// NVML poll rate while an active GPU session is detected.
 const NVIDIA_GPU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long to keep NVML polling after the last active sample.
 const NVIDIA_GPU_ACTIVE_COOLDOWN: Duration = Duration::from_secs(15);
+
+// NVIDIA dGPU DLL detection
+
+/// NVIDIA user-mode driver DLLs (lowercase) that are only present in a process's
+/// module list when that process is actively using the NVIDIA dGPU.
+/// On Optimus/hybrid systems, apps that use the iGPU load Intel/AMD drivers
+/// instead - none of these DLLs appear in their module lists.
+///
+///  nvwgf2umx.dll - D3D11 / D3D12 UMD
+///  nvoglv64.dll  - OpenGL ICD + Vulkan ICD (modern drivers, shared binary)
+///  nvcuda.dll    - CUDA runtime
+///  nvvk64.dll    - Vulkan ICD (older NVIDIA drivers, rare)
 const NVIDIA_DGPU_DLLS: &[&str] = &["nvwgf2umx.dll", "nvoglv64.dll", "nvcuda.dll", "nvvk64.dll"];
+
+// NVML type aliases
 
 type NvmlDevice = *mut c_void;
 type NvmlInitV2 = unsafe extern "C" fn() -> i32;
@@ -76,16 +102,23 @@ struct NvmlApi {
         Option<NvmlDeviceGetPowerManagementLimitConstraints>,
 }
 
+// Statics
+
 static NVML_API: OnceLock<Option<NvmlApi>> = OnceLock::new();
 static GPU_TELEMETRY_CACHE: OnceLock<Arc<Mutex<GpuTelemetryCache>>> = OnceLock::new();
+
+// Cache
 
 struct GpuTelemetryCache {
     last_refresh: Option<Instant>,
     snapshot: GpuSnapshot,
     refresh_in_flight: bool,
     last_error: Option<String>,
+    /// Deadline until which NVML is polled at 1 s (GPU confirmed active).
     active_until: Option<Instant>,
+    /// When the last process-module scan ran.
     last_process_scan: Option<Instant>,
+    /// Tracks last logged active/idle state for transition-only logging.
     last_logged_active: Option<bool>,
 }
 
@@ -93,27 +126,24 @@ impl RefreshState for GpuTelemetryCache {
     fn last_refresh(&self) -> Option<Instant> {
         self.last_refresh
     }
-
-    fn set_last_refresh(&mut self, value: Option<Instant>) {
-        self.last_refresh = value;
+    fn set_last_refresh(&mut self, v: Option<Instant>) {
+        self.last_refresh = v;
     }
-
     fn refresh_in_flight(&self) -> bool {
         self.refresh_in_flight
     }
-
-    fn set_refresh_in_flight(&mut self, value: bool) {
-        self.refresh_in_flight = value;
+    fn set_refresh_in_flight(&mut self, v: bool) {
+        self.refresh_in_flight = v;
     }
-
     fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
-
-    fn set_last_error(&mut self, value: Option<String>) {
-        self.last_error = value;
+    fn set_last_error(&mut self, v: Option<String>) {
+        self.last_error = v;
     }
 }
+
+// Public entry point
 
 pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
     let cache = GPU_TELEMETRY_CACHE
@@ -133,183 +163,185 @@ pub fn read_gpu_snapshot(paths: &ServicePaths) -> GpuSnapshot {
     let now = Instant::now();
 
     let (in_cooldown, scan_due) = {
-        let guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-        let in_cooldown = guard
-            .active_until
-            .map(|deadline| now <= deadline)
-            .unwrap_or(false);
+        let g = cache.lock().expect("gpu cache lock");
+        let in_cooldown = g.active_until.map(|t| now <= t).unwrap_or(false);
         let scan_due = !in_cooldown
-            && guard
-                .last_process_scan
-                .map(|last_scan| last_scan.elapsed() >= GPU_PROCESS_SCAN_INTERVAL)
+            && g.last_process_scan
+                .map(|t| t.elapsed() >= GPU_PROCESS_SCAN_INTERVAL)
                 .unwrap_or(true);
         (in_cooldown, scan_due)
     };
 
+    // Active mode: NVML poll at 1 s.
+    // GPU was confirmed in use recently; keep polling and extend the cooldown
+    // as long as the workload continues.
     if in_cooldown {
         return refresh_cached_value(
             paths,
             "telemetry-nvidia-gpu",
             &cache,
             NVIDIA_GPU_REFRESH_INTERVAL,
-            |state| state.last_refresh().is_none(),
+            |s| s.last_refresh().is_none(),
             query_nvml_snapshot,
-            |state, result| {
-                if let Ok(snapshot) = result {
-                    if is_gpu_active(snapshot) {
-                        state.active_until = Some(Instant::now() + NVIDIA_GPU_ACTIVE_COOLDOWN);
+            |s, r| {
+                if let Ok(snap) = r {
+                    if is_gpu_active(snap) {
+                        s.active_until = Some(Instant::now() + NVIDIA_GPU_ACTIVE_COOLDOWN);
                     }
-                    state.snapshot = *snapshot;
+                    s.snapshot = *snap;
                 }
             },
-            |state| state.snapshot,
+            |s| s.snapshot,
         );
     }
 
+    // Process scan: detect NVIDIA dGPU usage without touching the GPU.
+    // Scan every 5 s.  Checks the loaded module list of every running process
+    // for NVIDIA dGPU-specific DLLs (D3D, OpenGL, Vulkan, CUDA UMDs).
+    // This is a pure CPU operation - the GPU is never contacted.
     if scan_due {
         {
-            cache
-                .lock()
-                .expect("gpu telemetry cache lock poisoned")
-                .last_process_scan = Some(now);
+            cache.lock().expect("gpu cache lock").last_process_scan = Some(now);
         }
 
         if scan_for_nvidia_dgpu_process() {
+            // At least one process has the NVIDIA dGPU driver loaded.
+            // The GPU is already in D0 because that process woke it.
+            // Run NVML now - no additional wake cost.
             match query_nvml_snapshot() {
                 Ok(snapshot) => {
                     let active = is_gpu_active(&snapshot);
-                    let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-                    guard.snapshot = snapshot;
-                    guard.last_refresh = Some(now);
+                    let mut g = cache.lock().expect("gpu cache lock");
+                    g.snapshot = snapshot;
+                    g.last_refresh = Some(now);
                     if active {
-                        guard.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
+                        g.active_until = Some(now + NVIDIA_GPU_ACTIVE_COOLDOWN);
                     }
-                    log_active_transition(paths, &mut guard, active);
-                    return guard.snapshot;
+                    log_active_transition(paths, &mut g, active);
+                    return g.snapshot;
                 }
-                Err(error) => {
+                Err(e) => {
                     let _ = write_log_line(
                         &paths.component_log("telemetry-nvidia-gpu"),
                         "WARN",
-                        &format!(
-                            "NVML query failed after process scan detected dGPU usage: {error}"
-                        ),
+                        &format!("NVML query failed after process scan detected dGPU usage: {e}"),
                     );
                 }
             }
         } else {
-            let mut guard = cache.lock().expect("gpu telemetry cache lock poisoned");
-            guard.snapshot = GpuSnapshot::default();
-            log_active_transition(paths, &mut guard, false);
+            // No NVIDIA dGPU DLL found in any process: GPU is truly idle.
+            // Clear the cached snapshot so the UI shows default values instead
+            // of stale data from the last active session.
+            let mut g = cache.lock().expect("gpu cache lock");
+            g.snapshot = GpuSnapshot::default();
+            log_active_transition(paths, &mut g, false);
         }
     }
 
-    let snapshot = cache
-        .lock()
-        .expect("gpu telemetry cache lock poisoned")
-        .snapshot;
+    // Idle: return cached snapshot without touching GPU.
+    let snapshot = cache.lock().expect("gpu cache lock").snapshot;
     snapshot
 }
 
+// Process / module scan
+
+/// Returns true if any running process has loaded an NVIDIA dGPU-specific
+/// user-mode driver DLL.  This is a pure CPU-side check; the GPU hardware is
+/// never contacted and cannot be woken by this function.
 fn scan_for_nvidia_dgpu_process() -> bool {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == INVALID_HANDLE_VALUE {
         return false;
     }
 
-    let mut process_entry: PROCESSENTRY32W = unsafe { zeroed() };
-    process_entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+    let mut pe: PROCESSENTRY32W = unsafe { zeroed() };
+    pe.dwSize = size_of::<PROCESSENTRY32W>() as u32;
 
     let mut found = false;
-    if unsafe { Process32FirstW(snapshot, &mut process_entry) } != 0 {
+
+    if unsafe { Process32FirstW(snap, &mut pe) } != 0 {
         loop {
-            let process_id = process_entry.th32ProcessID;
-            if process_id > 4 && process_has_nvidia_dgpu_dll(process_id) {
+            let pid = pe.th32ProcessID;
+            // Skip PID 0 (Idle) and PID 4 (System).
+            if pid > 4 && process_has_nvidia_dgpu_dll(pid) {
                 found = true;
                 break;
             }
-
-            if unsafe { Process32NextW(snapshot, &mut process_entry) } == 0 {
+            if unsafe { Process32NextW(snap, &mut pe) } == 0 {
                 break;
             }
         }
     }
 
-    unsafe {
-        CloseHandle(snapshot);
-    }
+    unsafe { CloseHandle(snap) };
     found
 }
 
-fn process_has_nvidia_dgpu_dll(process_id: u32) -> bool {
-    let snapshot =
-        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id) };
-    if snapshot == INVALID_HANDLE_VALUE {
+/// Returns true if the given process has loaded any of the NVIDIA dGPU DLLs.
+fn process_has_nvidia_dgpu_dll(pid: u32) -> bool {
+    // TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32 covers both 64-bit and 32-bit
+    // modules.  The call fails (access denied) for protected/system processes;
+    // we treat that as "no NVIDIA DLL" and continue.
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
+    if snap == INVALID_HANDLE_VALUE {
         return false;
     }
 
-    let mut module_entry: MODULEENTRY32W = unsafe { zeroed() };
-    module_entry.dwSize = size_of::<MODULEENTRY32W>() as u32;
+    let mut me: MODULEENTRY32W = unsafe { zeroed() };
+    me.dwSize = size_of::<MODULEENTRY32W>() as u32;
 
     let mut found = false;
-    if unsafe { Module32FirstW(snapshot, &mut module_entry) } != 0 {
+
+    if unsafe { Module32FirstW(snap, &mut me) } != 0 {
         loop {
-            if module_name_matches(&module_entry.szModule) {
+            if module_name_matches(&me.szModule) {
                 found = true;
                 break;
             }
-
-            if unsafe { Module32NextW(snapshot, &mut module_entry) } == 0 {
+            if unsafe { Module32NextW(snap, &mut me) } == 0 {
                 break;
             }
         }
     }
 
-    unsafe {
-        CloseHandle(snapshot);
-    }
+    unsafe { CloseHandle(snap) };
     found
 }
 
+/// Case-insensitive check of a module's short name (szModule) against
+/// the NVIDIA dGPU DLL list.  No heap allocation in the fast (no-match) path.
 fn module_name_matches(raw: &[u16; 256]) -> bool {
-    let len = raw.iter().position(|&value| value == 0).unwrap_or(256);
+    let len = raw.iter().position(|&c| c == 0).unwrap_or(256);
     let name = String::from_utf16_lossy(&raw[..len]);
     let lower = name.to_ascii_lowercase();
     NVIDIA_DGPU_DLLS.contains(&lower.as_str())
 }
 
+// GPU activity helpers
+
 fn is_gpu_active(snapshot: &GpuSnapshot) -> bool {
-    snapshot
-        .power_draw_w
-        .map(|power| power >= 5.0)
-        .unwrap_or(false)
-        || snapshot
-            .usage_percent
-            .map(|usage| usage >= 1)
-            .unwrap_or(false)
+    snapshot.power_draw_w.map(|p| p >= 5.0).unwrap_or(false)
+        || snapshot.usage_percent.map(|u| u >= 1).unwrap_or(false)
 }
 
 fn log_active_transition(paths: &ServicePaths, cache: &mut GpuTelemetryCache, active: bool) {
     if cache.last_logged_active == Some(active) {
         return;
     }
-
     cache.last_logged_active = Some(active);
-    let message = if active {
+    let msg = if active {
         format!(
-            "NVIDIA dGPU active (power={:.1}W usage={}%). Starting 1s NVML polling.",
+            "NVIDIA dGPU active (power={:.1}W usage={}%). Starting 1 s NVML polling.",
             cache.snapshot.power_draw_w.unwrap_or(0.0),
             cache.snapshot.usage_percent.unwrap_or(0),
         )
     } else {
         "No NVIDIA dGPU process detected. GPU free to idle in RTD3/D3cold.".to_string()
     };
-    let _ = write_log_line(
-        &paths.component_log("telemetry-nvidia-gpu"),
-        "INFO",
-        &message,
-    );
+    let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", &msg);
 }
+
+// NVML snapshot
 
 fn query_nvml_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(api) = NVML_API.get_or_init(load_nvml_api).as_ref() {
@@ -317,7 +349,6 @@ fn query_nvml_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send
             return Ok(snapshot);
         }
     }
-
     query_nvidia_smi_snapshot()
 }
 
@@ -350,23 +381,23 @@ fn load_nvml_api() -> Option<NvmlApi> {
         let device_get_power_usage = library
             .get::<Symbol<NvmlDeviceGetPowerUsage>>(b"nvmlDeviceGetPowerUsage\0")
             .ok()
-            .map(|symbol| **symbol);
+            .map(|s| **s);
         let device_get_enforced_power_limit = library
             .get::<Symbol<NvmlDeviceGetEnforcedPowerLimit>>(b"nvmlDeviceGetEnforcedPowerLimit\0")
             .ok()
-            .map(|symbol| **symbol);
+            .map(|s| **s);
         let device_get_power_management_default_limit = library
             .get::<Symbol<NvmlDeviceGetPowerManagementDefaultLimit>>(
                 b"nvmlDeviceGetPowerManagementDefaultLimit\0",
             )
             .ok()
-            .map(|symbol| **symbol);
+            .map(|s| **s);
         let device_get_power_management_limit_constraints = library
             .get::<Symbol<NvmlDeviceGetPowerManagementLimitConstraints>>(
                 b"nvmlDeviceGetPowerManagementLimitConstraints\0",
             )
             .ok()
-            .map(|symbol| **symbol);
+            .map(|s| **s);
 
         Some(NvmlApi {
             _library: library,
@@ -389,6 +420,7 @@ fn load_nvml_api() -> Option<NvmlApi> {
 fn read_nvml_snapshot(
     api: &NvmlApi,
 ) -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    // Per-query init/shutdown: no persistent NVML session, GPU can enter RTD3.
     nvml_call(unsafe { (api.init_v2)() }, "nvmlInit_v2")?;
 
     let result = (|| {
@@ -398,7 +430,7 @@ fn read_nvml_snapshot(
             "nvmlDeviceGetCount_v2",
         )?;
         if device_count == 0 {
-            return Err("NVML reported zero NVIDIA devices".into());
+            return Err("NVML: zero NVIDIA devices".into());
         }
 
         let mut device: NvmlDevice = null_mut();
@@ -419,31 +451,32 @@ fn read_nvml_snapshot(
             "nvmlDeviceGetClockInfo",
         )?;
 
-        let mut utilization = NvmlUtilization { gpu: 0, memory: 0 };
+        let mut util = NvmlUtilization { gpu: 0, memory: 0 };
         nvml_call(
-            unsafe { (api.device_get_utilization_rates)(device, &mut utilization) },
+            unsafe { (api.device_get_utilization_rates)(device, &mut util) },
             "nvmlDeviceGetUtilizationRates",
         )?;
 
-        let mut memory = NvmlMemory {
+        let mut mem = NvmlMemory {
             total: 0,
             free: 0,
             used: 0,
         };
         nvml_call(
-            unsafe { (api.device_get_memory_info)(device, &mut memory) },
+            unsafe { (api.device_get_memory_info)(device, &mut mem) },
             "nvmlDeviceGetMemoryInfo",
         )?;
 
-        let memory_usage_percent = if memory.total > 0 {
+        let memory_usage_percent = if mem.total > 0 {
             Some(
-                ((memory.used as f64 / memory.total as f64) * 100.0)
+                ((mem.used as f64 / mem.total as f64) * 100.0)
                     .round()
                     .clamp(0.0, 100.0) as u8,
             )
         } else {
             None
         };
+
         let power_draw_w = read_nvml_power_mw(api.device_get_power_usage, device)
             .map(milliwatts_to_watts)
             .and_then(sanitize_power_w);
@@ -458,7 +491,7 @@ fn read_nvml_snapshot(
             read_nvml_power_limit_constraints(api, device).unwrap_or((None, None));
 
         Ok(GpuSnapshot {
-            usage_percent: Some(utilization.gpu.clamp(0, 100) as u8),
+            usage_percent: Some(util.gpu.clamp(0, 100) as u8),
             memory_usage_percent,
             temp_c: Some(temperature.clamp(0, 255) as u8),
             clock_mhz: Some(clock_mhz.clamp(0, u16::MAX as u32) as u16),
@@ -491,53 +524,58 @@ fn read_nvml_power_limit_constraints(
     api: &NvmlApi,
     device: NvmlDevice,
 ) -> Option<(Option<f32>, Option<f32>)> {
-    let function = api.device_get_power_management_limit_constraints?;
-    let mut min_limit = 0u32;
-    let mut max_limit = 0u32;
-    if unsafe { function(device, &mut min_limit, &mut max_limit) } == NVML_SUCCESS {
+    let f = api.device_get_power_management_limit_constraints?;
+    let mut min = 0u32;
+    let mut max = 0u32;
+    if unsafe { f(device, &mut min, &mut max) } == NVML_SUCCESS {
         Some((
-            sanitize_power_w(milliwatts_to_watts(min_limit)),
-            sanitize_power_w(milliwatts_to_watts(max_limit)),
+            sanitize_power_w(milliwatts_to_watts(min)),
+            sanitize_power_w(milliwatts_to_watts(max)),
         ))
     } else {
         None
     }
 }
 
-fn milliwatts_to_watts(value: u32) -> f32 {
-    ((value as f32 / 1000.0) * 100.0).round() / 100.0
+fn milliwatts_to_watts(v: u32) -> f32 {
+    ((v as f32 / 1000.0) * 100.0).round() / 100.0
 }
 
-fn sanitize_power_w(watts: f32) -> Option<f32> {
-    if watts.is_finite() && (0.0..=MAX_REASONABLE_GPU_POWER_W).contains(&watts) {
-        Some((watts * 100.0).round() / 100.0)
+fn sanitize_power_w(w: f32) -> Option<f32> {
+    if w.is_finite() && (0.0..=MAX_REASONABLE_GPU_POWER_W).contains(&w) {
+        Some((w * 100.0).round() / 100.0)
     } else {
         None
     }
 }
 
-fn nvml_call(code: i32, call_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn nvml_call(code: i32, name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if code == NVML_SUCCESS {
         Ok(())
     } else {
-        Err(format!("{call_name} failed with NVML status {code}").into())
+        Err(format!("{name} failed with NVML status {code}").into())
     }
 }
 
-fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let query_fields = "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit";
-    let query_arg = format!("--query-gpu={query_fields}");
+// nvidia-smi fallback
 
-    let output = std::process::Command::new("nvidia-smi")
-        .args([query_arg.as_str(), "--format=csv,noheader,nounits"])
+fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let fields = "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit";
+    let arg = format!("--query-gpu={fields}");
+
+    let out = std::process::Command::new("nvidia-smi")
+        .args([arg.as_str(), "--format=csv,noheader,nounits"])
         .output()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("nvidia-smi GPU query failed: {stderr}").into());
+    if !out.status.success() {
+        return Err(format!(
+            "nvidia-smi failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
     }
 
-    let line = String::from_utf8_lossy(&output.stdout)
+    let line = String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()
         .unwrap_or_default()
@@ -545,27 +583,15 @@ fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error 
         .to_string();
 
     if line.is_empty() {
-        return Err("nvidia-smi returned no GPU rows".into());
+        return Err("nvidia-smi returned no rows".into());
     }
 
-    let fields = line
-        .split(',')
-        .map(|value| value.trim())
-        .collect::<Vec<_>>();
-
-    if fields.len() < 5 {
-        return Err(format!("unexpected nvidia-smi field count: {}", fields.len()).into());
+    let f: Vec<&str> = line.split(',').map(str::trim).collect();
+    if f.len() < 5 {
+        return Err(format!("nvidia-smi unexpected field count: {}", f.len()).into());
     }
 
-    let temp_c = fields[0].parse::<u8>().ok();
-    let clock_mhz = fields[1].parse::<u16>().ok();
-    let usage_percent = fields[2]
-        .parse::<u16>()
-        .ok()
-        .map(|value| value.clamp(0, 100) as u8);
-    let memory_used_mib = fields[3].parse::<f64>().ok();
-    let memory_total_mib = fields[4].parse::<f64>().ok();
-    let memory_usage_percent = match (memory_used_mib, memory_total_mib) {
+    let memory_usage_percent = match (f[3].parse::<f64>().ok(), f[4].parse::<f64>().ok()) {
         (Some(used), Some(total)) if total > 0.0 => {
             Some(((used / total) * 100.0).round().clamp(0.0, 100.0) as u8)
         }
@@ -573,23 +599,22 @@ fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error 
     };
 
     Ok(GpuSnapshot {
-        usage_percent,
+        usage_percent: f[2].parse::<u16>().ok().map(|v| v.clamp(0, 100) as u8),
         memory_usage_percent,
-        temp_c,
-        clock_mhz,
-        power_draw_w: parse_optional_watts(fields.get(5).copied()),
-        power_limit_w: parse_optional_watts(fields.get(6).copied()),
-        power_default_limit_w: parse_optional_watts(fields.get(7).copied()),
-        power_min_limit_w: parse_optional_watts(fields.get(8).copied()),
-        power_max_limit_w: parse_optional_watts(fields.get(9).copied()),
+        temp_c: f[0].parse::<u8>().ok(),
+        clock_mhz: f[1].parse::<u16>().ok(),
+        power_draw_w: parse_optional_watts(f.get(5).copied()),
+        power_limit_w: parse_optional_watts(f.get(6).copied()),
+        power_default_limit_w: parse_optional_watts(f.get(7).copied()),
+        power_min_limit_w: parse_optional_watts(f.get(8).copied()),
+        power_max_limit_w: parse_optional_watts(f.get(9).copied()),
     })
 }
 
-fn parse_optional_watts(value: Option<&str>) -> Option<f32> {
-    let value = value?.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("N/A") || value == "[N/A]" {
+fn parse_optional_watts(v: Option<&str>) -> Option<f32> {
+    let v = v?.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("N/A") || v == "[N/A]" {
         return None;
     }
-
-    value.parse::<f32>().ok().and_then(sanitize_power_w)
+    v.parse::<f32>().ok().and_then(sanitize_power_w)
 }

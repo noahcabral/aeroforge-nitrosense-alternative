@@ -12,6 +12,7 @@ use crate::paths::ServicePaths;
 use crate::workers::control::acer_wmi;
 
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
+// made by faxcon
 static THERMAL_ZONE_CACHE: OnceLock<Arc<Mutex<ThermalZoneCache>>> = OnceLock::new();
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -66,7 +67,7 @@ fn read_thermal_zone_temp_c(paths: &ServicePaths) -> Option<u8> {
         &cache,
         std::time::Duration::from_secs(30),
         |state| state.last_refresh().is_none(),
-        query_windows_thermal_zone_temp_c,
+        || query_windows_thermal_zone_temp_c(),
         |state, result| {
             if let Ok(value) = result {
                 state.value = *value;
@@ -136,9 +137,10 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
         |state| state.snapshot,
     );
 
-    let thermal_zone_temp_c = read_thermal_zone_temp_c(paths);
-    snapshot.thermal_zone_temp_c = thermal_zone_temp_c;
-    snapshot.has_thermal_zone = thermal_zone_temp_c.is_some();
+    // Thermal zone is on its own 30s cache to avoid spawning PowerShell every 2s.
+    let thermal_zone = read_thermal_zone_temp_c(paths);
+    snapshot.thermal_zone_temp_c = thermal_zone;
+    snapshot.has_thermal_zone = thermal_zone.is_some();
     snapshot
 }
 

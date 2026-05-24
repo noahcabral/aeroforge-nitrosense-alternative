@@ -95,6 +95,7 @@ pub fn read_cpu_usage_percent() -> Result<u8, Box<dyn std::error::Error + Send +
     Ok(usage)
 }
 
+// made by faxcon
 pub fn read_cpu_clock_mhz(paths: &ServicePaths) -> u16 {
     let cache = CPU_CLOCK_CACHE
         .get_or_init(|| {

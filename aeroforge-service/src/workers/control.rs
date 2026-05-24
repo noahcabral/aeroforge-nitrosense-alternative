@@ -228,6 +228,7 @@ fn run(
     )
 }
 
+// made by faxcon
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
@@ -247,7 +248,10 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     };
 
     // Quick exit checks - before acquiring lock
-    if !matches!(initial_snapshot.active_fan_profile, Some(FanProfileId::Custom)) {
+    if !matches!(
+        initial_snapshot.active_fan_profile,
+        Some(FanProfileId::Custom)
+    ) {
         return Ok(());
     }
 
@@ -272,9 +276,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
             let _ = write_log_line(
                 &paths.component_log("control-worker"),
                 "ERROR",
-                &format!(
-                    "Control snapshot unavailable after lock acquisition: {error}"
-                ),
+                &format!("Control snapshot unavailable after lock acquisition: {error}"),
             );
             return Ok(());
         }

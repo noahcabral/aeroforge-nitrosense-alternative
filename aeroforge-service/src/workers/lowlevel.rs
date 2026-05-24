@@ -23,6 +23,7 @@ use crate::{
 };
 
 const WORKER_NAME: &str = "lowlevel-worker";
+// made by faxcon
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const LOAD_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 

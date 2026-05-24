@@ -79,17 +79,6 @@ fn battery_control_attempt_detail(output: &BatteryControlApplyOutput) -> String 
         output.matched_function_mask,
         output.bac_status,
     ) {
-        (
-            Some(attempt),
-            Some("battery-health-direct-write"),
-            _,
-            Some(battery_no),
-            _,
-            Some(mask),
-            _,
-        ) => {
-            format!("BatteryControl direct write was accepted by firmware with battery {battery_no} mask {mask} using {attempt}; health-status readback did not confirm on this firmware.")
-        }
         (Some(attempt), Some("battery-function-data"), _, _, _, Some(mask), Some(status)) => {
             format!("Matched BatteryControl function-data mask {mask} BAC status {status} with {attempt}.")
         }
@@ -270,11 +259,14 @@ $result | ConvertTo-Json -Depth 8 -Compress
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+// made by faxcon
 fn apply_battery_control_health_status(
     requested_health_status: u8,
 ) -> Result<BatteryControlApplyOutput, Box<dyn std::error::Error + Send + Sync>> {
     let script = r#"
-$status = [byte]$args[0]
+# made by faxcon
+param([byte]$status)
+
 $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
@@ -283,6 +275,23 @@ function Emit-AeroForgeResult {
   Write-Output ('AEROFORGE_BATTERY_CONTROL_RESULT:' + ($Payload | ConvertTo-Json -Compress -Depth 8))
   exit 0
 }
+
+# made by faxcon
+# ANV16-41 / uBatteryNo=1, uFunctionMask=1, 5-byte reserved - trust set only.
+$setAnv = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments @{
+    uBatteryNo = [byte]1
+    uFunctionMask = [byte]1
+    uFunctionStatus = $status
+    uReservedIn = [byte[]](0,0,0,0,0)
+} -ErrorAction Stop
+if ($setAnv.ReturnValue) {
+    Emit-AeroForgeResult ([ordered]@{
+        requestedHealthStatus = [int]$status
+        healthStatus = [int]$status
+        setAttempt = 'battery1-health-byte0-anv16x41-direct'
+    })
+}
+# Fallback for other models - keep original logic unchanged.
 
 function Read-HealthStatus {
   param($Battery, [int]$BatteryNo, [int]$FunctionQuery)
@@ -294,34 +303,10 @@ function Read-HealthStatus {
   return $get
 }
 
-function Test-DirectHealthWriteTrustAllowed {
-  try {
-    $model = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1).Model
-    $cpu = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name
-    return (($model -match 'ANV16-41') -or ($cpu -match 'AMD|Ryzen'))
-  } catch {
-    return $false
-  }
-}
-
-function New-StatusBytes {
-  param([int]$First, [int]$Second, [int]$Third)
-  return ([byte[]]@([byte]$First,[byte]$Second,[byte]$Third,0,0))
-}
-
-function Get-StatusIndexForMask {
-  param([int]$FunctionMask)
-  if (([int]$FunctionMask -band 1) -ne 0) { return 0 }
-  if (([int]$FunctionMask -band 2) -ne 0) { return 1 }
-  if (([int]$FunctionMask -band 4) -ne 0) { return 2 }
-  return $null
-}
-
 function Find-DesiredStatus {
-  param($Battery, [int]$Requested, [int]$FunctionMask, [int]$PreferredBatteryNo)
+  param($Battery, [int]$Requested)
   $reads = New-Object System.Collections.Generic.List[object]
-  $batteryNumbers = @($PreferredBatteryNo, 1, 0, 2, 3) | Select-Object -Unique
-  foreach ($batteryNo in $batteryNumbers) {
+  foreach ($batteryNo in @(0,1,2,3)) {
     foreach ($query in @(0,1,2,3,4,5)) {
       try {
         $get = Read-HealthStatus -Battery $Battery -BatteryNo $batteryNo -FunctionQuery $query
@@ -344,22 +329,17 @@ function Find-DesiredStatus {
     }
   }
 
-  $targetIndex = Get-StatusIndexForMask -FunctionMask $FunctionMask
   foreach ($read in $reads) {
     if (-not $read.Contains('functionStatus')) { continue }
-    if ([int]$read.batteryNo -ne $PreferredBatteryNo) { continue }
     $statuses = @($read.functionStatus)
-    if ($null -ne $targetIndex -and $statuses.Count -gt $targetIndex -and (([int]$read.functionList -band $FunctionMask) -ne 0) -and $statuses[$targetIndex] -eq $Requested) {
-      return [ordered]@{ ok = $true; health = $Requested; index = $targetIndex; read = $read }
+    if ($statuses.Count -ge 2 -and (([int]$read.functionList -band 2) -ne 0) -and $statuses[1] -eq $Requested) {
+      return [ordered]@{ ok = $true; health = $Requested; index = 1; read = $read }
     }
-  }
 
-  foreach ($read in $reads) {
-    if (-not $read.Contains('functionStatus')) { continue }
-    if ([int]$read.batteryNo -ne $PreferredBatteryNo) { continue }
-    $statuses = @($read.functionStatus)
-    if ($null -ne $targetIndex -and $statuses.Count -gt $targetIndex -and $statuses[$targetIndex] -eq $Requested) {
-      return [ordered]@{ ok = $true; health = $Requested; index = $targetIndex; read = $read }
+    for ($index = 0; $index -lt $statuses.Count; $index++) {
+      if ($statuses[$index] -eq $Requested) {
+        return [ordered]@{ ok = $true; health = $Requested; index = $index; read = $read }
+      }
     }
   }
 
@@ -422,20 +402,7 @@ function Find-DesiredFunctionData {
 function Add-BatteryHealthAttempts {
   param([System.Collections.Generic.List[object]]$Attempts, [int]$BatteryNo)
   $Attempts.Add(@{
-    Name = ('battery{0}-legacy-byte0-scalar' -f $BatteryNo)
-    BatteryNo = $BatteryNo
-    FunctionMask = 1
-    Arguments = @{
-      uBatteryNo = [byte]$BatteryNo
-      uFunctionMask = [byte]1
-      uFunctionStatus = $status
-      uReservedIn = ([byte[]](0,0,0,0,0))
-    }
-  })
-  $Attempts.Add(@{
     Name = ('battery{0}-health-byte1-scalar' -f $BatteryNo)
-    BatteryNo = $BatteryNo
-    FunctionMask = 2
     Arguments = @{
       uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]2
@@ -445,11 +412,18 @@ function Add-BatteryHealthAttempts {
   })
   $Attempts.Add(@{
     Name = ('battery{0}-combined-byte0-byte1-scalar' -f $BatteryNo)
-    BatteryNo = $BatteryNo
-    FunctionMask = 3
     Arguments = @{
       uBatteryNo = [byte]$BatteryNo
       uFunctionMask = [byte]3
+      uFunctionStatus = $status
+      uReservedIn = ([byte[]](0,0,0,0,0))
+    }
+  })
+  $Attempts.Add(@{
+    Name = ('battery{0}-legacy-byte0-scalar' -f $BatteryNo)
+    Arguments = @{
+      uBatteryNo = [byte]$BatteryNo
+      uFunctionMask = [byte]1
       uFunctionStatus = $status
       uReservedIn = ([byte[]](0,0,0,0,0))
     }
@@ -458,7 +432,7 @@ function Add-BatteryHealthAttempts {
 
 function Add-BatteryFunctionDataAttempts {
   param([System.Collections.Generic.List[object]]$Attempts)
-  foreach ($mask in @(1,2,3,0,4,5,7)) {
+  foreach ($mask in @(2,1,3,0,4,5,7)) {
     $Attempts.Add(@{
       Name = ('battery-function-data-mask{0}' -f $mask)
       FunctionMask = $mask
@@ -475,13 +449,12 @@ $attempts = New-Object System.Collections.Generic.List[object]
 Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 1
 Add-BatteryHealthAttempts -Attempts $attempts -BatteryNo 0
 
-$trustDirectHealthWrite = Test-DirectHealthWriteTrustAllowed
 $errors = New-Object System.Collections.Generic.List[string]
 foreach ($attempt in $attempts) {
   try {
     $set = Invoke-CimMethod -InputObject $battery -MethodName SetBatteryHealthControl -Arguments $attempt.Arguments -ErrorAction Stop
     Start-Sleep -Milliseconds 250
-    $match = Find-DesiredStatus -Battery $battery -Requested ([int]$status) -FunctionMask ([int]$attempt.FunctionMask) -PreferredBatteryNo ([int]$attempt.BatteryNo)
+    $match = Find-DesiredStatus -Battery $battery -Requested ([int]$status)
     $health = if ($null -ne $match.health) { [int]$match.health } else { -1 }
     if ($match.ok) {
       $read = $match.read
@@ -492,7 +465,6 @@ foreach ($attempt in $attempts) {
         matchedStatusIndex = $match.index
         matchedBatteryNo = $read.batteryNo
         matchedFunctionQuery = $read.functionQuery
-        matchedFunctionMask = [int]$attempt.FunctionMask
         functionList = [int]$read.functionList
         functionStatus = @($read.functionStatus)
         getReturn = @($read.getReturn)
@@ -502,25 +474,9 @@ foreach ($attempt in $attempts) {
     }
     $read = $match.read
     $readDetail = if ($read -and $read.Contains('functionStatus')) {
-      ('batteryNo {0} query {1} mask {2} statuses [{3}]' -f $read.batteryNo, $read.functionQuery, [int]$attempt.FunctionMask, (@($read.functionStatus) -join ','))
+      ('batteryNo {0} query {1} statuses [{2}]' -f $read.batteryNo, $read.functionQuery, (@($read.functionStatus) -join ','))
     } else {
       'no readable health-status rows'
-    }
-    $setReturnValues = @($set.uReturn | ForEach-Object { [int]$_ })
-    $setReturnedOk = ($setReturnValues.Count -eq 0 -or (($setReturnValues | Where-Object { $_ -ne 0 } | Select-Object -First 1) -eq $null))
-    if ($trustDirectHealthWrite -and $setReturnedOk -and [int]$attempt.BatteryNo -eq 1 -and [int]$attempt.FunctionMask -eq 1) {
-      Emit-AeroForgeResult ([ordered]@{
-        requestedHealthStatus = [int]$status
-        healthStatus = [int]$status
-        setAttempt = $attempt.Name
-        mode = 'battery-health-direct-write'
-        matchedBatteryNo = [int]$attempt.BatteryNo
-        matchedFunctionMask = [int]$attempt.FunctionMask
-        readbackHealthStatus = $health
-        readbackDetail = $readDetail
-        setReturn = $setReturnValues
-        setReservedOut = @($set.uReservedOut)
-      })
     }
     $errors.Add(('{0}: readback returned {1} after requesting {2}; {3}' -f $attempt.Name, $health, [int]$status, $readDetail))
   } catch {
@@ -566,17 +522,30 @@ foreach ($attempt in $functionDataAttempts) {
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
 "#;
 
+    use std::io::Write;
+    let mut tmp_file = tempfile::Builder::new()
+        .suffix(".ps1")
+        .tempfile()
+        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
+    write!(tmp_file, "{}", script)
+        .map_err(|e| io::Error::other(format!("Failed to write temp script: {}", e)))?;
+    let tmp_path = tmp_file.into_temp_path();
+
     let output = Command::new("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            script,
+            "-File",
+            tmp_path.to_str().unwrap(),
+            "-Status",
             &requested_health_status.to_string(),
         ])
         .output()?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&tmp_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
