@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "aeroforge-service"
-version = "0.13.10"
+version = "0.14.0"
 dependencies = [
  "ctrlc",
  "libloading",
