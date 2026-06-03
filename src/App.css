@@ -1813,6 +1813,14 @@
   border-radius: 0;
 }
 
+.boot-logo-notice {
+  margin-top: 0.8rem;
+  padding: 0.8rem 0.9rem;
+  color: #ffd9ad;
+  background: rgba(236, 120, 46, 0.1);
+  border: 1px solid rgba(236, 120, 46, 0.32);
+}
+
 .boot-preview-panel__footer {
   display: flex;
   justify-content: space-between;

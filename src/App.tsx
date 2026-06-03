@@ -5052,6 +5052,10 @@ function App() {
                                 ? 'Click a built-in AeroForge splash to apply it, or upload an image. AeroForge preserves GIF files and converts static images to firmware-safe JPEG before apply.'
                                 : bootLogoStatusText}
                             </p>
+                            <p className="boot-logo-notice">
+                              Boot logo changing is currently non-functional. If you want this
+                              feature to become reliable, consider contributing to the project.
+                            </p>
                           </div>
 
                         <div className="boot-preview-panel">
