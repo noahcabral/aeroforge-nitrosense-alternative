@@ -465,6 +465,7 @@ const PERFORMANCE_LOG_BATCH_SIZE = 16
 const PERFORMANCE_LOG_FLUSH_DELAY_MS = 1500
 const PERFORMANCE_LOG_LONG_FRAME_MS = 34
 const PERFORMANCE_LOG_MAX_QUEUE = 200
+const FAN_PROFILE_APPLY_TIMEOUT_MS = 15_000
 
 function pointToChart(point: CurvePoint) {
   const x =
@@ -544,6 +545,22 @@ function describeError(error: unknown) {
   } catch {
     return 'Unknown error'
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
+  let timeoutId: number | null = null
+
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds`))
+    }, timeoutMs)
+  })
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId)
+    }
+  })
 }
 
 type PreparedBootLogo = {
@@ -3135,7 +3152,7 @@ function App() {
 
   async function handleFanProfile(profileId: FanProfile['id']) {
     const profileName = fanProfiles.find((profile) => profile.id === profileId)?.name ?? 'Fan'
-    const hasService = serviceConnectedRef.current
+    let hasService = serviceConnectedRef.current
 
     setActiveFanProfile(profileId)
     setStatusMessage(
@@ -3147,6 +3164,41 @@ function App() {
     queuePerformanceEvent('fan-profile-select', profileId, {
       serviceConnected: hasService,
     })
+
+    if (!hasService) {
+      const reconnectStartedMs = performance.now()
+
+      try {
+        const snapshot = await getBackendPollSnapshot()
+        hasService = snapshot.service.connected
+        serviceConnectedRef.current = snapshot.service.connected
+        setServiceConnected(snapshot.service.connected)
+        setTelemetrySourceLabel(describeTelemetrySource(snapshot.service.connected, snapshot.telemetry))
+        setLastBackendError(snapshot.service.connected ? null : snapshot.service.detail)
+        updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
+        updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
+          liveControlSnapshotRef.current = next
+          setLiveControlSnapshot(next)
+        })
+        if (activeTabRef.current === 'debug') {
+          updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
+          setLastBackendPollAt(formatDebugClock(new Date()))
+        }
+        queuePerformanceEvent('fan-profile-service-recheck', profileId, {
+          reconnectMs: performance.now() - reconnectStartedMs,
+          serviceConnected: snapshot.service.connected,
+          workerCount: snapshot.service.workerCount,
+        })
+        if (hasService) {
+          setStatusMessage(`${profileName} fan mode apply requested after service reconnect.`)
+        }
+      } catch (error) {
+        queuePerformanceEvent('fan-profile-service-recheck-failed', profileId, {
+          reconnectMs: performance.now() - reconnectStartedMs,
+          error: describeError(error),
+        })
+      }
+    }
 
     if (!hasService) {
       await waitForNextPaint()
@@ -3169,10 +3221,15 @@ function App() {
 
     try {
       await waitForNextPaint()
-      const result =
+      const applyRequest =
         profileId === 'custom'
-          ? await applyCustomFanCurves(toBackendCurveSet(customCurvesRef.current))
-          : await applyFanProfile(profileId)
+          ? applyCustomFanCurves(toBackendCurveSet(customCurvesRef.current))
+          : applyFanProfile(profileId)
+      const result = await withTimeout(
+        applyRequest,
+        FAN_PROFILE_APPLY_TIMEOUT_MS,
+        `${profileName} fan mode apply`,
+      )
       const refreshed = await refreshCachedLiveControlsAfterApply()
       const liveControls = refreshed.liveControls
       const queuedProfile = queuedFanProfileRef.current

@@ -105,6 +105,8 @@ pub struct NamedPipeInstance {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
+unsafe impl Send for NamedPipeInstance {}
+
 struct PipeSecurityDescriptor {
     attributes: SECURITY_ATTRIBUTES,
     descriptor: *mut core::ffi::c_void,

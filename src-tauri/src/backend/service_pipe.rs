@@ -21,6 +21,7 @@ use super::models::{
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
 const FRESH_SUPERVISOR_MAX_AGE_SECONDS: u64 = 15;
+const FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS: u64 = 15;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CRITICAL_WORKERS: &[&str] = &["control-worker", "ipc-worker"];
 
@@ -460,7 +461,10 @@ fn should_try_service_recovery(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-    ) || matches!(error.raw_os_error(), Some(2) | Some(231))
+    ) || matches!(
+        error.raw_os_error(),
+        Some(2) | Some(109) | Some(121) | Some(231) | Some(232) | Some(233)
+    )
 }
 
 fn cached_supervisor_worker_problem() -> Option<String> {
@@ -470,6 +474,11 @@ fn cached_supervisor_worker_problem() -> Option<String> {
 }
 
 fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+
     for worker_name in CRITICAL_WORKERS {
         let Some(worker) = workers.iter().find(|worker| worker.name == *worker_name) else {
             return Some(format!(
@@ -488,6 +497,18 @@ fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
                     .map(|error| format!(" ({error})"))
                     .unwrap_or_default()
             ));
+        }
+
+        if worker.interval_seconds > 0 {
+            let max_age = FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS
+                .max(worker.interval_seconds.saturating_mul(4));
+            let age = now_unix.saturating_sub(worker.last_update_unix);
+            if age > max_age {
+                return Some(format!(
+                    "{} heartbeat is stale: last update was {age}s ago, expected within {max_age}s",
+                    worker.name
+                ));
+            }
         }
     }
 

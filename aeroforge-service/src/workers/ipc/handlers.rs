@@ -3,7 +3,12 @@ use std::{fs, path::Path};
 use serde_json::{json, Value};
 
 use super::models::{PipeRequest, PipeResponse, SupervisorSnapshot};
-use crate::{paths::ServicePaths, workers::control};
+use crate::{
+    paths::ServicePaths,
+    workers::{control, unix_timestamp},
+};
+
+const FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS: u64 = 15;
 
 pub fn process_request(
     request: PipeRequest,
@@ -159,6 +164,8 @@ fn build_service_status(
 }
 
 fn critical_worker_problem(workers: &[super::models::WorkerStatusSnapshot]) -> Option<String> {
+    let now_unix = unix_timestamp();
+
     for worker_name in ["control-worker", "ipc-worker"] {
         let Some(worker) = workers.iter().find(|worker| worker.name == worker_name) else {
             return Some(format!(
@@ -177,6 +184,18 @@ fn critical_worker_problem(workers: &[super::models::WorkerStatusSnapshot]) -> O
                     .map(|error| format!(" ({error})"))
                     .unwrap_or_default()
             ));
+        }
+
+        if worker.interval_seconds > 0 {
+            let max_age = FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS
+                .max(worker.interval_seconds.saturating_mul(4));
+            let age = now_unix.saturating_sub(worker.last_update_unix);
+            if age > max_age {
+                return Some(format!(
+                    "{} heartbeat is stale: last update was {age}s ago, expected within {max_age}s",
+                    worker.name
+                ));
+            }
         }
     }
 

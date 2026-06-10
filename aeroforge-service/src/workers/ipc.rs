@@ -10,7 +10,7 @@ use std::sync::{
 use models::{PipeRequest, PipeResponse};
 
 use crate::{
-    paths::ServicePaths,
+    paths::{write_log_line, ServicePaths},
     workers::{unix_timestamp, WorkerEvent, WorkerEventSender, WorkerRegistration, WorkerState},
 };
 
@@ -43,12 +43,23 @@ pub fn run(
     while !stop_flag.load(Ordering::SeqCst) {
         let pipe = pipe::create_pipe_instance(&paths, PIPE_PATH)?;
         pipe::connect_client(&pipe)?;
-        handle_client(pipe, &paths)?;
+        let client_paths = paths.clone();
+        std::thread::Builder::new()
+            .name("ipc-client".into())
+            .spawn(move || {
+                if let Err(error) = handle_client(pipe, &client_paths) {
+                    let _ = write_log_line(
+                        &client_paths.component_log("ipc-worker"),
+                        "ERROR",
+                        &format!("Named-pipe client handler failed: {error}"),
+                    );
+                }
+            })?;
 
         let _ = event_tx.send(WorkerEvent {
             worker: "ipc-worker",
             state: WorkerState::Running,
-            message: Some("Handled named-pipe request.".into()),
+            message: Some("Accepted named-pipe request.".into()),
             interval_seconds: 0,
             timestamp_unix: unix_timestamp(),
         });
