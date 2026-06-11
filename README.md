@@ -148,7 +148,14 @@ Current power control path:
 - Custom layers the requested Windows processor-state policy over the selected firmware base
 - Quiet uses Acer platform profile value `0x00` plus the direct NVIDIA NVAPI Whisper path when available
 - Windows processor-state policy is still applied through `powercfg` and read back afterward for AC/DC verification
+- CPU package power and PL1/PL2 readback use the PawnIO MSR/RAPL path when PawnIO is installed. The AeroForge installer can install the bundled open-source PawnIO setup on request, stages the `IntelMSR.bin` module, detects `PawnIOLib.dll`, and configures the service-level `AEROFORGE_PAWNIO_DLL`, `AEROFORGE_PAWNIO_MODULE`, and `AEROFORGE_ENABLE_PAWNIO` environment variables automatically. If PawnIO is not installed, the CPU watt/PL panel intentionally reports that the CPU power driver is missing.
 - The legacy WinRing0 CPU MSR/RAPL path is not bundled or enabled in release builds because Windows Defender commonly flags that driver. For diagnostics only, maintainers can set `AEROFORGE_ENABLE_WINRING0=1` and provide a trusted external driver through `AEROFORGE_WINRING0_DRIVER`.
+
+Bundled PawnIO runtime:
+
+- `third_party/pawnio/PawnIO_setup.exe` is the open-source PawnIO setup from `namazso/PawnIO.Setup` release `2.2.0`.
+- SHA256: `1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032`.
+- Setup is invoked only when the user opts into CPU wattage and PL1/PL2 support during AeroForge setup; silent installs configure an existing PawnIO install but do not force-install PawnIO.
 
 Current read-only telemetry coverage:
 

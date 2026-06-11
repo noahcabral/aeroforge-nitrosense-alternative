@@ -1,5 +1,6 @@
 param(
   [switch]$Uninstall,
+  [switch]$InstallPawnIO,
   [string]$ServiceSource = (Join-Path $PSScriptRoot 'aeroforge-service.exe')
 )
 
@@ -14,6 +15,10 @@ $serviceLogDir = Join-Path $serviceRoot 'logs'
 $installedExe = Join-Path $serviceBinDir 'aeroforge-service.exe'
 $pawnIoIntelMsrSource = Join-Path $PSScriptRoot 'IntelMSR.bin'
 $pawnIoIntelMsrInstalled = Join-Path $serviceDriverDir 'IntelMSR.bin'
+$pawnIoSetupSource = Join-Path $PSScriptRoot 'PawnIO_setup.exe'
+$pawnIoDllEnv = 'AEROFORGE_PAWNIO_DLL'
+$pawnIoModuleEnv = 'AEROFORGE_PAWNIO_MODULE'
+$pawnIoEnableEnv = 'AEROFORGE_ENABLE_PAWNIO'
 $script:LogFile = Join-Path $serviceLogDir 'installer-service.log'
 
 function Initialize-InstallLog {
@@ -191,6 +196,110 @@ function Copy-WithRetry {
   } while ($true)
 }
 
+function Get-ExistingFile {
+  param([string[]]$Candidates)
+
+  foreach ($candidate in $Candidates) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+      continue
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return $candidate
+    }
+  }
+
+  return $null
+}
+
+function Get-PawnIoInstallLocations {
+  $locations = New-Object System.Collections.Generic.List[string]
+
+  foreach ($root in @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+  )) {
+    try {
+      Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
+        Where-Object { ($_.DisplayName -as [string]) -match 'PawnIO' } |
+        ForEach-Object {
+          foreach ($property in @('InstallLocation', 'DisplayIcon')) {
+            $value = $_.$property -as [string]
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              continue
+            }
+
+            $trimmed = $value.Trim('"')
+            if ($property -eq 'DisplayIcon') {
+              $trimmed = Split-Path -Parent $trimmed
+            }
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+              [void]$locations.Add($trimmed)
+            }
+          }
+        }
+    } catch {
+      Write-InstallLog "PawnIO registry probe failed at ${root}: $($_.Exception.Message)"
+    }
+  }
+
+  foreach ($path in @(
+    (Join-Path $env:ProgramFiles 'PawnIO'),
+    (Join-Path ${env:ProgramFiles(x86)} 'PawnIO'),
+    $env:SystemRoot
+  )) {
+    if (-not [string]::IsNullOrWhiteSpace($path)) {
+      [void]$locations.Add($path)
+    }
+  }
+
+  return $locations | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+}
+
+function Resolve-PawnIoDll {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  foreach ($location in Get-PawnIoInstallLocations) {
+    [void]$candidates.Add((Join-Path $location 'PawnIOLib.dll'))
+  }
+  [void]$candidates.Add((Join-Path $env:SystemRoot 'System32\PawnIOLib.dll'))
+
+  return Get-ExistingFile -Candidates ($candidates | Select-Object -Unique)
+}
+
+function Install-PawnIoRuntime {
+  if (-not $InstallPawnIO) {
+    Write-InstallLog "PawnIO runtime install was not requested."
+    return
+  }
+
+  if (-not (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf)) {
+    Write-InstallLog "PawnIO runtime install was requested, but bundled setup was not found at $pawnIoSetupSource."
+    return
+  }
+
+  Write-InstallLog "Installing bundled PawnIO runtime from $pawnIoSetupSource."
+  $process = Start-Process -FilePath $pawnIoSetupSource -ArgumentList @('-install', '-silent') -Wait -PassThru -WindowStyle Hidden
+  Write-InstallLog "PawnIO setup exited with code $($process.ExitCode)."
+  if ($process.ExitCode -ne 0) {
+    throw "PawnIO setup failed with exit code $($process.ExitCode)."
+  }
+}
+
+function Set-MachineEnvironmentVariable {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [AllowNull()]
+    [string]$Value
+  )
+
+  [Environment]::SetEnvironmentVariable($Name, $Value, 'Machine')
+  if ($null -eq $Value) {
+    Write-InstallLog "Cleared machine environment variable $Name."
+  } else {
+    Write-InstallLog "Set machine environment variable $Name=$Value."
+  }
+}
+
 function Get-AeroForgeService {
   Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 }
@@ -337,6 +446,34 @@ function Install-LowLevelModules {
   } else {
     Write-InstallLog "Optional PawnIO IntelMSR module was not bundled; CPU RAPL through PawnIO will remain unavailable unless AEROFORGE_PAWNIO_MODULE is set."
   }
+
+  Configure-PawnIoProvider
+}
+
+function Configure-PawnIoProvider {
+  if (-not (Test-Path -LiteralPath $pawnIoIntelMsrInstalled -PathType Leaf)) {
+    Write-InstallLog "PawnIO provider not configured because IntelMSR.bin is missing from $serviceDriverDir."
+    return
+  }
+
+  $pawnIoDll = Resolve-PawnIoDll
+  if (-not $pawnIoDll) {
+    Install-PawnIoRuntime
+    $pawnIoDll = Resolve-PawnIoDll
+  }
+
+  if (-not $pawnIoDll) {
+    Set-MachineEnvironmentVariable -Name $pawnIoDllEnv -Value $null
+    Set-MachineEnvironmentVariable -Name $pawnIoModuleEnv -Value $pawnIoIntelMsrInstalled
+    Set-MachineEnvironmentVariable -Name $pawnIoEnableEnv -Value $null
+    Write-InstallLog "PawnIO provider not configured because PawnIOLib.dll was not found. Install PawnIO, then reinstall or repair AeroForge to enable CPU package power and PL readback."
+    return
+  }
+
+  Set-MachineEnvironmentVariable -Name $pawnIoDllEnv -Value $pawnIoDll
+  Set-MachineEnvironmentVariable -Name $pawnIoModuleEnv -Value $pawnIoIntelMsrInstalled
+  Set-MachineEnvironmentVariable -Name $pawnIoEnableEnv -Value '1'
+  Write-InstallLog "Configured PawnIO CPU MSR/RAPL provider with DLL $pawnIoDll and module $pawnIoIntelMsrInstalled."
 }
 
 function Uninstall-AeroForgeService {
@@ -350,6 +487,9 @@ function Uninstall-AeroForgeService {
   if (Test-Path -LiteralPath $installedExe) {
     Remove-Item -LiteralPath $installedExe -Force -ErrorAction SilentlyContinue
   }
+  Set-MachineEnvironmentVariable -Name $pawnIoDllEnv -Value $null
+  Set-MachineEnvironmentVariable -Name $pawnIoModuleEnv -Value $null
+  Set-MachineEnvironmentVariable -Name $pawnIoEnableEnv -Value $null
   Write-InstallLog "Uninstall step complete for $serviceName."
 }
 

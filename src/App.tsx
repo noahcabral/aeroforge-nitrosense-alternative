@@ -1689,7 +1689,7 @@ function App() {
   ]
     .filter(Boolean)
     .join(' | ')
-  const cpuPowerMeterDetail = liveCpuPowerLimitLabel ?? 'No PL readback'
+  const cpuPowerMeterDetail = liveCpuPowerLimitLabel ?? 'CPU power driver missing'
   const gpuPowerMeterDetail = liveGpuPowerLimitShort ?? 'No readback'
   const currentPowerRuntime = formatRemainingRuntime(displayedBatteryLifeRemainingSec)
   const runtimeEstimatePending =

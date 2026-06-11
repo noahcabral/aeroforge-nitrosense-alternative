@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AeroForge Control",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "identifier": "com.noah.aeroforgecontrol",
   "build": {
     "frontendDist": "../dist",
@@ -39,6 +39,7 @@
       "target/release/aeroforge-hotkey-helper.exe": "aeroforge-hotkey-helper.exe",
       "resources/Install-AeroForgeBundledService.ps1": "Install-AeroForgeBundledService.ps1",
       "../scripts/AeroForge-Debug-Collector.cmd": "AeroForge-Debug-Collector.cmd",
+      "../third_party/pawnio/PawnIO_setup.exe": "PawnIO_setup.exe",
       "../third_party/pawnio-modules/IntelMSR.bin": "IntelMSR.bin",
       "../third_party/pawnio-modules/COPYING": "PawnIO.Modules.COPYING"
     },

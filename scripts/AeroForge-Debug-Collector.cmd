@@ -1551,11 +1551,67 @@ function Get-AeroForgeIssueEvidence {
     "control-telemetry.log",
     "telemetry-nvidia-gpu.log",
     "telemetry-worker.log",
-    "lowlevel.log",
+    "lowlevel-init.log",
+    "lowlevel-worker.log",
     "installer-service.log"
   )) {
     Get-RecentTextTail -Path (Join-Path $logRoot $name) -LineCount 180
   }
+}
+
+function Get-PawnIoEvidence {
+  "===== PawnIO environment ====="
+  $envRows = foreach ($name in @("AEROFORGE_ENABLE_PAWNIO", "AEROFORGE_PAWNIO_DLL", "AEROFORGE_PAWNIO_MODULE")) {
+    [pscustomobject]@{
+      Name = $name
+      Process = [Environment]::GetEnvironmentVariable($name, "Process")
+      User = [Environment]::GetEnvironmentVariable($name, "User")
+      Machine = [Environment]::GetEnvironmentVariable($name, "Machine")
+    }
+  }
+  $envRows | Format-Table -AutoSize -Wrap
+  ""
+
+  "===== PawnIO install candidates ====="
+  $candidateRoots = @(
+    (Join-Path $env:ProgramData "AeroForge\Service\drivers"),
+    (Join-Path $env:ProgramFiles "PawnIO"),
+    (Join-Path ${env:ProgramFiles(x86)} "PawnIO"),
+    (Join-Path $env:SystemRoot "System32")
+  ) | Where-Object { $_ } | Select-Object -Unique
+
+  foreach ($root in $candidateRoots) {
+    "Root: $root"
+    if (Test-Path -LiteralPath $root) {
+      Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'PawnIO|IntelMSR' } |
+        Select-Object FullName, Length, LastWriteTimeUtc |
+        Format-Table -AutoSize -Wrap
+    } else {
+      "Missing"
+    }
+    ""
+  }
+
+  "===== PawnIO uninstall registry ====="
+  foreach ($path in @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+  )) {
+    Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+      Where-Object { ($_.DisplayName -as [string]) -match "PawnIO" } |
+      Select-Object DisplayName, DisplayVersion, InstallLocation, DisplayIcon, UninstallString |
+      Format-List
+  }
+  ""
+
+  "===== AeroForge low-level state/logs ====="
+  $stateRoot = Join-Path $env:ProgramData "AeroForge\Service\state"
+  $logRoot = Join-Path $env:ProgramData "AeroForge\Service\logs"
+  Get-RecentTextTail -Path (Join-Path $stateRoot "lowlevel.json") -LineCount 220
+  Get-RecentTextTail -Path (Join-Path $stateRoot "telemetry.json") -LineCount 220
+  Get-RecentTextTail -Path (Join-Path $logRoot "lowlevel-init.log") -LineCount 220
+  Get-RecentTextTail -Path (Join-Path $logRoot "lowlevel-worker.log") -LineCount 220
 }
 
 function Get-AeroForgePerformanceEvidence {
@@ -1916,9 +1972,13 @@ Invoke-DiagCommand "aeroforge issue evidence" {
   Get-AeroForgeIssueEvidence
 }
 
+Invoke-DiagCommand "pawnio cpu rapl evidence" {
+  Get-PawnIoEvidence
+}
+
 Invoke-DiagCommand "services filtered" {
   Get-CimInstance Win32_Service |
-    Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName) -match 'AeroForge|Acer|Nitro|Predator|Quick Access|QuickAccess|NVIDIA|NVDisplay|NVContainer|WebView|WinRing|OpenLibSys' } |
+    Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName) -match 'AeroForge|Acer|Nitro|Predator|Quick Access|QuickAccess|NVIDIA|NVDisplay|NVContainer|WebView|WinRing|OpenLibSys|PawnIO' } |
     Select-Object Name, DisplayName, State, Status, StartMode, StartName, ProcessId, PathName |
     Sort-Object Name |
     Format-List
@@ -1926,7 +1986,7 @@ Invoke-DiagCommand "services filtered" {
 
 Invoke-DiagCommand "processes filtered" {
   Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProcessName -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys' } |
+    Where-Object { $_.ProcessName -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys|pawnio' } |
     Select-Object ProcessName, Id, CPU, WorkingSet64, PrivateMemorySize64, StartTime, Path |
     Sort-Object ProcessName, Id |
     Format-Table -AutoSize -Wrap
@@ -1934,7 +1994,7 @@ Invoke-DiagCommand "processes filtered" {
 
 Invoke-DiagCommand "process command lines filtered" {
   Get-CimInstance Win32_Process |
-    Where-Object { ($_.Name + " " + $_.ExecutablePath + " " + $_.CommandLine) -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys' } |
+    Where-Object { ($_.Name + " " + $_.ExecutablePath + " " + $_.CommandLine) -match 'aeroforge|webview|msedgewebview2|acer|nitro|predator|nvidia|nvcontainer|quick|winring|openlibsys|pawnio' } |
     Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine |
     Sort-Object Name, ProcessId |
     Format-List
@@ -2071,7 +2131,7 @@ Invoke-DiagCommand "acer direct wmi read-only probes" {
 
 Invoke-DiagCommand "pnp devices filtered" {
   Get-PnpDevice -ErrorAction SilentlyContinue |
-    Where-Object { ($_.FriendlyName + " " + $_.InstanceId + " " + $_.Class) -match 'Acer|Nitro|Predator|NVIDIA|HID|Battery|Display|Monitor|ACPI|WMI|Thermal|WinRing|OpenLibSys' } |
+    Where-Object { ($_.FriendlyName + " " + $_.InstanceId + " " + $_.Class) -match 'Acer|Nitro|Predator|NVIDIA|HID|Battery|Display|Monitor|ACPI|WMI|Thermal|WinRing|OpenLibSys|PawnIO' } |
     Select-Object Class, FriendlyName, InstanceId, Status, Problem |
     Sort-Object Class, FriendlyName |
     Format-Table -AutoSize -Wrap

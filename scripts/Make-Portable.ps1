@@ -74,7 +74,7 @@ Notes:
 - To start the helper automatically at logon, run scripts\Install-AeroForgeStartup.ps1 from the source tree after building the portable folder.
 - Runtime DLLs from the Tauri release folder are included alongside the executable.
 - WebView2 must be present on the machine. It is already installed on most modern Windows systems.
-- For a first install on a fresh machine, use the Setup EXE so AeroForgeService is installed.
+- For a first install on a fresh machine, use the Setup EXE so AeroForgeService is installed. CPU wattage and PL1/PL2 readback require the Setup EXE's optional PawnIO install/configuration step.
 - Release builds do not bundle or auto-load WinRing0. CPU MSR/RAPL diagnostics require an explicit external driver opt-in.
 - NVIDIA temperature/utilization/VRAM monitoring is gated by Windows dedicated-GPU activity. NVIDIA power readback follows Settings > NVIDIA Telemetry Polling; AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1 can still force diagnostics.
 

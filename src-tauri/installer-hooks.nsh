@@ -1,6 +1,7 @@
 Var NitroSenseDisplayName
 Var NitroSenseUninstallString
 Var AeroForgeInstallDirSafeToWipe
+Var AeroForgeInstallPawnIO
 
 Function CleanAeroForgeInstallDirForInstall
   IfFileExists "$INSTDIR\aeroforge-control.exe" 0 check_display_exe_install
@@ -192,7 +193,23 @@ FunctionEnd
 
 Function InstallAeroForgeService
   IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_missing
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+    StrCpy $AeroForgeInstallPawnIO "0"
+    IfSilent aeroforge_pawnio_prompt_done 0
+    IfFileExists "$INSTDIR\PawnIO_setup.exe" 0 aeroforge_pawnio_prompt_done
+      MessageBox MB_ICONQUESTION|MB_YESNO "Enable CPU wattage and PL1/PL2 readback/control?$\r$\n$\r$\nThis installs the open-source PawnIO low-level driver runtime used for CPU MSR/RAPL access.$\r$\n$\r$\nSelect Yes to install/configure PawnIO, or No to continue without CPU watt/PL readback." IDYES aeroforge_pawnio_yes IDNO aeroforge_pawnio_prompt_done
+
+    aeroforge_pawnio_yes:
+      StrCpy $AeroForgeInstallPawnIO "1"
+
+    aeroforge_pawnio_prompt_done:
+    StrCmp $AeroForgeInstallPawnIO "1" 0 aeroforge_service_without_pawnio
+      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -InstallPawnIO -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+      Goto aeroforge_service_installed
+
+    aeroforge_service_without_pawnio:
+      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+
+    aeroforge_service_installed:
     ${If} $8 = 0
       Return
     ${EndIf}

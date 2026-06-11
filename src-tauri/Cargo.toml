@@ -1,6 +1,6 @@
 [package]
 name = "aeroforge-control"
-version = "0.14.1"
+version = "0.15.0"
 description = "Premium laptop fan control and power management desktop shell."
 authors = ["Noah"]
 license = ""
