@@ -19,6 +19,8 @@ $pawnIoSetupSource = Join-Path $PSScriptRoot 'PawnIO_setup.exe'
 $pawnIoDllEnv = 'AEROFORGE_PAWNIO_DLL'
 $pawnIoModuleEnv = 'AEROFORGE_PAWNIO_MODULE'
 $pawnIoEnableEnv = 'AEROFORGE_ENABLE_PAWNIO'
+$pawnIoSetupStdoutLog = Join-Path $serviceLogDir 'pawnio-setup.stdout.log'
+$pawnIoSetupStderrLog = Join-Path $serviceLogDir 'pawnio-setup.stderr.log'
 $script:LogFile = Join-Path $serviceLogDir 'installer-service.log'
 
 function Initialize-InstallLog {
@@ -57,6 +59,63 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   } catch {
     return $false
+  }
+}
+
+function Write-PawnIoInstallerEnvironment {
+  Write-InstallLog "PawnIO installer diagnostics: admin=$(Test-IsAdmin) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name) os=$([Environment]::OSVersion.VersionString)."
+
+  if (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf) {
+    try {
+      $hash = Get-FileHash -LiteralPath $pawnIoSetupSource -Algorithm SHA256 -ErrorAction Stop
+      Write-InstallLog "PawnIO setup file: path=$pawnIoSetupSource size=$((Get-Item -LiteralPath $pawnIoSetupSource).Length) sha256=$($hash.Hash)."
+    } catch {
+      Write-InstallLog "PawnIO setup hash probe failed: $($_.Exception.Message)"
+    }
+
+    try {
+      $signature = Get-AuthenticodeSignature -LiteralPath $pawnIoSetupSource -ErrorAction Stop
+      Write-InstallLog "PawnIO setup signature: status=$($signature.Status) signer=$($signature.SignerCertificate.Subject)."
+    } catch {
+      Write-InstallLog "PawnIO setup signature probe failed: $($_.Exception.Message)"
+    }
+  }
+
+  try {
+    $deviceGuard = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop
+    Write-InstallLog "DeviceGuard: VBS=$($deviceGuard.VirtualizationBasedSecurityStatus) configured=$($deviceGuard.SecurityServicesConfigured -join ',') running=$($deviceGuard.SecurityServicesRunning -join ',') CI=$($deviceGuard.CodeIntegrityPolicyEnforcementStatus) UMCI=$($deviceGuard.UserModeCodeIntegrityPolicyEnforcementStatus)."
+  } catch {
+    Write-InstallLog "DeviceGuard probe failed: $($_.Exception.Message)"
+  }
+
+  try {
+    $hvci = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -ErrorAction Stop
+    Write-InstallLog "HVCI registry: Enabled=$($hvci.Enabled) Locked=$($hvci.Locked) WasEnabledBy=$($hvci.WasEnabledBy)."
+  } catch {
+    Write-InstallLog "HVCI registry probe failed: $($_.Exception.Message)"
+  }
+}
+
+function Write-RecentPawnIoSetupTranscript {
+  foreach ($path in @($pawnIoSetupStdoutLog, $pawnIoSetupStderrLog)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      Write-InstallLog "PawnIO setup transcript missing: $path"
+      continue
+    }
+
+    Write-InstallLog "PawnIO setup transcript: $path"
+    try {
+      $lines = @(Get-Content -LiteralPath $path -Tail 80 -ErrorAction Stop)
+      if ($lines.Count -eq 0) {
+        Write-InstallLog "  <empty>"
+      } else {
+        foreach ($line in $lines) {
+          Write-InstallLog "  $line"
+        }
+      }
+    } catch {
+      Write-InstallLog "  transcript read failed: $($_.Exception.Message)"
+    }
   }
 }
 
@@ -271,15 +330,19 @@ function Install-PawnIoRuntime {
     return $false
   }
 
+  Write-PawnIoInstallerEnvironment
+
   if (-not (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf)) {
     Write-InstallLog "WARN: PawnIO runtime install was requested, but bundled setup was not found at $pawnIoSetupSource. AeroForgeService install will continue without CPU package power and PL readback."
     return $false
   }
 
   try {
+    Remove-Item -LiteralPath $pawnIoSetupStdoutLog, $pawnIoSetupStderrLog -Force -ErrorAction SilentlyContinue
     Write-InstallLog "Installing bundled PawnIO runtime from $pawnIoSetupSource."
-    $process = Start-Process -FilePath $pawnIoSetupSource -ArgumentList @('-install', '-silent') -Wait -PassThru -WindowStyle Hidden
+    $process = Start-Process -FilePath $pawnIoSetupSource -ArgumentList @('-install', '-silent') -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $pawnIoSetupStdoutLog -RedirectStandardError $pawnIoSetupStderrLog
     Write-InstallLog "PawnIO setup exited with code $($process.ExitCode)."
+    Write-RecentPawnIoSetupTranscript
     if ($process.ExitCode -ne 0) {
       Write-InstallLog "WARN: PawnIO setup failed with exit code $($process.ExitCode). AeroForgeService install will continue without CPU package power and PL readback."
       return $false
@@ -287,6 +350,7 @@ function Install-PawnIoRuntime {
     return $true
   } catch {
     Write-InstallLog "WARN: PawnIO setup launch failed: $($_.Exception.Message). AeroForgeService install will continue without CPU package power and PL readback."
+    Write-RecentPawnIoSetupTranscript
     return $false
   }
 }

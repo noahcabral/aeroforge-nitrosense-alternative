@@ -1572,6 +1572,46 @@ function Get-PawnIoEvidence {
   $envRows | Format-Table -AutoSize -Wrap
   ""
 
+  "===== PawnIO Windows driver/security state ====="
+  try {
+    $adminIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $adminPrincipal = New-Object Security.Principal.WindowsPrincipal($adminIdentity)
+    [pscustomobject]@{
+      User = $adminIdentity.Name
+      IsAdmin = $adminPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+      OS = [Environment]::OSVersion.VersionString
+    } | Format-List
+  } catch {
+    "Admin/security identity probe failed: $($_.Exception.Message)"
+  }
+  ""
+
+  try {
+    Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop |
+      Select-Object VirtualizationBasedSecurityStatus, SecurityServicesConfigured, SecurityServicesRunning, CodeIntegrityPolicyEnforcementStatus, UserModeCodeIntegrityPolicyEnforcementStatus |
+      Format-List
+  } catch {
+    "DeviceGuard probe failed: $($_.Exception.Message)"
+  }
+  ""
+
+  try {
+    Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -ErrorAction Stop |
+      Select-Object Enabled, Locked, WasEnabledBy |
+      Format-List
+  } catch {
+    "HVCI registry probe failed: $($_.Exception.Message)"
+  }
+  ""
+
+  "===== PawnIO / low-level driver services ====="
+  Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name + " " + $_.DisplayName + " " + $_.PathName + " " + $_.Description) -match "PawnIO|WinRing|OpenLibSys|IntelMSR|MSR" } |
+    Select-Object Name, DisplayName, State, StartMode, PathName |
+    Sort-Object Name |
+    Format-Table -AutoSize -Wrap
+  ""
+
   "===== PawnIO install candidates ====="
   $candidateRoots = @(
     (Join-Path $env:ProgramData "AeroForge\Service\drivers"),
@@ -1602,6 +1642,29 @@ function Get-PawnIoEvidence {
       Where-Object { ($_.DisplayName -as [string]) -match "PawnIO" } |
       Select-Object DisplayName, DisplayVersion, InstallLocation, DisplayIcon, UninstallString |
       Format-List
+  }
+  ""
+
+  "===== PawnIO setup transcripts ====="
+  $logRoot = Join-Path $env:ProgramData "AeroForge\Service\logs"
+  foreach ($name in @("pawnio-setup.stdout.log", "pawnio-setup.stderr.log", "installer-service.log")) {
+    Get-RecentTextTail -Path (Join-Path $logRoot $name) -LineCount 260
+  }
+  ""
+
+  "===== Recent Code Integrity events mentioning low-level drivers ====="
+  try {
+    $startTime = (Get-Date).AddDays(-14)
+    $events = @(Get-WinEvent -FilterHashtable @{ LogName = "Microsoft-Windows-CodeIntegrity/Operational"; StartTime = $startTime } -MaxEvents 300 -ErrorAction Stop |
+      Where-Object { ($_.ProviderName + " " + $_.Id + " " + $_.Message) -match "PawnIO|PawnIOLib|WinRing|OpenLibSys|IntelMSR|AeroForge" } |
+      Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message)
+    if ($events.Count -gt 0) {
+      $events | Format-List
+    } else {
+      "No matching Code Integrity events in the last 14 days."
+    }
+  } catch {
+    "Code Integrity event probe failed: $($_.Exception.Message)"
   }
   ""
 
