@@ -268,19 +268,26 @@ function Resolve-PawnIoDll {
 function Install-PawnIoRuntime {
   if (-not $InstallPawnIO) {
     Write-InstallLog "PawnIO runtime install was not requested."
-    return
+    return $false
   }
 
   if (-not (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf)) {
-    Write-InstallLog "PawnIO runtime install was requested, but bundled setup was not found at $pawnIoSetupSource."
-    return
+    Write-InstallLog "WARN: PawnIO runtime install was requested, but bundled setup was not found at $pawnIoSetupSource. AeroForgeService install will continue without CPU package power and PL readback."
+    return $false
   }
 
-  Write-InstallLog "Installing bundled PawnIO runtime from $pawnIoSetupSource."
-  $process = Start-Process -FilePath $pawnIoSetupSource -ArgumentList @('-install', '-silent') -Wait -PassThru -WindowStyle Hidden
-  Write-InstallLog "PawnIO setup exited with code $($process.ExitCode)."
-  if ($process.ExitCode -ne 0) {
-    throw "PawnIO setup failed with exit code $($process.ExitCode)."
+  try {
+    Write-InstallLog "Installing bundled PawnIO runtime from $pawnIoSetupSource."
+    $process = Start-Process -FilePath $pawnIoSetupSource -ArgumentList @('-install', '-silent') -Wait -PassThru -WindowStyle Hidden
+    Write-InstallLog "PawnIO setup exited with code $($process.ExitCode)."
+    if ($process.ExitCode -ne 0) {
+      Write-InstallLog "WARN: PawnIO setup failed with exit code $($process.ExitCode). AeroForgeService install will continue without CPU package power and PL readback."
+      return $false
+    }
+    return $true
+  } catch {
+    Write-InstallLog "WARN: PawnIO setup launch failed: $($_.Exception.Message). AeroForgeService install will continue without CPU package power and PL readback."
+    return $false
   }
 }
 
@@ -458,7 +465,7 @@ function Configure-PawnIoProvider {
 
   $pawnIoDll = Resolve-PawnIoDll
   if (-not $pawnIoDll) {
-    Install-PawnIoRuntime
+    [void](Install-PawnIoRuntime)
     $pawnIoDll = Resolve-PawnIoDll
   }
 
