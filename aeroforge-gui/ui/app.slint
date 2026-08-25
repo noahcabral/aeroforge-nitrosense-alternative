@@ -1,0 +1,870 @@
+// AeroForge Control - Native Rust GUI
+// Theme: Dark mode with orange accents
+
+import { VerticalBox, HorizontalBox, Button, ComboBox, Slider, ScrollView, TabWidget } from "std-widgets.slint";
+
+// Color palette - AeroForge dark theme
+export global Theme {
+    // Base colors
+    out property <color> background: #080a0f;
+    out property <color> surface: #0c0e14;
+    out property <color> surface-hover: #151821;
+    out property <color> border: #1a1d28;
+
+    // Brand colors
+    out property <color> accent: #ff7a2c;
+    out property <color> accent-hover: #eb8c5a;
+    out property <color> accent-dim: #994a1a;
+
+    // Text colors
+    out property <color> text-primary: #e8e9ed;
+    out property <color> text-secondary: #9499a8;
+    out property <color> text-dim: #5d6270;
+
+    // Status colors
+    out property <color> success: #4ade80;
+    out property <color> warning: #fbbf24;
+    out property <color> error: #f87171;
+    out property <color> info: #60a5fa;
+}
+
+// Telemetry data structure
+export struct TelemetryData {
+    cpu-temp: int,
+    gpu-temp: int,
+    cpu-power: float,
+    gpu-power: float,
+    cpu-fan-rpm: int,
+    gpu-fan-rpm: int,
+    cpu-clock: int,
+    gpu-clock: int,
+    battery-percent: int,
+    ac-plugged: bool,
+}
+
+// Service connection state
+export struct ServiceState {
+    connected: bool,
+    detail: string,
+}
+
+// Power profile state
+export struct PowerProfile {
+    id: string,
+    name: string,
+}
+
+// Fan profile state
+export struct FanProfile {
+    id: string,
+    name: string,
+}
+
+// Circular gauge component for temperatures and power
+component CircularGauge {
+    in property <string> label: "Sensor";
+    in property <int> value: 0;
+    in property <int> max-value: 100;
+    in property <string> unit: "";
+    in property <color> gauge-color: Theme.accent;
+
+    preferred-width: 140px;
+    preferred-height: 160px;
+
+    VerticalBox {
+        alignment: center;
+        spacing: 8px;
+
+        // Circular gauge visualization
+        Rectangle {
+            width: 100px;
+            height: 100px;
+            border-radius: 50px;
+            background: Theme.surface;
+            border-width: 2px;
+            border-color: Theme.border;
+
+            // Value arc (simplified - full implementation needs path/arc drawing)
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                border-radius: 50px;
+                background: transparent;
+                border-width: 4px;
+                border-color: gauge-color;
+                opacity: 0.3 + (value / max-value) * 0.7;
+            }
+
+            // Center value display
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: value;
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: Theme.text-primary;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: unit;
+                    font-size: 14px;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Label
+        Text {
+            text: label;
+            font-size: 13px;
+            color: Theme.text-secondary;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Fan RPM card component
+component FanCard {
+    in property <string> label: "CPU Fan";
+    in property <int> rpm: 0;
+    in property <int> speed-percent: 0;
+
+    preferred-height: 90px;
+
+    Rectangle {
+        background: Theme.surface;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding: 16px;
+            spacing: 12px;
+
+            // Icon placeholder
+            Rectangle {
+                width: 48px;
+                height: 48px;
+                border-radius: 24px;
+                background: Theme.accent-dim;
+
+                Text {
+                    text: "🔄";
+                    font-size: 24px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                alignment: start;
+                spacing: 4px;
+
+                Text {
+                    text: label;
+                    font-size: 13px;
+                    color: Theme.text-secondary;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: rpm + " RPM";
+                        font-size: 20px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "(" + speed-percent + "%)";
+                        font-size: 14px;
+                        color: Theme.text-dim;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Main application window
+export component AppWindow inherits Window {
+    // State properties
+    in-out property <TelemetryData> telemetry: {
+        cpu-temp: 0,
+        gpu-temp: 0,
+        cpu-power: 0.0,
+        gpu-power: 0.0,
+        cpu-fan-rpm: 0,
+        gpu-fan-rpm: 0,
+        cpu-clock: 0,
+        gpu-clock: 0,
+        battery-percent: 0,
+        ac-plugged: false,
+    };
+
+    in-out property <ServiceState> service-state: {
+        connected: false,
+        detail: "Connecting to AeroForge service...",
+    };
+
+    in-out property <int> active-tab: 0;
+    in-out property <string> active-power-profile: "turbo";
+    in-out property <string> active-fan-profile: "auto";
+
+    // Callbacks for Rust backend
+    callback apply-power-profile(string);
+    callback apply-fan-profile(string);
+    callback apply-gpu-tuning();
+    callback apply-fan-curves();
+
+    title: "AeroForge Control";
+    default-size: 1460px, 980px;
+    min-width: 1180px;
+    min-height: 760px;
+    background: Theme.background;
+
+    VerticalBox {
+        // Top bar
+        Rectangle {
+            height: 60px;
+            background: Theme.surface;
+            border-bottom: 1px solid Theme.border;
+
+            HorizontalLayout {
+                padding: 16px;
+                spacing: 16px;
+
+                // Connection status indicator
+                Rectangle {
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: service-state.connected ? Theme.success : Theme.error;
+                    vertical-alignment: center;
+                }
+
+                // Title and status
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+
+                    Text {
+                        text: "AeroForge Control";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: service-state.connected ? "Connected" : "Disconnected";
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                    }
+                }
+            }
+        }
+
+        // Navigation tabs
+        Rectangle {
+            height: 48px;
+            background: Theme.surface;
+            border-bottom: 1px solid Theme.border;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 4px;
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { active-tab = 0; }
+                    }
+                    background: active-tab == 0 ? Theme.surface-hover : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding: 12px 20px;
+                        Text {
+                            text: "Home";
+                            color: active-tab == 0 ? Theme.accent : Theme.text-secondary;
+                            font-weight: active-tab == 0 ? 600 : 400;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { active-tab = 1; }
+                    }
+                    background: active-tab == 1 ? Theme.surface-hover : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding: 12px 20px;
+                        Text {
+                            text: "Power";
+                            color: active-tab == 1 ? Theme.accent : Theme.text-secondary;
+                            font-weight: active-tab == 1 ? 600 : 400;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { active-tab = 2; }
+                    }
+                    background: active-tab == 2 ? Theme.surface-hover : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding: 12px 20px;
+                        Text {
+                            text: "Fans";
+                            color: active-tab == 2 ? Theme.accent : Theme.text-secondary;
+                            font-weight: active-tab == 2 ? 600 : 400;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { active-tab = 3; }
+                    }
+                    background: active-tab == 3 ? Theme.surface-hover : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding: 12px 20px;
+                        Text {
+                            text: "Settings";
+                            color: active-tab == 3 ? Theme.accent : Theme.text-secondary;
+                            font-weight: active-tab == 3 ? 600 : 400;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { active-tab = 4; }
+                    }
+                    background: active-tab == 4 ? Theme.surface-hover : transparent;
+                    border-radius: 4px;
+                    HorizontalLayout {
+                        padding: 12px 20px;
+                        Text {
+                            text: "Debug";
+                            color: active-tab == 4 ? Theme.accent : Theme.text-secondary;
+                            font-weight: active-tab == 4 ? 600 : 400;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Content area
+        Rectangle {
+            background: Theme.background;
+
+            if active-tab == 0: HomeTab {
+                telemetry: telemetry;
+            }
+
+            if active-tab == 1: PowerTab {
+                active-profile: active-power-profile;
+                profile-changed(profile) => {
+                    active-power-profile = profile;
+                    apply-power-profile(profile);
+                }
+            }
+
+            if active-tab == 2: FansTab {
+                telemetry: telemetry;
+                active-profile: active-fan-profile;
+                profile-changed(profile) => {
+                    active-fan-profile = profile;
+                    apply-fan-profile(profile);
+                }
+            }
+
+            if active-tab == 3: SettingsTab { }
+
+            if active-tab == 4: DebugTab {
+                telemetry: telemetry;
+                service-state: service-state;
+            }
+        }
+    }
+}
+
+// Home tab - Dashboard with telemetry gauges
+component HomeTab {
+    in property <TelemetryData> telemetry;
+
+    ScrollView {
+        VerticalBox {
+            padding: 24px;
+            spacing: 24px;
+            alignment: start;
+
+            // Gauges row
+            HorizontalLayout {
+                spacing: 24px;
+                alignment: start;
+
+                CircularGauge {
+                    label: "CPU Temp";
+                    value: telemetry.cpu-temp;
+                    max-value: 100;
+                    unit: "°C";
+                    gauge-color: telemetry.cpu-temp > 80 ? Theme.error : Theme.accent;
+                }
+
+                CircularGauge {
+                    label: "GPU Temp";
+                    value: telemetry.gpu-temp;
+                    max-value: 100;
+                    unit: "°C";
+                    gauge-color: telemetry.gpu-temp > 80 ? Theme.error : Theme.info;
+                }
+
+                CircularGauge {
+                    label: "CPU Power";
+                    value: round(telemetry.cpu-power);
+                    max-value: 120;
+                    unit: "W";
+                    gauge-color: Theme.warning;
+                }
+
+                CircularGauge {
+                    label: "GPU Power";
+                    value: round(telemetry.gpu-power);
+                    max-value: 140;
+                    unit: "W";
+                    gauge-color: Theme.success;
+                }
+            }
+
+            // Fan cards row
+            HorizontalLayout {
+                spacing: 16px;
+
+                FanCard {
+                    label: "CPU Fan";
+                    rpm: telemetry.cpu-fan-rpm;
+                    speed-percent: 45;
+                }
+
+                FanCard {
+                    label: "GPU Fan";
+                    rpm: telemetry.gpu-fan-rpm;
+                    speed-percent: 40;
+                }
+            }
+
+            // System info
+            Rectangle {
+                background: Theme.surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "System Status";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+
+                    HorizontalLayout {
+                        Text {
+                            text: "CPU Clock:";
+                            color: Theme.text-secondary;
+                        }
+                        Text {
+                            text: telemetry.cpu-clock + " MHz";
+                            color: Theme.text-primary;
+                            horizontal-alignment: right;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Text {
+                            text: "GPU Clock:";
+                            color: Theme.text-secondary;
+                        }
+                        Text {
+                            text: telemetry.gpu-clock + " MHz";
+                            color: Theme.text-primary;
+                            horizontal-alignment: right;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Text {
+                            text: "Battery:";
+                            color: Theme.text-secondary;
+                        }
+                        Text {
+                            text: telemetry.battery-percent + "% " + (telemetry.ac-plugged ? "(AC)" : "(Battery)");
+                            color: Theme.text-primary;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Power tab - Power profiles and CPU tuning
+component PowerTab {
+    in property <string> active-profile;
+    callback profile-changed(string);
+
+    ScrollView {
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            Text {
+                text: "Power Profile";
+                font-size: 18px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("battery-guard"); }
+                    }
+                    background: active-profile == "battery-guard" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "battery-guard" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Quiet";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "battery-guard" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Lowest-noise mode";
+                            font-size: 12px;
+                            color: active-profile == "battery-guard" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("balanced"); }
+                    }
+                    background: active-profile == "balanced" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "balanced" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Balanced";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "balanced" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Daily mixed workload";
+                            font-size: 12px;
+                            color: active-profile == "balanced" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("performance"); }
+                    }
+                    background: active-profile == "performance" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "performance" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Performance";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "performance" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Higher sustained power";
+                            font-size: 12px;
+                            color: active-profile == "performance" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("turbo"); }
+                    }
+                    background: active-profile == "turbo" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "turbo" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Turbo";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "turbo" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Maximum performance";
+                            font-size: 12px;
+                            color: active-profile == "turbo" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Fans tab - Fan profiles and custom curves
+component FansTab {
+    in property <TelemetryData> telemetry;
+    in property <string> active-profile;
+    callback profile-changed(string);
+
+    ScrollView {
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            Text {
+                text: "Fan Control";
+                font-size: 18px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("auto"); }
+                    }
+                    background: active-profile == "auto" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "auto" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Auto";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "auto" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Adaptive cooling";
+                            font-size: 12px;
+                            color: active-profile == "auto" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("max"); }
+                    }
+                    background: active-profile == "max" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "max" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Max";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "max" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Cooling first";
+                            font-size: 12px;
+                            color: active-profile == "max" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    TouchArea {
+                        clicked => { profile-changed("custom"); }
+                    }
+                    background: active-profile == "custom" ? Theme.accent : Theme.surface;
+                    border-radius: 8px;
+                    border-width: 2px;
+                    border-color: active-profile == "custom" ? Theme.accent : Theme.border;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Custom";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: active-profile == "custom" ? Theme.background : Theme.text-primary;
+                        }
+                        Text {
+                            text: "Hand tuned curves";
+                            font-size: 12px;
+                            color: active-profile == "custom" ? Theme.background : Theme.text-secondary;
+                        }
+                    }
+                }
+            }
+
+            // Current fan speeds
+            HorizontalLayout {
+                spacing: 16px;
+
+                FanCard {
+                    label: "CPU Fan";
+                    rpm: telemetry.cpu-fan-rpm;
+                    speed-percent: 45;
+                }
+
+                FanCard {
+                    label: "GPU Fan";
+                    rpm: telemetry.gpu-fan-rpm;
+                    speed-percent: 40;
+                }
+            }
+        }
+    }
+}
+
+// Settings tab
+component SettingsTab {
+    ScrollView {
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            Text {
+                text: "Settings";
+                font-size: 18px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            Text {
+                text: "Settings panel - Smart charging, display controls, and personalization";
+                color: Theme.text-secondary;
+            }
+        }
+    }
+}
+
+// Debug tab - Raw telemetry and service logs
+component DebugTab {
+    in property <TelemetryData> telemetry;
+    in property <ServiceState> service-state;
+
+    ScrollView {
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            Text {
+                text: "Debug Information";
+                font-size: 18px;
+                font-weight: 600;
+                color: Theme.text-primary;
+            }
+
+            Rectangle {
+                background: Theme.surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "Service Status";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: service-state.detail;
+                        font-size: 12px;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                background: Theme.surface;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    Text {
+                        text: "Raw Telemetry";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "CPU: " + telemetry.cpu-temp + "°C @ " + telemetry.cpu-clock + " MHz | " + telemetry.cpu-fan-rpm + " RPM";
+                        font-size: 11px;
+                        font-family: "monospace";
+                        color: Theme.text-secondary;
+                    }
+                    Text {
+                        text: "GPU: " + telemetry.gpu-temp + "°C @ " + telemetry.gpu-clock + " MHz | " + telemetry.gpu-fan-rpm + " RPM";
+                        font-size: 11px;
+                        font-family: "monospace";
+                        color: Theme.text-secondary;
+                    }
+                }
+            }
+        }
+    }
+}

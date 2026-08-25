@@ -1,0 +1,28 @@
+[package]
+name = "aeroforge-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Rust GUI for AeroForge laptop control"
+
+[[bin]]
+name = "aeroforge-gui"
+path = "src/main.rs"
+
+[dependencies]
+aeroforge-common = { path = "../aeroforge-common" }
+serde.workspace = true
+serde_json.workspace = true
+slint = "1.7"
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+slint-build = "1.7"

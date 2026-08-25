@@ -1,0 +1,69 @@
+name: Build AeroForge Suite
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 2. Setup MSVC C++ Environment (link.exe / Windows SDK)
+      - name: Setup Visual Studio Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # 3. Setup Rust
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 4. Install Frontend & CLI Dependencies
+      - name: Install NPM Dependencies
+        run: npm install
+
+      # 5. Build Background Services & Bypass Tauri Pre-Check
+      - name: Prepare Bundle Resources
+        shell: pwsh
+        run: |
+          # Create a dummy file to bypass Tauri's chicken-and-egg resource check.
+          # (Cargo triggers build.rs before compiling the helper, failing on clean runners)
+          Write-Host "Creating dummy file to bypass Tauri build.rs pre-check..." -ForegroundColor Cyan
+          New-Item -ItemType Directory -Force -Path "src-tauri/target/release"
+          New-Item -ItemType File -Force -Path "src-tauri/target/release/aeroforge-hotkey-helper.exe"
+          
+          # Run the official script which compiles BOTH the service and the hotkey helper
+          powershell -ExecutionPolicy Bypass -File scripts/Prepare-BundleResources.ps1
+
+      # 6. Ensure paths mirror for Tauri's strict bundler
+      - name: Sync Target Paths
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "target/release" -ErrorAction SilentlyContinue
+          Copy-Item "src-tauri/target/release/aeroforge-hotkey-helper.exe" -Destination "target/release/aeroforge-hotkey-helper.exe" -Force
+
+      # 7. Build Desktop App and Portable Bundle
+      - name: Build Desktop App and Portable Bundle
+        run: npm run portable:build
+
+      # 8. Upload Portable ZIP & Setup Installer to GitHub Actions Artifacts
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroForge-v0.16.3-Windows
+          path: |
+            portable/*.zip
+            portable/*.exe
