@@ -1,0 +1,60 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local runtime and probe artifacts
+.runtime/
+.runtime-buildshim/
+.runtime-webview-before.json
+.runtime-webview-after.json
+portable/
+aeroforge logo no text.png
+aeroforge logo with text.png
+*.obj
+*.rmeta
+
+# Rust build output outside src-tauri
+aeroforge-service/target/
+aeroforge-service/target-hotfix/
+
+# Alternate / agent build trees under src-tauri
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/target-codex-*/
+
+# Vendor sample installs (never commit binaries or private keys)
+example nitrosense/
+**/NitroSense_*/
+
+# Local support bundles and staged packages
+AeroForge-Debug-*/
+*.msi
+Thumbs.db
+
+# Secrets / credentials (backup safety)
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
