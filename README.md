@@ -88,7 +88,8 @@ If the checkout lives on Google Drive, OneDrive or a similar virtual filesystem:
 npm.cmd run tauri:build
 ```
 
-This builds the frontend, the Windows service and the hotkey helper (`scripts/Run-BeforeBuild.ps1`) before compiling the shell, because Tauri validates the bundled resource executables at compile time. The installer lands in `src-tauri	argeteleaseundle
+This builds the frontend, the Windows service and the hotkey helper (`scripts/Run-BeforeBuild.ps1`) before compiling the shell, because Tauri validates the bundled resource executables at compile time. The installer lands in `src-tauri\target\release\bundle\nsis\`.
+
 sis`.
 
 ## Create a portable folder
