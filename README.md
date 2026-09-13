@@ -79,6 +79,7 @@ If the checkout lives on Google Drive, OneDrive or a similar virtual filesystem:
 
 - Vite keeps its dependency cache in the OS temp directory (`AEROFORGE_VITE_CACHE_DIR` overrides it) and the dev server skips the Rust `target/` trees when watching, because walking tens of thousands of build artifacts through a cloud filesystem stalls the server.
 - `npm install` can fail with `EBADF` or `UNKNOWN: write` because cloud filesystems reject the way npm's tar extractor writes files. Run the install in a local folder with a copy of `package.json` and `package-lock.json`, then copy the new packages plus `node_modules/.package-lock.json` back.
+- Cargo prints "hard linking files in the incremental compilation cache failed" on cloud mounts and falls back to copying. It is harmless but slows rebuilds. The in-tree `target/` folders are still used because the packaging scripts and `tauri.conf.json` reference them by path.
 - Cloud mounts do not support directory junctions or symlinks, so `node_modules` cannot be redirected to local disk. For day-to-day development a local clone is faster; use the cloud folder or GitHub as the backup.
 
 ## Package the desktop app
