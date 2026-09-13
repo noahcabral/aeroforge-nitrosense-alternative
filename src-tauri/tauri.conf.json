@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendDev.ps1",
-    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendBuild.ps1",
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-BeforeBuild.ps1",
     "beforeBundleCommand": "powershell -ExecutionPolicy Bypass -File scripts/Prepare-BundleResources.ps1"
   },
   "app": {
