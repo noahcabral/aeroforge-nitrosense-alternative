@@ -8,7 +8,7 @@ If AeroForge breaks, behaves oddly, or you want to report a bug or leave feedbac
 
 This GitHub repository is not monitored for support, bug reports, or pull requests. Please do not open pull requests; use the Discord above for feedback and issue reports.
 
-Premium-feeling frontend prototype for a laptop fan control and battery or power management application. The project now includes a Tauri desktop shell around the React UI and a Windows service for hardware-facing control paths.
+Laptop fan control and battery / power management for Acer Nitro hardware. Three tiers: a React UI, a Tauri desktop shell (Rust) that owns persistence and the tray, and a Windows service (Rust) that performs the hardware-facing WMI, HID, NVML and power writes.
 
 ## Included UI flows
 
@@ -21,9 +21,18 @@ Premium-feeling frontend prototype for a laptop fan control and battery or power
 ## Tech stack
 
 - React 19
-- TypeScript
-- Vite
+- TypeScript (strict)
+- Vite + Vitest
 - Tauri 2
+- Rust (Tauri shell and Windows service)
+
+## Repository layout
+
+- `src/` React UI. `src/lib/` holds pure, tested modules (curve math, preset and settings import/export, formatting, keyboard shortcuts); `src/components/` holds presentational components.
+- `src-tauri/` Tauri shell: Tauri commands, control-state persistence, tray, updater, Nitro key helper.
+- `aeroforge-service/` Windows service: supervisor plus capability, persistence, telemetry and named-pipe IPC workers.
+- `scripts/` install, packaging, release and support-bundle scripts.
+- `third_party/` NVAPI headers and the bundled PawnIO runtime.
 
 ## Run locally
 
@@ -38,6 +47,17 @@ npm.cmd run dev
 npm.cmd run build
 ```
 
+## Tests and lint
+
+```powershell
+npm.cmd test
+npm.cmd run lint
+cargo test --manifest-path aeroforge-service/Cargo.toml
+cargo test --lib --manifest-path src-tauri/Cargo.toml
+```
+
+Frontend tests live beside the module they cover (`src/lib/*.test.ts`) and run in plain Node; `npm.cmd run test:watch` keeps them running while you edit.
+
 ## Run as a desktop app
 
 ```powershell
@@ -46,9 +66,20 @@ npm.cmd run tauri:dev
 
 ## Windows prerequisites for Tauri
 
+- Node.js 22.12 or newer
 - Rust toolchain via `rustup`
 - Visual Studio Build Tools with MSVC and Windows SDK components
 - WebView2 runtime
+
+The build hooks find `node.exe` and `cargo.exe` on `PATH` first, then in the standard installer locations. If either lives somewhere unusual, set `AEROFORGE_NODE` or `AEROFORGE_CARGO` to the full executable path.
+
+## Working from a cloud-synced folder
+
+If the checkout lives on Google Drive, OneDrive or a similar virtual filesystem:
+
+- Vite keeps its dependency cache in the OS temp directory (`AEROFORGE_VITE_CACHE_DIR` overrides it) and the dev server skips the Rust `target/` trees when watching, because walking tens of thousands of build artifacts through a cloud filesystem stalls the server.
+- `npm install` can fail with `EBADF` or `UNKNOWN: write` because cloud filesystems reject the way npm's tar extractor writes files. Run the install in a local folder with a copy of `package.json` and `package-lock.json`, then copy the new packages plus `node_modules/.package-lock.json` back.
+- Cloud mounts do not support directory junctions or symlinks, so `node_modules` cannot be redirected to local disk. For day-to-day development a local clone is faster; use the cloud folder or GitHub as the backup.
 
 ## Package the desktop app
 
@@ -65,7 +96,7 @@ npm.cmd run portable:build
 This creates:
 
 - `portable\AeroForge Control Portable\`
-- `portable\AeroForge-Control-Portable-0.13.0.zip`
+- `portable\AeroForge-Control-Portable-<version>.zip` (version taken from `package.json`)
 
 ## Install the Nitro key helper
 
@@ -111,14 +142,13 @@ NVIDIA command-line polling itself is waking the dGPU. Maintainers can add
 `-OutputRoot "C:\Temp\AeroForgeDebug"` to place the bundle somewhere other than
 the Desktop, or run `-ListOptions` to print every supported switch.
 
-## Notes for backend wiring later
+## Frontend architecture notes
 
-- `src/App.tsx` centralizes the mock state for all primary controls.
-- Fan curves are represented as temperature and speed points for both CPU and GPU zones.
-- Boot image upload uses `URL.createObjectURL()` for local preview only.
-- Charge-limit controls are safe UI state changes only.
-- `src-tauri/src/backend/` now contains the typed backend contract, capability snapshot, control snapshot, telemetry snapshot, and persistence-backed desktop state models exposed through Tauri commands.
-- The backend now persists AeroForge-owned control state to disk and routes power, GPU tuning, and fan writes through the AeroForge service.
+- `src/App.tsx` is still the single owner of UI state for every tab; it talks to the Tauri shell through `src/lib/backend.ts`, which is the typed contract mirrored by `src-tauri/src/backend/models.rs`.
+- Fan curves are temperature/speed points for the CPU and GPU zones. `src/lib/curves.ts` owns the invariants (sorted, at least 2C apart, non-decreasing speed) and every curve that reaches the service passes through `normalizeCurvePoints`.
+- Boot image upload uses `URL.createObjectURL()` for the preview; `src/lib/bootLogo.ts` renders the firmware payload.
+- `src-tauri/src/backend/` holds the typed backend contract, capability snapshot, control snapshot, telemetry snapshot, and persistence-backed desktop state exposed through Tauri commands. Power, GPU tuning, and fan writes are routed through the AeroForge service.
+- Planned split of `App.tsx`, in order: extract the backend polling loop, performance log, toasts and frame sampler into hooks; then move each tab's JSX into a component under `src/components/`; then give the fan-curve editor ownership of drag state so a drag only re-renders the chart.
 
 ## AeroForge Windows service
 

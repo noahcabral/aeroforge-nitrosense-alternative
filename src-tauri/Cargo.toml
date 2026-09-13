@@ -1,0 +1,67 @@
+[package]
+name = "aeroforge-control"
+version = "0.15.6"
+description = "Premium laptop fan control and power management desktop shell."
+authors = ["Noah"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "aeroforge-control"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "aeroforge_control_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "aeroforge-control"
+path = "src/main.rs"
+
+[[bin]]
+name = "pipe_probe"
+path = "src/bin/pipe_probe.rs"
+
+[[bin]]
+name = "aeroforge-hotkey-helper"
+path = "src/bin/aeroforge_hotkey_helper.rs"
+
+[[bin]]
+name = "aeroforge-update-bridge"
+path = "src/bin/aeroforge_update_bridge.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
+tauri-plugin-log = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1.0"
+sha2 = "0.10"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+futures-util = "0.3"
+base64 = "0.22"
+native-tls = "0.2"
+tokio = { version = "1", features = ["net", "time"] }
+tokio-tungstenite = { version = "0.23", default-features = false, features = ["connect", "native-tls"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security_Cryptography",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_ColorSystem",
+  "Win32_UI_Input",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }

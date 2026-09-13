@@ -1,0 +1,65 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "AeroForge Control",
+  "version": "0.15.6",
+  "identifier": "com.noah.aeroforgecontrol",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendDev.ps1",
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendBuild.ps1",
+    "beforeBundleCommand": "powershell -ExecutionPolicy Bypass -File scripts/Prepare-BundleResources.ps1"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AeroForge Control",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 540,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "fullscreen": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 https://api.github.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "../aeroforge-service/target/release/aeroforge-service.exe": "aeroforge-service.exe",
+      "target/release/aeroforge-hotkey-helper.exe": "aeroforge-hotkey-helper.exe",
+      "resources/Install-AeroForgeBundledService.ps1": "Install-AeroForgeBundledService.ps1",
+      "../scripts/AeroForge-Debug-Collector.cmd": "AeroForge-Debug-Collector.cmd",
+      "../third_party/pawnio/PawnIO_setup.exe": "PawnIO_setup.exe",
+      "../third_party/pawnio-modules/IntelMSR.bin": "IntelMSR.bin",
+      "../third_party/pawnio-modules/COPYING": "PawnIO.Modules.COPYING"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "minimumWebview2Version": "124.0.2478.67",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

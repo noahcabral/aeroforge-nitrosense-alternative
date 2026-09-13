@@ -92,7 +92,7 @@ impl RefreshState for CpuClockCache {
 pub fn read_cpu_usage_percent() -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
     let sampler = CPU_USAGE_SAMPLER.get_or_init(|| Mutex::new(CpuUsageSampler { last: None }));
     let current = read_cpu_times()?;
-    let mut guard = sampler.lock().unwrap();
+    let mut guard = sampler.lock().expect("cpu usage sampler lock poisoned");
 
     let usage = if let Some(previous) = guard.last {
         let idle_delta = current.idle.saturating_sub(previous.idle);

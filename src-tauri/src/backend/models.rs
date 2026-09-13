@@ -1,0 +1,705 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellStatus {
+    pub shell: String,
+    pub backend_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceWorkerStatus {
+    pub name: String,
+    pub state: String,
+    pub interval_seconds: u64,
+    pub last_update_unix: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStatus {
+    pub connected: bool,
+    pub pipe_name: String,
+    pub service_name: String,
+    pub version: Option<String>,
+    pub state_dir: Option<String>,
+    pub supervisor_file: Option<String>,
+    pub worker_count: usize,
+    pub updated_at_unix: Option<u64>,
+    pub workers: Vec<ServiceWorkerStatus>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDescriptor {
+    pub command: String,
+    pub stage: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendContract {
+    pub schema_version: String,
+    pub commands: Vec<CommandDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceLogEvent {
+    pub session_id: String,
+    pub event_type: String,
+    pub occurred_at_unix_ms: u64,
+    pub active_tab: String,
+    pub detail: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureSupport {
+    pub available: bool,
+    pub writable: bool,
+    pub requires_elevation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilitySnapshot {
+    pub power_profiles: FeatureSupport,
+    pub fan_profiles: FeatureSupport,
+    pub fan_curves: FeatureSupport,
+    pub smart_charging: FeatureSupport,
+    pub usb_power: FeatureSupport,
+    pub blue_light_filter: FeatureSupport,
+    pub gpu_tuning: FeatureSupport,
+    pub boot_logo: FeatureSupport,
+    pub notes: Vec<String>,
+    #[serde(default)]
+    pub cache_updated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlLayerState {
+    Applied,
+    Unavailable,
+    Failed,
+    Skipped,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlLayerStatus {
+    pub id: String,
+    pub label: String,
+    pub state: ControlLayerState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsServiceReadiness {
+    pub name: String,
+    pub installed: bool,
+    pub running: bool,
+    pub start_type: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WmiReadiness {
+    pub service: WindowsServiceReadiness,
+    pub disabled: bool,
+    pub needs_repair: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcerControlReadiness {
+    pub system_vendor: Option<String>,
+    pub system_model: Option<String>,
+    pub bios_version: Option<String>,
+    pub acer_hardware: bool,
+    #[serde(rename = "anv15_51")]
+    pub anv15_51: bool,
+    pub acer_gaming_wmi_present: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareReadinessSnapshot {
+    pub service: WindowsServiceReadiness,
+    pub wmi: WmiReadiness,
+    pub acer: AcerControlReadiness,
+    pub ready: bool,
+    pub repair_available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairLaunchResult {
+    pub launched: bool,
+    pub elevated: bool,
+    pub detail: String,
+    pub log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStartResult {
+    pub started: bool,
+    pub elevated: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHealResult {
+    pub requested: bool,
+    pub task_available: bool,
+    pub service_running: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerProfileId {
+    BatteryGuard,
+    Balanced,
+    #[serde(alias = "performance")]
+    Performance,
+    Turbo,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomPowerBaseId {
+    Balanced,
+    Performance,
+    Turbo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FanProfileId {
+    Auto,
+    Cool,
+    Max,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BootArtId {
+    Ember,
+    Arc,
+    Slate,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateChannelId {
+    Stable,
+    Preview,
+}
+
+impl UpdateChannelId {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApplyState {
+    Staged,
+    Live,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessorStateSettings {
+    pub min_percent: u8,
+    pub max_percent: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessorStateReadback {
+    pub ac: ProcessorStateSettings,
+    pub dc: ProcessorStateSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuTuningState {
+    pub core_clock_mhz: i16,
+    pub memory_clock_mhz: i16,
+    pub voltage_offset_mv: i16,
+    pub power_limit_percent: u8,
+    pub temp_limit_c: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanCurvePoint {
+    pub temp_c: u8,
+    pub speed_percent: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanCurveSet {
+    pub cpu: Vec<FanCurvePoint>,
+    pub gpu: Vec<FanCurvePoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcPreset {
+    pub id: String,
+    pub label: String,
+    pub name: String,
+    pub strap: String,
+    pub settings: GpuTuningState,
+    pub is_custom: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanControlPreset {
+    pub id: String,
+    pub name: String,
+    pub profile_id: FanProfileId,
+    pub curves: FanCurveSet,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PowerControlPreset {
+    pub id: String,
+    pub name: String,
+    pub profile_id: PowerProfileId,
+    pub custom_base: CustomPowerBaseId,
+    pub processor_state: ProcessorStateSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickControlPreset {
+    pub id: String,
+    pub name: String,
+    pub fan_preset_id: Option<String>,
+    pub power_preset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalSettings {
+    #[serde(default = "default_true")]
+    pub smart_charging_enabled: bool,
+    #[serde(default = "default_true")]
+    pub usb_power_enabled: bool,
+    #[serde(default = "default_true")]
+    pub processor_state_control_enabled: bool,
+    #[serde(default)]
+    pub nvidia_telemetry_enabled: bool,
+    #[serde(default)]
+    pub blue_light_filter_enabled: bool,
+    #[serde(default)]
+    pub auto_refresh_rate_on_battery_enabled: bool,
+    #[serde(default)]
+    pub auto_refresh_rate_restore_hz: Option<u32>,
+    #[serde(default = "default_boot_art")]
+    pub selected_boot_art: BootArtId,
+    #[serde(default = "default_custom_boot_filename")]
+    pub custom_boot_filename: String,
+    #[serde(default = "default_update_channel")]
+    pub update_channel: UpdateChannelId,
+    #[serde(default = "default_true")]
+    pub check_for_updates_on_launch: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlSnapshot {
+    pub active_power_profile: PowerProfileId,
+    pub active_fan_profile: FanProfileId,
+    pub custom_processor_state: ProcessorStateSettings,
+    #[serde(default = "default_custom_power_base")]
+    pub custom_power_base: CustomPowerBaseId,
+    pub gpu_tuning: GpuTuningState,
+    pub oc_presets: Vec<OcPreset>,
+    pub active_oc_slot: String,
+    pub oc_apply_state: ApplyState,
+    pub oc_tuning_locked: bool,
+    pub fan_curves: FanCurveSet,
+    #[serde(default)]
+    pub fan_presets: Vec<FanControlPreset>,
+    #[serde(default)]
+    pub power_presets: Vec<PowerControlPreset>,
+    #[serde(default)]
+    pub quick_presets: Vec<QuickControlPreset>,
+    #[serde(default)]
+    pub fan_sync_lock_enabled: bool,
+    pub personal_settings: PersonalSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveControlSnapshot {
+    pub service: String,
+    #[serde(default)]
+    pub cache_updated_at_unix: Option<u64>,
+    #[serde(default = "default_true")]
+    pub power_apply_supported: bool,
+    #[serde(default = "default_true")]
+    pub gpu_tuning_apply_supported: bool,
+    #[serde(default)]
+    pub fan_apply_supported: bool,
+    #[serde(default)]
+    pub fan_curve_apply_supported: bool,
+    pub active_power_profile: Option<PowerProfileId>,
+    pub processor_state: Option<ProcessorStateSettings>,
+    #[serde(default)]
+    pub processor_state_readback: Option<ProcessorStateReadback>,
+    #[serde(default)]
+    pub processor_state_drift_detected: bool,
+    pub last_applied_at_unix: Option<u64>,
+    #[serde(default = "default_waiting_power_apply_detail")]
+    pub last_apply_detail: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_power_layer_statuses: Vec<ControlLayerStatus>,
+    #[serde(default)]
+    pub active_fan_profile: Option<FanProfileId>,
+    #[serde(default)]
+    pub active_fan_curves: Option<FanCurveSet>,
+    #[serde(default)]
+    pub current_cpu_fan_speed_percent: Option<u8>,
+    #[serde(default)]
+    pub current_gpu_fan_speed_percent: Option<u8>,
+    #[serde(default)]
+    pub last_fan_applied_at_unix: Option<u64>,
+    #[serde(default = "default_waiting_fan_apply_detail")]
+    pub last_fan_apply_detail: String,
+    #[serde(default)]
+    pub last_fan_error: Option<String>,
+    #[serde(default)]
+    pub last_fan_layer_statuses: Vec<ControlLayerStatus>,
+    #[serde(default)]
+    pub last_fan_readback: Option<serde_json::Value>,
+    #[serde(default = "default_true")]
+    pub boot_logo_apply_supported: bool,
+    #[serde(default)]
+    pub last_boot_logo_applied_at_unix: Option<u64>,
+    #[serde(default = "default_waiting_boot_logo_apply_detail")]
+    pub last_boot_logo_apply_detail: String,
+    #[serde(default)]
+    pub last_boot_logo_error: Option<String>,
+    #[serde(default)]
+    pub last_boot_logo_readback: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendPollTimings {
+    pub total_ms: f64,
+    pub service_ms: f64,
+    pub telemetry_ms: f64,
+    pub live_controls_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendPollSnapshot {
+    pub service: ServiceStatus,
+    pub telemetry: TelemetrySnapshot,
+    pub live_controls: Option<LiveControlSnapshot>,
+    pub timings: BackendPollTimings,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_boot_art() -> BootArtId {
+    BootArtId::Ember
+}
+
+fn default_custom_boot_filename() -> String {
+    "custom-boot.png".into()
+}
+
+fn default_update_channel() -> UpdateChannelId {
+    UpdateChannelId::Stable
+}
+
+fn default_custom_power_base() -> CustomPowerBaseId {
+    CustomPowerBaseId::Performance
+}
+
+fn default_waiting_power_apply_detail() -> String {
+    "Waiting for the first control action.".into()
+}
+
+fn default_waiting_fan_apply_detail() -> String {
+    "Waiting for the first fan-control apply.".into()
+}
+
+fn default_waiting_boot_logo_apply_detail() -> String {
+    "Boot-logo apply is ready. AeroForge will write only after EFI partition preflight, backup, and verification pass.".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetrySnapshot {
+    #[serde(default)]
+    pub cache_updated_at_unix: Option<u64>,
+    pub cpu_temp_c: u8,
+    pub cpu_temp_average_c: Option<u8>,
+    pub cpu_temp_lowest_core_c: Option<u8>,
+    pub cpu_temp_highest_core_c: Option<u8>,
+    pub gpu_temp_c: u8,
+    pub system_temp_c: u8,
+    pub cpu_usage_percent: u8,
+    pub gpu_usage_percent: u8,
+    pub gpu_memory_usage_percent: Option<u8>,
+    #[serde(default)]
+    pub gpu_power_draw_w: Option<f32>,
+    #[serde(default)]
+    pub gpu_power_limit_w: Option<f32>,
+    #[serde(default)]
+    pub gpu_power_default_limit_w: Option<f32>,
+    #[serde(default)]
+    pub gpu_power_min_limit_w: Option<f32>,
+    #[serde(default)]
+    pub gpu_power_max_limit_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_package_power_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl1_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl1_enabled: Option<bool>,
+    #[serde(default)]
+    pub cpu_pl2_w: Option<f32>,
+    #[serde(default)]
+    pub cpu_pl2_enabled: Option<bool>,
+    #[serde(default)]
+    pub cpu_power_limit_locked: Option<bool>,
+    pub cpu_name: Option<String>,
+    pub cpu_brand: Option<String>,
+    pub gpu_name: Option<String>,
+    pub gpu_brand: Option<String>,
+    pub system_vendor: Option<String>,
+    pub system_model: Option<String>,
+    pub cpu_clock_mhz: u16,
+    pub gpu_clock_mhz: u16,
+    pub cpu_fan_rpm: u16,
+    pub gpu_fan_rpm: u16,
+    pub battery_percent: u8,
+    pub battery_life_remaining_sec: Option<u32>,
+    pub ac_plugged_in: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuTuningApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanControlApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootLogoApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueLightApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub gain_id: u8,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartChargeApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub battery_healthy: u8,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayRefreshApplyResult {
+    pub controls: ControlSnapshot,
+    pub applied_at_unix: u64,
+    pub enabled: bool,
+    pub on_battery: bool,
+    pub current_hz: u32,
+    pub applied_hz: Option<u32>,
+    pub restore_hz: Option<u32>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NvidiaTelemetryApplyResult {
+    pub controls: ControlSnapshot,
+    pub enabled: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendBootstrap {
+    pub shell: ShellStatus,
+    pub service: ServiceStatus,
+    pub contract: BackendContract,
+    pub capabilities: CapabilitySnapshot,
+    pub hardware_readiness: HardwareReadinessSnapshot,
+    pub controls: ControlSnapshot,
+    pub telemetry: TelemetrySnapshot,
+    pub live_controls: Option<LiveControlSnapshot>,
+    pub persistence: PersistenceStatus,
+    pub update_status: UpdateStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistenceStatus {
+    pub config_file: String,
+    pub initialized_from_disk: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    #[serde(default = "default_update_repo_slug")]
+    pub repo_slug: String,
+    #[serde(default = "default_current_version")]
+    pub current_version: String,
+    #[serde(default)]
+    pub token_configured: bool,
+    #[serde(default)]
+    pub last_checked_at_unix: Option<u64>,
+    #[serde(default)]
+    pub update_available: bool,
+    #[serde(default)]
+    pub can_stage_update: bool,
+    #[serde(default)]
+    pub can_install_update: bool,
+    #[serde(default = "default_update_feed_kind")]
+    pub feed_kind: String,
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    #[serde(default)]
+    pub latest_title: Option<String>,
+    #[serde(default)]
+    pub latest_published_at: Option<String>,
+    #[serde(default)]
+    pub latest_commit_sha: Option<String>,
+    #[serde(default)]
+    pub latest_asset_name: Option<String>,
+    #[serde(default)]
+    pub staged_asset_name: Option<String>,
+    #[serde(default)]
+    pub staged_asset_path: Option<String>,
+    #[serde(default)]
+    pub staged_sha256: Option<String>,
+    #[serde(default)]
+    pub staged_sha256_verified: bool,
+    #[serde(default)]
+    pub staged_at_unix: Option<u64>,
+    #[serde(default = "default_update_detail")]
+    pub detail: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+fn default_update_repo_slug() -> String {
+    "noahcabral/aeroforge-nitrosense-alternative".into()
+}
+
+fn default_current_version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
+
+fn default_update_feed_kind() -> String {
+    "none".into()
+}
+
+fn default_update_detail() -> String {
+    "Updater not checked yet.".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ControlSnapshot, FanProfileId};
+
+    #[test]
+    fn cool_fan_profile_round_trips_as_cool() {
+        assert_eq!(serde_json::to_value(FanProfileId::Cool).unwrap(), "cool");
+        let parsed: FanProfileId = serde_json::from_value("cool".into()).unwrap();
+        assert!(matches!(parsed, FanProfileId::Cool));
+    }
+
+    #[test]
+    fn old_control_snapshot_defaults_presets_and_nvidia_telemetry() {
+        let raw = r#"{
+            "activePowerProfile": "balanced",
+            "activeFanProfile": "auto",
+            "customProcessorState": { "minPercent": 35, "maxPercent": 88 },
+            "gpuTuning": {
+                "coreClockMhz": 0,
+                "memoryClockMhz": 0,
+                "voltageOffsetMv": 0,
+                "powerLimitPercent": 100,
+                "tempLimitC": 87
+            },
+            "ocPresets": [],
+            "activeOcSlot": "daily",
+            "ocApplyState": "live",
+            "ocTuningLocked": false,
+            "fanCurves": { "cpu": [], "gpu": [] },
+            "personalSettings": {}
+        }"#;
+
+        let snapshot: ControlSnapshot = serde_json::from_str(raw).unwrap();
+
+        assert!(snapshot.fan_presets.is_empty());
+        assert!(snapshot.power_presets.is_empty());
+        assert!(snapshot.quick_presets.is_empty());
+        assert!(!snapshot.personal_settings.nvidia_telemetry_enabled);
+    }
+}
