@@ -21,6 +21,7 @@ import { PresetPanel } from './components/PresetPanel'
 import { ProcessorStateControl } from './components/ProcessorStateControl'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
 import { ToastStack } from './components/ToastStack'
+import { useFrameStats } from './hooks/useFrameStats'
 import { usePerformanceLog } from './hooks/usePerformanceLog'
 import { useToasts } from './hooks/useToasts'
 import {
@@ -36,6 +37,7 @@ import {
   getBackendBootstrap,
   getHardwareReadinessSnapshot,
   getBackendPollSnapshot,
+  getControlSnapshot,
   getLiveControlSnapshot,
   installStagedUpdate,
   repairHardwarePrerequisites,
@@ -142,15 +144,6 @@ type TrayControlErrorPayload = {
 type DragState = {
   target: CurveTarget
   index: number
-}
-
-type FrameStats = {
-  averageMs: number
-  maxMs: number
-  fps: number
-  longFrameCount: number
-  sampleWindowMs: number
-  updatedAt: string
 }
 
 type StageFitTarget = 'home' | 'power' | 'fans'
@@ -530,7 +523,6 @@ const BACKEND_SECONDARY_POLL_INTERVAL_MS = 10000
 const HIDDEN_BACKEND_POLL_INTERVAL_MS = 30000
 const HARDWARE_READINESS_REFRESH_MS = 15_000
 const RUNTIME_ESTIMATE_COUNTDOWN_SEC = 30
-const PERFORMANCE_LOG_LONG_FRAME_MS = 34
 const FAN_PROFILE_APPLY_TIMEOUT_MS = 15_000
 
 function isDesktopRuntime() {
@@ -1140,13 +1132,28 @@ function App() {
     activeTab: () => activeTabRef.current,
     onError: (message) => pushDebugEventRef.current(message),
   })
-  const [frameStats, setFrameStats] = useState<FrameStats>({
-    averageMs: 0,
-    maxMs: 0,
-    fps: 0,
-    longFrameCount: 0,
-    sampleWindowMs: 0,
-    updatedAt: 'Waiting',
+  const frameStats = useFrameStats(isDevBuild() || activeTab === 'debug', {
+    onSample: (stats) => {
+      const activeFrameTab = activeTabRef.current
+      const activeFit =
+        activeFrameTab === 'home' || activeFrameTab === 'power' || activeFrameTab === 'fans'
+          ? stageFitSnapshotsRef.current[activeFrameTab]
+          : null
+      queuePerformanceEventRef.current('frame-sample', `frame sample ${activeFrameTab}`, {
+        ...stats,
+        windowWidth: window.innerWidth,
+        windowHeight: window.innerHeight,
+        activeTab: activeFrameTab,
+        stageFit: activeFit,
+      })
+    },
+    onSlowWindow: (stats) => {
+      pushDebugEventRef.current(
+        `frame sample: avg ${stats.averageMs.toFixed(1)} ms / max ${stats.maxMs.toFixed(1)} ms / ${Math.round(
+          stats.fps,
+        )} fps / ${stats.longFrameCount} long`,
+      )
+    },
   })
   const [homeScale, setHomeScale] = useState(1)
   const [homeScaledHeight, setHomeScaledHeight] = useState<number | null>(null)
@@ -1506,6 +1513,8 @@ function App() {
         commitCustomCurves(fromBackendCurveSet(controls.fanCurves))
         break
       case 'gpu': {
+        // apply_gpu_tuning forces the power profile to Custom and persists it.
+        setActivePowerProfile(controls.activePowerProfile)
         setGpuOverclock(fromBackendGpuTuningState(controls.gpuTuning))
         const customSlot =
           controls.ocPresets.find((preset) => preset.isCustom) ??
@@ -2472,106 +2481,6 @@ function App() {
   }, [customBootPreview])
 
   useEffect(() => {
-    if (!isDevBuild() && activeTab !== 'debug') {
-      return
-    }
-
-    let cancelled = false
-    let rafId = 0
-    let previousTimestamp = 0
-    let sampleStartedAt = 0
-    let frameCount = 0
-    let totalDeltaMs = 0
-    let maxDeltaMs = 0
-    let longFrameCount = 0
-    let lastLoggedWindowAt = 0
-
-    function step(timestamp: number) {
-      if (cancelled) {
-        return
-      }
-
-      if (previousTimestamp === 0) {
-        previousTimestamp = timestamp
-        sampleStartedAt = timestamp
-        rafId = window.requestAnimationFrame(step)
-        return
-      }
-
-      const deltaMs = timestamp - previousTimestamp
-      previousTimestamp = timestamp
-      frameCount += 1
-      totalDeltaMs += deltaMs
-      maxDeltaMs = Math.max(maxDeltaMs, deltaMs)
-
-      if (deltaMs >= PERFORMANCE_LOG_LONG_FRAME_MS) {
-        longFrameCount += 1
-      }
-
-      const sampleWindowMs = timestamp - sampleStartedAt
-
-      if (sampleWindowMs >= 1000) {
-        const averageMs = frameCount > 0 ? totalDeltaMs / frameCount : 0
-        const fps = averageMs > 0 ? 1000 / averageMs : 0
-        const updatedAt = formatDebugClock(new Date())
-
-        setFrameStats({
-          averageMs,
-          maxMs: maxDeltaMs,
-          fps,
-          longFrameCount,
-          sampleWindowMs,
-          updatedAt,
-        })
-
-        const activeFrameTab = activeTabRef.current
-        const activeFit =
-          activeFrameTab === 'home' || activeFrameTab === 'power' || activeFrameTab === 'fans'
-            ? stageFitSnapshotsRef.current[activeFrameTab]
-            : null
-        queuePerformanceEventRef.current('frame-sample', `frame sample ${activeFrameTab}`, {
-          averageMs,
-          maxMs: maxDeltaMs,
-          fps,
-          longFrameCount,
-          sampleWindowMs,
-          windowWidth: window.innerWidth,
-          windowHeight: window.innerHeight,
-          activeTab: activeFrameTab,
-          stageFit: activeFit,
-        })
-
-        if (
-          (maxDeltaMs >= 50 || longFrameCount >= 3 || averageMs >= 20) &&
-          timestamp - lastLoggedWindowAt >= 2000
-        ) {
-          pushDebugEventRef.current(
-            `frame sample: avg ${averageMs.toFixed(1)} ms / max ${maxDeltaMs.toFixed(1)} ms / ${Math.round(
-              fps,
-            )} fps / ${longFrameCount} long`,
-          )
-          lastLoggedWindowAt = timestamp
-        }
-
-        sampleStartedAt = timestamp
-        frameCount = 0
-        totalDeltaMs = 0
-        maxDeltaMs = 0
-        longFrameCount = 0
-      }
-
-      rafId = window.requestAnimationFrame(step)
-    }
-
-    rafId = window.requestAnimationFrame(step)
-
-    return () => {
-      cancelled = true
-      window.cancelAnimationFrame(rafId)
-    }
-  }, [activeTab])
-
-  useEffect(() => {
     const tauriInternals = (
       window as Window & { __TAURI_INTERNALS__?: unknown }
     ).__TAURI_INTERNALS__
@@ -2710,6 +2619,43 @@ function App() {
             setLastBackendPollAt(formatDebugClock(new Date()))
           }
           setStatusMessage(`Desktop bootstrap failed: ${message}`)
+          // Without the persisted controls every edit would be dropped for the
+          // whole session (persistence stays gated); try the cheap getter.
+          try {
+            const controls = await getControlSnapshot()
+            if (!cancelled) {
+              controlsBootstrappedRef.current = true
+              applyBackendControlSnapshot(
+                controls,
+                setActivePowerProfile,
+                setCustomProcessorState,
+                setCustomPowerBase,
+                setGpuOverclock,
+                setCustomOcSlot,
+                setActiveOcSlot,
+                setOcApplyState,
+                setOcTuningLocked,
+                setActiveFanProfile,
+                commitCustomCurves,
+                setFanSyncLockEnabled,
+                commitSmartChargingEnabled,
+                commitProcessorStateControlEnabled,
+                commitNvidiaTelemetryEnabled,
+                setUsbPowerEnabled,
+                commitBlueLightFilterEnabled,
+                setSelectedBootArt,
+                setCustomBootFilename,
+                setUpdateChannel,
+                setCheckForUpdatesOnLaunch,
+                commitAutoRefreshRateSettings,
+                (loaded) => syncPresetCollectionsRef.current(loaded),
+              )
+            }
+          } catch (fallbackError) {
+            pushTransportDebugEventRef.current(
+              `control snapshot fallback failed: ${describeError(fallbackError)}`,
+            )
+          }
         }
 
         pushTransportDebugEventRef.current(`bootstrap error: ${message}`)
@@ -4469,6 +4415,9 @@ function App() {
     pulseControl(savedCustomSlot.id)
 
     try {
+      if (!controlsBootstrappedRef.current) {
+        throw new Error('Saved settings have not loaded yet. Try again in a moment.')
+      }
       await saveControlSnapshot(
         buildControlSnapshotForPersistence({
           activePowerProfile: 'custom',
@@ -4518,6 +4467,9 @@ function App() {
     )
 
     try {
+      if (!controlsBootstrappedRef.current) {
+        throw new Error('Saved settings have not loaded yet. Try again in a moment.')
+      }
       await saveControlSnapshot(
         buildControlSnapshotForPersistence({
           activePowerProfile,
