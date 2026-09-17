@@ -1,10 +1,11 @@
 use std::{
     ffi::c_void,
     os::windows::process::CommandExt,
-    process::Command,
     ptr::null_mut,
     sync::atomic::{AtomicBool, Ordering},
 };
+
+use crate::paths::system32_command;
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -308,7 +309,7 @@ if ($null -ne $result.gmOutput) {
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = Command::new("powershell")
+    let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .env("AEROFORGE_CIM_METHOD", method)
         .env("AEROFORGE_CIM_INPUT", input.to_string())
@@ -391,7 +392,7 @@ foreach ($item in @(
 } | ConvertTo-Json -Depth 4 -Compress
 "#;
 
-    let output = Command::new("powershell")
+    let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",

@@ -1,4 +1,5 @@
-use std::{io, os::windows::process::CommandExt, process::Command};
+use std::{io, os::windows::process::CommandExt};
+use crate::paths::system32_command;
 
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -231,7 +232,7 @@ if ($instances.Count -gt 0) {
 $result | ConvertTo-Json -Depth 8 -Compress
 "#;
 
-    let output = Command::new("powershell")
+    let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
@@ -531,7 +532,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
         .map_err(|e| io::Error::other(format!("Failed to write temp script: {}", e)))?;
     let tmp_path = tmp_file.into_temp_path();
 
-    let output = Command::new("powershell")
+    let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",

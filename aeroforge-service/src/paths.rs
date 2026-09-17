@@ -59,6 +59,48 @@ impl ServicePaths {
     pub fn worker_snapshot(&self, worker_name: &str) -> PathBuf {
         self.state_dir.join(format!("{worker_name}.json"))
     }
+
+    pub fn service_root(&self) -> PathBuf {
+        self.state_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.state_dir.clone())
+    }
+
+    /// Restrict the service directory to SYSTEM/Administrators (full) and Users
+    /// (read/execute). ProgramData inherits a Users create-file ACE, and both
+    /// CreateProcess and LoadLibrary search the application directory first, so
+    /// without this any local user could drop a `powershell.exe` next to the
+    /// service binary and have it run as SYSTEM.
+    pub fn harden_service_root(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = self.service_root();
+        let output = system32_command("icacls")
+            .arg(&root)
+            .args(["/inheritance:r", "/grant:r"])
+            .args(["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "icacls on {} failed: {}",
+                root.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// Absolute path of a Windows system directory file, e.g. `System32\powercfg.exe`.
+pub fn system32_path(file_name: &str) -> PathBuf {
+    let root = env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    PathBuf::from(root).join("System32").join(file_name)
+}
+
+/// Launch a system tool by absolute path. `Command::new("powercfg")` would let
+/// CreateProcess search the (user-writable) application directory first.
+pub fn system32_command(tool: &str) -> std::process::Command {
+    std::process::Command::new(system32_path(&format!("{tool}.exe")))
 }
 
 pub fn write_log_line(

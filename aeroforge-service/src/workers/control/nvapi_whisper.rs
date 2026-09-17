@@ -22,7 +22,7 @@ pub struct NvApiWhisperResult {
 pub fn set_whisper_mode(
     enable: bool,
 ) -> Result<NvApiWhisperResult, Box<dyn std::error::Error + Send + Sync>> {
-    let library = unsafe { Library::new("nvapi64.dll") }?;
+    let library = unsafe { Library::new(crate::paths::system32_path("nvapi64.dll")) }?;
     let query = unsafe {
         *library
             .get::<NvApiQueryInterface>(b"nvapi_QueryInterface\0")

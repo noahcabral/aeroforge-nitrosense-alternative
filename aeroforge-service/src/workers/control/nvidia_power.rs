@@ -1,6 +1,6 @@
-use crate::paths::ServicePaths;
+use crate::paths::{ServicePaths, system32_command};
 use serde::Serialize;
-use std::{env, fs, process::Command};
+use std::{env, fs};
 
 const NVIDIA_POWER_READBACK_ENV: &str = "AEROFORGE_ENABLE_NVIDIA_TELEMETRY";
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
@@ -28,7 +28,7 @@ pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
         };
     }
 
-    let output = Command::new("nvidia-smi")
+    let output = system32_command("nvidia-smi")
         .args([
             "--query-gpu=power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit",
             "--format=csv,noheader,nounits",

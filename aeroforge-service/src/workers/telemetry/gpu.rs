@@ -563,7 +563,7 @@ fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error 
     let fields = "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit";
     let arg = format!("--query-gpu={fields}");
 
-    let out = std::process::Command::new("nvidia-smi")
+    let out = crate::paths::system32_command("nvidia-smi")
         .args([arg.as_str(), "--format=csv,noheader,nounits"])
         .output()?;
 

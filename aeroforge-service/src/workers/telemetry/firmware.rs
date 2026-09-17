@@ -193,7 +193,7 @@ if ($thermalZone -and $thermalZone.CurrentTemperature) {
 $result | ConvertTo-Json -Compress
 "#;
 
-    let output = std::process::Command::new("powershell")
+    let output = crate::paths::system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;

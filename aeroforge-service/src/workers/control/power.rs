@@ -1,5 +1,6 @@
 use regex::Regex;
-use std::{env, process::Command, sync::OnceLock, thread, time::Duration};
+use crate::paths::system32_command;
+use std::{env, sync::OnceLock, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -789,7 +790,7 @@ fn run_powercfg(arguments: &[&str]) -> Result<(), Box<dyn std::error::Error + Se
 fn run_powercfg_output(
     arguments: &[&str],
 ) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(Command::new("powercfg").args(arguments).output()?)
+    Ok(system32_command("powercfg").args(arguments).output()?)
 }
 
 fn read_processor_state_readback(

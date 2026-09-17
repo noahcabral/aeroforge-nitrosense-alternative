@@ -100,7 +100,7 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = std::process::Command::new("powershell")
+    let output = crate::paths::system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;
@@ -157,7 +157,7 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 
 fn query_registry_hardware_identity_snapshot(
 ) -> Result<HardwareIdentitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let output = std::process::Command::new("reg.exe")
+    let output = crate::paths::system32_command("reg")
         .args(["query", r"HKLM\HARDWARE\DESCRIPTION\System\BIOS"])
         .output()?;
 

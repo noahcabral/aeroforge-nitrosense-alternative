@@ -88,6 +88,14 @@ fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "INFO",
         "Starting AeroForge Windows service host.",
     )?;
+    // Idempotent; also repairs installs made before the installer set this ACL.
+    if let Err(error) = paths.harden_service_root() {
+        write_log_line(
+            &paths.service_log(),
+            "WARN",
+            &format!("Could not restrict service directory permissions: {error}"),
+        )?;
+    }
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_signal = stop_flag.clone();

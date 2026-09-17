@@ -1,4 +1,5 @@
-use std::{os::windows::process::CommandExt, path::Path, process::Command};
+use std::{os::windows::process::CommandExt, path::Path};
+use crate::paths::system32_command;
 
 use crate::workers::control::acer_wmi;
 
@@ -51,7 +52,7 @@ if ($instance) {
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = Command::new("powershell")
+    let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",

@@ -146,6 +146,16 @@ function Write-RecentPawnIoSetupTranscript {
   }
 }
 
+function Protect-ServiceRoot {
+  # CreateProcess and LoadLibrary search the application directory first, and
+  # ProgramData grants Users create-file by inheritance. Without this ACL any
+  # local user could plant a powershell.exe beside the service and run as SYSTEM.
+  & icacls $serviceRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "icacls failed to restrict $serviceRoot (exit code $LASTEXITCODE)."
+  }
+}
+
 function Invoke-Sc {
   param(
     [Parameter(Mandatory = $true)]
@@ -649,6 +659,7 @@ function Install-AeroForgeService {
 
   New-Item -ItemType Directory -Force -Path $serviceBinDir | Out-Null
   New-Item -ItemType Directory -Force -Path $serviceDriverDir | Out-Null
+  Protect-ServiceRoot
   Stop-AeroForgeService
   Copy-WithRetry -Source $resolvedSource -Destination $installedExe
   Install-LowLevelModules
