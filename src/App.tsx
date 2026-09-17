@@ -554,7 +554,12 @@ function isDevBuild() {
 
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
-    if (typeof window.requestAnimationFrame !== 'function') {
+    if (
+      typeof window.requestAnimationFrame !== 'function' ||
+      document.visibilityState === 'hidden'
+    ) {
+      // rAF does not fire while hidden; never let an apply wait on a paint that
+      // will not happen.
       window.setTimeout(resolve, 0)
       return
     }
@@ -1059,6 +1064,8 @@ function App() {
   const customPowerBaseRef = useRef<CustomPowerBaseId>('performance')
   const customPowerApplyTimerRef = useRef<number | null>(null)
   const customPowerApplyRevisionRef = useRef(0)
+  const controlsBootstrappedRef = useRef(false)
+  const pulseTimerRef = useRef<number | null>(null)
   const [gpuOverclock, setGpuOverclock] = useState<GpuTuningState>(defaultGpuOverclock)
   const [customOcSlot, setCustomOcSlot] = useState<OcProfileSlot>(defaultCustomOcSlot)
   const [activeOcSlot, setActiveOcSlot] = useState<string>('daily')
@@ -1485,13 +1492,55 @@ function App() {
   }, [settingsActionPending])
 
   function commitCustomCurves(next: CurveSet | ((current: CurveSet) => CurveSet)) {
-    setCustomCurves((current) => {
-      const resolved =
-        typeof next === 'function' ? (next as (current: CurveSet) => CurveSet)(current) : next
-      const normalized = duplicateCurveSet(resolved)
-      customCurvesRef.current = normalized
-      return normalized
-    })
+    // Resolve against the ref, not inside the updater: pointerup reads the ref
+    // synchronously and React may defer the updater past it during a drag.
+    const resolved = typeof next === 'function' ? next(customCurvesRef.current) : next
+    const normalized = duplicateCurveSet(resolved)
+    customCurvesRef.current = normalized
+    setCustomCurves(normalized)
+  }
+
+  type SnapshotScope = 'power' | 'fanProfile' | 'fanCurves' | 'gpu' | 'bootLogo' | 'nvidiaTelemetry'
+
+  /**
+   * Apply only the fields a backend response is authoritative for. The backend
+   * builds every response from its last persisted snapshot, so applying the
+   * whole thing would revert any edit the user made elsewhere while the request
+   * was in flight (and the staged persist would then write that reversion).
+   */
+  function applyAuthoritativeSnapshot(controls: ControlSnapshot, scope: SnapshotScope) {
+    switch (scope) {
+      case 'power':
+        applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
+        setCustomPowerBase(controls.customPowerBase)
+        commitProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
+        break
+      case 'fanProfile':
+        setActiveFanProfile(controls.activeFanProfile)
+        break
+      case 'fanCurves':
+        setActiveFanProfile(controls.activeFanProfile)
+        commitCustomCurves(fromBackendCurveSet(controls.fanCurves))
+        break
+      case 'gpu': {
+        setGpuOverclock(fromBackendGpuTuningState(controls.gpuTuning))
+        const customSlot =
+          controls.ocPresets.find((preset) => preset.isCustom) ??
+          toBackendOcPreset(defaultCustomOcSlot)
+        setCustomOcSlot(fromBackendOcPreset(customSlot))
+        setActiveOcSlot(controls.activeOcSlot)
+        setOcApplyState(controls.ocApplyState)
+        setOcTuningLocked(controls.ocTuningLocked)
+        break
+      }
+      case 'bootLogo':
+        setSelectedBootArt(controls.personalSettings.selectedBootArt)
+        setCustomBootFilename(controls.personalSettings.customBootFilename)
+        break
+      case 'nvidiaTelemetry':
+        commitNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? false)
+        break
+    }
   }
 
   function commitFanPresets(next: FanControlPreset[] | ((current: FanControlPreset[]) => FanControlPreset[])) {
@@ -1669,6 +1718,12 @@ function App() {
   )
 
   async function persistStagedControls(overrides?: PersistControlOverrides) {
+    if (!controlsBootstrappedRef.current) {
+      // UI state is still the built-in defaults; saving now would overwrite the
+      // user's presets and curves on disk with those defaults.
+      pushDebugEventRef.current('staged control persistence skipped: backend controls not loaded yet')
+      return
+    }
     const nextActivePowerProfile = overrides?.activePowerProfile ?? activePowerProfile
     const nextActiveFanProfile = overrides?.activeFanProfile ?? activeFanProfile
     const nextCustomProcessorState =
@@ -2730,6 +2785,7 @@ function App() {
 
         if (!cancelled) {
           setBackendCapabilities(bootstrap.capabilities)
+          controlsBootstrappedRef.current = true
           applyBackendControlSnapshot(
             mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls),
             setActivePowerProfile,
@@ -3014,11 +3070,13 @@ function App() {
 
   function pulseControl(target: string) {
     setGlowTarget(target)
-    window.clearTimeout((pulseControl as typeof pulseControl & { timer?: number }).timer)
-    ;(pulseControl as typeof pulseControl & { timer?: number }).timer = window.setTimeout(
-      () => setGlowTarget(''),
-      1200,
-    )
+    if (pulseTimerRef.current !== null) {
+      window.clearTimeout(pulseTimerRef.current)
+    }
+    pulseTimerRef.current = window.setTimeout(() => {
+      pulseTimerRef.current = null
+      setGlowTarget('')
+    }, 1200)
   }
 
   function buildCurrentDiagnosticsBundle() {
@@ -3217,7 +3275,7 @@ function App() {
         syncPresetCollectionsRef.current,
       )
 
-      await persistStagedControls({
+      await persistStagedControlsRef.current({
         activePowerProfile: parsed.payload.controls.activePowerProfile,
         activeFanProfile: parsed.payload.controls.activeFanProfile,
         customProcessorState: {
@@ -3291,7 +3349,7 @@ function App() {
       commitFanPresets(merged.fanPresets)
       commitPowerPresets(merged.powerPresets)
       commitQuickPresets(merged.quickPresets)
-      await persistStagedControls({
+      await persistStagedControlsRef.current({
         fanPresets: merged.fanPresets,
         powerPresets: merged.powerPresets,
         quickPresets: merged.quickPresets,
@@ -3313,11 +3371,13 @@ function App() {
   }
 
   async function handlePowerProfile(profileId: PowerProfile['id']) {
-    if (profileId === 'custom' && customPowerApplyTimerRef.current !== null) {
+    // A pending debounced Custom apply must not land after a different profile
+    // was chosen: it would snap the UI back to Custom and race the hardware write.
+    if (customPowerApplyTimerRef.current !== null) {
       window.clearTimeout(customPowerApplyTimerRef.current)
       customPowerApplyTimerRef.current = null
-      customPowerApplyRevisionRef.current += 1
     }
+    customPowerApplyRevisionRef.current += 1
 
     const nextProcessorState = getProcessorStateForPowerProfile(
       profileId,
@@ -3353,7 +3413,7 @@ function App() {
 
     if (!hasPowerHardware) {
       await waitForNextPaint()
-      await persistStagedControls({
+      await persistStagedControlsRef.current({
         activePowerProfile: profileId,
         ...(profileId === 'custom' ? { customProcessorState: nextProcessorState } : {}),
       })
@@ -3406,29 +3466,7 @@ function App() {
       const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
 
       if (!resultSuperseded) {
-        applyBackendControlSnapshot(
-          mergeControlsWithLiveSnapshot(updatedControls, liveControls),
-          setActivePowerProfile,
-          setCustomProcessorState,
-          setCustomPowerBase,
-          setGpuOverclock,
-          setCustomOcSlot,
-          setActiveOcSlot,
-          setOcApplyState,
-          setOcTuningLocked,
-          setActiveFanProfile,
-          commitCustomCurves,
-          setFanSyncLockEnabled,
-          commitSmartChargingEnabled,
-          commitProcessorStateControlEnabled,
-          commitNvidiaTelemetryEnabled,
-          setUsbPowerEnabled,
-          commitBlueLightFilterEnabled,
-          setSelectedBootArt,
-          setCustomBootFilename,
-          setUpdateChannel,
-          setCheckForUpdatesOnLaunch,
-        )
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
       }
       queuePerformanceEvent('power-profile-apply-finished', profileId, {
         totalMs: performance.now() - applyStartedMs,
@@ -3553,31 +3591,11 @@ function App() {
         return
       }
 
-      applyBackendControlSnapshot(
-        mergeControlsWithLiveSnapshot(updatedControls, liveControls),
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      liveControlSnapshotRef.current = liveControls
-      setLiveControlSnapshot(liveControls)
+      applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
+      updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+        liveControlSnapshotRef.current = next
+        setLiveControlSnapshot(next)
+      })
 
       const layerAttention = summarizeLayerAttention(liveControls?.lastPowerLayerStatuses)
       setStatusMessage(
@@ -3634,7 +3652,7 @@ function App() {
 
     if (!hasFanHardware) {
       await waitForNextPaint()
-      await persistStagedControls({ activeFanProfile: profileId })
+      await persistStagedControlsRef.current({ activeFanProfile: profileId })
       updateToast(
         toastId,
         'warning',
@@ -3678,29 +3696,7 @@ function App() {
       const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
 
       if (!resultSuperseded) {
-        applyBackendControlSnapshot(
-        mergeControlsWithLiveSnapshot(result.controls, liveControls),
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(result.controls, liveControls), 'fanProfile')
       }
       queuePerformanceEvent('fan-profile-apply-finished', profileId, {
         totalMs: performance.now() - applyStartedMs,
@@ -3770,7 +3766,7 @@ function App() {
     }
     const nextFanPresets = [...fanPresetsRef.current, preset]
     commitFanPresets(nextFanPresets)
-    void persistStagedControls({ fanPresets: nextFanPresets })
+    void persistStagedControlsRef.current({ fanPresets: nextFanPresets })
     showToast('success', 'Fan preset saved', name)
   }
 
@@ -3794,7 +3790,7 @@ function App() {
     }
     const nextPowerPresets = [...powerPresetsRef.current, preset]
     commitPowerPresets(nextPowerPresets)
-    void persistStagedControls({ powerPresets: nextPowerPresets })
+    void persistStagedControlsRef.current({ powerPresets: nextPowerPresets })
     showToast('success', 'Power preset saved', name)
   }
 
@@ -3832,7 +3828,7 @@ function App() {
     commitFanPresets(nextFanPresets)
     commitPowerPresets(nextPowerPresets)
     commitQuickPresets(nextQuickPresets)
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       fanPresets: nextFanPresets,
       powerPresets: nextPowerPresets,
       quickPresets: nextQuickPresets,
@@ -3862,19 +3858,19 @@ function App() {
         item.id === id ? { ...item, name } : item,
       )
       commitFanPresets(next)
-      void persistStagedControls({ fanPresets: next })
+      void persistStagedControlsRef.current({ fanPresets: next })
     } else if (collection === 'power') {
       const next = powerPresetsRef.current.map((item) =>
         item.id === id ? { ...item, name } : item,
       )
       commitPowerPresets(next)
-      void persistStagedControls({ powerPresets: next })
+      void persistStagedControlsRef.current({ powerPresets: next })
     } else {
       const next = quickPresetsRef.current.map((item) =>
         item.id === id ? { ...item, name } : item,
       )
       commitQuickPresets(next)
-      void persistStagedControls({ quickPresets: next })
+      void persistStagedControlsRef.current({ quickPresets: next })
     }
     showToast('success', 'Preset renamed', name)
   }
@@ -3890,7 +3886,7 @@ function App() {
         { ...preset, id: makePresetId('fan'), name: `${preset.name} copy` },
       ]
       commitFanPresets(next)
-      void persistStagedControls({ fanPresets: next })
+      void persistStagedControlsRef.current({ fanPresets: next })
       showToast('success', 'Fan preset duplicated', preset.name)
     } else if (collection === 'power') {
       const preset = powerPresetsRef.current.find((item) => item.id === id)
@@ -3902,7 +3898,7 @@ function App() {
         { ...preset, id: makePresetId('power'), name: `${preset.name} copy` },
       ]
       commitPowerPresets(next)
-      void persistStagedControls({ powerPresets: next })
+      void persistStagedControlsRef.current({ powerPresets: next })
       showToast('success', 'Power preset duplicated', preset.name)
     } else {
       const preset = quickPresetsRef.current.find((item) => item.id === id)
@@ -3914,7 +3910,7 @@ function App() {
         { ...preset, id: makePresetId('quick'), name: `${preset.name} copy` },
       ]
       commitQuickPresets(next)
-      void persistStagedControls({ quickPresets: next })
+      void persistStagedControlsRef.current({ quickPresets: next })
       showToast('success', 'Quick preset duplicated', preset.name)
     }
   }
@@ -3929,7 +3925,7 @@ function App() {
         .filter((preset) => preset.fanPresetId || preset.powerPresetId)
       commitFanPresets(nextFanPresets)
       commitQuickPresets(nextQuickPresets)
-      void persistStagedControls({
+      void persistStagedControlsRef.current({
         fanPresets: nextFanPresets,
         quickPresets: nextQuickPresets,
       })
@@ -3942,14 +3938,14 @@ function App() {
         .filter((preset) => preset.fanPresetId || preset.powerPresetId)
       commitPowerPresets(nextPowerPresets)
       commitQuickPresets(nextQuickPresets)
-      void persistStagedControls({
+      void persistStagedControlsRef.current({
         powerPresets: nextPowerPresets,
         quickPresets: nextQuickPresets,
       })
     } else {
       const nextQuickPresets = quickPresetsRef.current.filter((preset) => preset.id !== id)
       commitQuickPresets(nextQuickPresets)
-      void persistStagedControls({ quickPresets: nextQuickPresets })
+      void persistStagedControlsRef.current({ quickPresets: nextQuickPresets })
     }
     showToast('success', 'Preset deleted', 'Preset list updated.')
   }
@@ -3963,7 +3959,7 @@ function App() {
         statusMessage: `${preset.name} fan preset loaded.`,
       })
     } else {
-      void persistStagedControls({ customCurves: curves })
+      void persistStagedControlsRef.current({ customCurves: curves })
       void handleFanProfile(preset.profileId)
     }
     showToast('info', 'Fan preset applying', preset.name)
@@ -3978,7 +3974,7 @@ function App() {
     customPowerBaseRef.current = preset.customBase
     setCustomProcessorState(nextProcessorState)
     setCustomPowerBase(preset.customBase)
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       customProcessorState: nextProcessorState,
       customPowerBase: preset.customBase,
     })
@@ -4002,31 +3998,11 @@ function App() {
     const result = await applyCustomFanCurves(toBackendCurveSet(nextCurves))
     const liveControls = await getLiveControlSnapshot().catch(() => null)
 
-    applyBackendControlSnapshot(
-      result.controls,
-      setActivePowerProfile,
-      setCustomProcessorState,
-      setCustomPowerBase,
-      setGpuOverclock,
-      setCustomOcSlot,
-      setActiveOcSlot,
-      setOcApplyState,
-      setOcTuningLocked,
-      setActiveFanProfile,
-      commitCustomCurves,
-      setFanSyncLockEnabled,
-      commitSmartChargingEnabled,
-      commitProcessorStateControlEnabled,
-      commitNvidiaTelemetryEnabled,
-      setUsbPowerEnabled,
-      commitBlueLightFilterEnabled,
-      setSelectedBootArt,
-      setCustomBootFilename,
-      setUpdateChannel,
-      setCheckForUpdatesOnLaunch,
-    )
-    liveControlSnapshotRef.current = liveControls
-    setLiveControlSnapshot(liveControls)
+    applyAuthoritativeSnapshot(result.controls, 'fanCurves')
+    updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+      liveControlSnapshotRef.current = next
+      setLiveControlSnapshot(next)
+    })
     return result.detail
   }
 
@@ -4043,7 +4019,7 @@ function App() {
       pulseControl('custom')
     }
 
-    await persistStagedControls({
+    await persistStagedControlsRef.current({
       activeFanProfile: nextActiveFanProfile,
       customCurves: nextCurves,
       fanSyncLockEnabled: nextFanSyncLockEnabled,
@@ -4132,7 +4108,7 @@ function App() {
 
     if (!nextEnabled) {
       setStatusMessage('Sync Lock disabled. CPU and GPU curves can diverge again.')
-      void persistStagedControls({ fanSyncLockEnabled: false })
+      void persistStagedControlsRef.current({ fanSyncLockEnabled: false })
       return
     }
 
@@ -4172,30 +4148,8 @@ function App() {
     try {
       const prepared = await prepareBootLogoUpload(file)
       const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, 'custom')
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      await persistStagedControls({
+      applyAuthoritativeSnapshot(result.controls, 'bootLogo')
+      await persistStagedControlsRef.current({
         selectedBootArt: 'custom',
         customBootFilename: prepared.fileName,
       })
@@ -4226,30 +4180,8 @@ function App() {
         prepared.imageBase64,
         art.id as BootArtId,
       )
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      await persistStagedControls({
+      applyAuthoritativeSnapshot(result.controls, 'bootLogo')
+      await persistStagedControlsRef.current({
         selectedBootArt: art.id,
         customBootFilename: prepared.fileName,
       })
@@ -4394,7 +4326,7 @@ function App() {
 
     try {
       const result = await applyBlueLightFilter(nextEnabled)
-      await persistStagedControls({ blueLightFilterEnabled: nextEnabled })
+      await persistStagedControlsRef.current({ blueLightFilterEnabled: nextEnabled })
       setStatusMessage(result.detail)
     } catch (error) {
       commitBlueLightFilterEnabled(previousEnabled)
@@ -4459,7 +4391,7 @@ function App() {
 
     try {
       const result = await applySmartCharging(nextEnabled)
-      await persistStagedControls({ smartChargingEnabled: nextEnabled })
+      await persistStagedControlsRef.current({ smartChargingEnabled: nextEnabled })
       setStatusMessage(result.detail)
       pulseControl('charge-toggle')
     } catch (error) {
@@ -4480,7 +4412,7 @@ function App() {
     }
 
     commitProcessorStateControlEnabled(nextEnabled)
-    await persistStagedControls({ processorStateControlEnabled: nextEnabled })
+    await persistStagedControlsRef.current({ processorStateControlEnabled: nextEnabled })
     setStatusMessage(
       nextEnabled
         ? 'CPU min/max writes enabled. Power modes can update Windows processor policy again.'
@@ -4506,29 +4438,7 @@ function App() {
 
     try {
       const result = await setNvidiaTelemetryEnabled(nextEnabled)
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+      applyAuthoritativeSnapshot(result.controls, 'nvidiaTelemetry')
       setStatusMessage(result.detail)
     } catch (error) {
       commitNvidiaTelemetryEnabled(previousEnabled)
@@ -4638,7 +4548,7 @@ function App() {
     setCustomProcessorState(nextState)
 
     setActivePowerProfile('custom')
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       activePowerProfile: 'custom',
       customProcessorState: nextState,
     })
@@ -4658,7 +4568,7 @@ function App() {
     customPowerBaseRef.current = nextBase
     setCustomPowerBase(nextBase)
     setActivePowerProfile('custom')
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       activePowerProfile: 'custom',
       customPowerBase: nextBase,
     })
@@ -4717,29 +4627,7 @@ function App() {
         activeOcSlot,
       )
 
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+      applyAuthoritativeSnapshot(result.controls, 'gpu')
 
       setStatusMessage(result.detail)
     } catch (error) {
