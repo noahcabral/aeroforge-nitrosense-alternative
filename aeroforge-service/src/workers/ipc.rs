@@ -2,9 +2,12 @@ mod handlers;
 mod models;
 mod pipe;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    io::Read,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use models::{PipeRequest, PipeResponse};
@@ -15,6 +18,13 @@ use crate::{
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
+/// Largest legitimate request is a boot-logo apply: a 16 MB image as base64.
+const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
+/// Any authenticated local user can connect, so bound what one can pin.
+/// ponytail: no read timeout on the pipe file, so an idle client still holds a
+/// slot until it disconnects; move to overlapped I/O if that is ever abused.
+const MAX_CONCURRENT_CLIENTS: usize = 16;
+static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new("ipc-worker", run)
@@ -43,6 +53,16 @@ pub fn run(
     while !stop_flag.load(Ordering::SeqCst) {
         let pipe = pipe::create_pipe_instance(&paths, PIPE_PATH)?;
         pipe::connect_client(&pipe)?;
+        if ACTIVE_CLIENTS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
+            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+            drop(pipe);
+            let _ = write_log_line(
+                &paths.component_log("ipc-worker"),
+                "WARN",
+                "Rejected named-pipe client: too many concurrent connections.",
+            );
+            continue;
+        }
         let client_paths = paths.clone();
         std::thread::Builder::new()
             .name("ipc-client".into())
@@ -54,6 +74,7 @@ pub fn run(
                         &format!("Named-pipe client handler failed: {error}"),
                     );
                 }
+                ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
             })?;
 
         let _ = event_tx.send(WorkerEvent {
@@ -73,12 +94,15 @@ fn handle_client(
     paths: &ServicePaths,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut file = pipe.into_file();
-    let mut reader = std::io::BufReader::new(&mut file);
+    let mut reader = std::io::BufReader::new((&mut file).take(MAX_REQUEST_BYTES));
     let mut line = String::new();
     let bytes_read = std::io::BufRead::read_line(&mut reader, &mut line)?;
 
     if bytes_read == 0 || line.trim().is_empty() {
         return Ok(());
+    }
+    if !line.ends_with('\n') {
+        return Err(format!("Named-pipe request exceeded {MAX_REQUEST_BYTES} bytes.").into());
     }
 
     let response = match serde_json::from_str::<PipeRequest>(&line) {

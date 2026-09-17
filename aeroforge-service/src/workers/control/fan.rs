@@ -855,8 +855,11 @@ fn sanitize_fan_curves(curves: FanCurveSet) -> FanCurveSet {
 }
 
 fn sanitize_curve_points(points: Vec<FanCurvePoint>) -> Vec<FanCurvePoint> {
+    // The UI edits five points; anything beyond this is not a curve, it is a payload.
+    const MAX_CURVE_POINTS: usize = 32;
     let mut sanitized: Vec<FanCurvePoint> = points
         .into_iter()
+        .take(MAX_CURVE_POINTS)
         .map(|point| FanCurvePoint {
             temp_c: point.temp_c.clamp(30, 95),
             speed_percent: point.speed_percent.clamp(0, 100),
@@ -930,7 +933,7 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 mod tests {
     use super::{
         clamp_custom_curve_fan_percent, cool_fan_curve_set, interpolate_curve_speed,
-        sanitize_curve_points,
+        sanitize_curve_points, FanCurvePoint,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
 
@@ -994,5 +997,16 @@ mod tests {
             clamp_custom_curve_fan_percent(0, 65),
             MIN_MANUAL_FAN_PERCENT
         );
+    }
+
+    #[test]
+    fn oversized_curve_payload_is_truncated_not_persisted() {
+        let flood: Vec<FanCurvePoint> = (0..10_000)
+            .map(|index| FanCurvePoint {
+                temp_c: 30 + (index % 60) as u8,
+                speed_percent: 50,
+            })
+            .collect();
+        assert!(sanitize_curve_points(flood).len() <= 32);
     }
 }

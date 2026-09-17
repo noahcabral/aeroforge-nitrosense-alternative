@@ -45,12 +45,14 @@ pub fn create_pipe_instance(
     if handle == INVALID_HANDLE_VALUE {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+            // Another process already owns this pipe name. Sharing it would let
+            // that process receive the desktop app's requests (and its write
+            // token), so refuse and let the supervisor retry after its delay.
             let _ = write_log_line(
                 &paths.component_log("ipc-transport"),
-                "INFO",
-                "Named pipe first-instance flag denied. Falling back to shared instance mode.",
+                "ERROR",
+                "Named pipe name is already owned by another process; refusing to share it.",
             );
-            return create_fallback_pipe_instance(pipe_path);
         }
         return Err(error.into());
     }
@@ -70,31 +72,6 @@ pub fn connect_client(
     }
 
     Ok(())
-}
-
-fn create_fallback_pipe_instance(
-    pipe_path: &str,
-) -> Result<NamedPipeInstance, Box<dyn std::error::Error + Send + Sync>> {
-    let name = to_wide_string(pipe_path);
-    let security = PipeSecurityDescriptor::new(PIPE_SDDL)?;
-    let handle = unsafe {
-        CreateNamedPipeW(
-            name.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            16 * 1024,
-            16 * 1024,
-            0,
-            security.attributes(),
-        )
-    };
-
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    Ok(NamedPipeInstance { handle })
 }
 
 fn to_wide_string(value: &str) -> Vec<u16> {
