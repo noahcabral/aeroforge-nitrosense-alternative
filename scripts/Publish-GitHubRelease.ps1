@@ -1,5 +1,5 @@
 param(
-  [string]$Repo = 'noahcabral/aeroforge-nitrosense-alternative',
+  [string]$Repo = '',
   [string]$Tag = '',
   [string]$TargetCommitish = 'main',
   [string]$Name = '',
@@ -10,6 +10,17 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+
+if (-not $Repo) {
+  # Default to this checkout's GitHub remote rather than a hardcoded repository.
+  $originUrl = (& git -C $projectRoot remote get-url origin 2>$null | Select-Object -First 1)
+  if ($originUrl -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$') {
+    $Repo = $Matches[1]
+  } else {
+    throw 'Could not derive the GitHub repository from the origin remote. Pass -Repo owner/name.'
+  }
+}
+Write-Output "Publishing to https://github.com/$Repo"
 $package = Get-Content (Join-Path $projectRoot 'package.json') | ConvertFrom-Json
 $version = $package.version
 if ([string]::IsNullOrWhiteSpace($Tag)) {
