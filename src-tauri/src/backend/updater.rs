@@ -181,6 +181,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
     if Some(staged_sha256.as_str()) != status.staged_sha256.as_deref() {
         status.can_install_update = false;
         status.staged_sha256_verified = false;
+        let _ = store.save_status(status);
         return Err(io::Error::other(
             "The staged update file no longer matches its verified SHA256. Stage the update again.",
         )

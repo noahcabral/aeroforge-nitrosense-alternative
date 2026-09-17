@@ -31,7 +31,7 @@ impl ServicePaths {
         Self::from_root(local_app_data.join("AeroForge").join("ServiceConsole"))
     }
 
-    fn from_root(root: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn from_root(root: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let logs_dir = root.join("logs");
         let state_dir = root.join("state");
 
@@ -100,7 +100,13 @@ pub fn system32_path(file_name: &str) -> PathBuf {
 /// Launch a system tool by absolute path. `Command::new("powercfg")` would let
 /// CreateProcess search the (user-writable) application directory first.
 pub fn system32_command(tool: &str) -> std::process::Command {
-    std::process::Command::new(system32_path(&format!("{tool}.exe")))
+    // Windows PowerShell is the one tool that does not live directly in System32.
+    let relative = if tool == "powershell" {
+        r"WindowsPowerShell\v1.0\powershell.exe".to_string()
+    } else {
+        format!("{tool}.exe")
+    };
+    std::process::Command::new(system32_path(&relative))
 }
 
 pub fn write_log_line(
@@ -194,4 +200,23 @@ fn timestamp_string() -> String {
         .unwrap_or_default()
         .as_secs();
     now.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_system_tool_the_service_launches_exists_at_its_absolute_path() {
+        for tool in ["powershell", "powercfg", "reg", "icacls"] {
+            let program = system32_command(tool).get_program().to_os_string();
+            assert!(
+                Path::new(&program).is_file(),
+                "{tool} resolved to {} which does not exist",
+                program.to_string_lossy()
+            );
+        }
+        // nvidia-smi and nvapi64.dll are driver-provided; only check the location shape.
+        assert!(system32_path("nvapi64.dll").ends_with(r"System32\nvapi64.dll"));
+    }
 }

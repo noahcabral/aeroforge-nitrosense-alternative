@@ -1,6 +1,7 @@
 use std::{
     fs,
     os::windows::io::{FromRawHandle, OwnedHandle},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use windows_sys::Win32::{
@@ -23,16 +24,27 @@ use crate::paths::{write_log_line, ServicePaths};
 
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 
+/// Set once this process has successfully created the first instance. The
+/// FIRST_PIPE_INSTANCE flag rejects *any* second instance, including our own
+/// concurrent ones, so it is only used to claim the name, not on every create.
+static PIPE_NAME_OWNED: AtomicBool = AtomicBool::new(false);
+
 pub fn create_pipe_instance(
     paths: &ServicePaths,
     pipe_path: &str,
 ) -> Result<NamedPipeInstance, Box<dyn std::error::Error + Send + Sync>> {
     let name = to_wide_string(pipe_path);
     let security = PipeSecurityDescriptor::new(PIPE_SDDL)?;
+    let claiming_name = !PIPE_NAME_OWNED.load(Ordering::SeqCst);
+    let open_mode = if claiming_name {
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
+    } else {
+        PIPE_ACCESS_DUPLEX
+    };
     let handle = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
@@ -44,7 +56,7 @@ pub fn create_pipe_instance(
 
     if handle == INVALID_HANDLE_VALUE {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        if claiming_name && error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
             // Another process already owns this pipe name. Sharing it would let
             // that process receive the desktop app's requests (and its write
             // token), so refuse and let the supervisor retry after its delay.
@@ -57,6 +69,7 @@ pub fn create_pipe_instance(
         return Err(error.into());
     }
 
+    PIPE_NAME_OWNED.store(true, Ordering::SeqCst);
     Ok(NamedPipeInstance { handle })
 }
 
@@ -152,5 +165,27 @@ impl Drop for NamedPipeInstance {
             let _ = DisconnectNamedPipe(self.handle);
             let _ = CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_pipe_instance;
+    use crate::paths::ServicePaths;
+
+    #[test]
+    fn a_second_instance_of_our_own_pipe_is_allowed_while_the_first_is_open() {
+        let root = std::env::temp_dir().join(format!("aeroforge-pipe-test-{}", std::process::id()));
+        let paths = ServicePaths::from_root(root.clone()).unwrap();
+        let name = format!(r"\\.\pipe\AeroForgeServiceTest{}", std::process::id());
+
+        // The accept loop always creates the next instance while a handler
+        // thread still holds the previous one; FIRST_PIPE_INSTANCE on every
+        // create would reject this with ERROR_ACCESS_DENIED.
+        let first = create_pipe_instance(&paths, &name).expect("first instance");
+        let second = create_pipe_instance(&paths, &name).expect("second instance while first open");
+        drop(second);
+        drop(first);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

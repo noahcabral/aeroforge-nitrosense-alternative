@@ -18,13 +18,34 @@ use crate::{
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
-/// Largest legitimate request is a boot-logo apply: a 16 MB image as base64.
+/// Requests are small JSON lines (boot-logo applies carry a path, not the
+/// image); this is a generous ceiling, not a sizing.
 const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
 /// Any authenticated local user can connect, so bound what one can pin.
 /// ponytail: no read timeout on the pipe file, so an idle client still holds a
 /// slot until it disconnects; move to overlapped I/O if that is ever abused.
 const MAX_CONCURRENT_CLIENTS: usize = 16;
 static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds one of the MAX_CONCURRENT_CLIENTS slots; released on drop, which also
+/// covers thread-spawn failure and a panicking handler.
+struct ClientSlot;
+
+impl ClientSlot {
+    fn acquire() -> Option<Self> {
+        if ACTIVE_CLIENTS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
+            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new("ipc-worker", run)
@@ -53,8 +74,7 @@ pub fn run(
     while !stop_flag.load(Ordering::SeqCst) {
         let pipe = pipe::create_pipe_instance(&paths, PIPE_PATH)?;
         pipe::connect_client(&pipe)?;
-        if ACTIVE_CLIENTS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
-            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+        let Some(slot) = ClientSlot::acquire() else {
             drop(pipe);
             let _ = write_log_line(
                 &paths.component_log("ipc-worker"),
@@ -62,11 +82,12 @@ pub fn run(
                 "Rejected named-pipe client: too many concurrent connections.",
             );
             continue;
-        }
+        };
         let client_paths = paths.clone();
         std::thread::Builder::new()
             .name("ipc-client".into())
             .spawn(move || {
+                let _slot = slot;
                 if let Err(error) = handle_client(pipe, &client_paths) {
                     let _ = write_log_line(
                         &client_paths.component_log("ipc-worker"),
@@ -74,7 +95,6 @@ pub fn run(
                         &format!("Named-pipe client handler failed: {error}"),
                     );
                 }
-                ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
             })?;
 
         let _ = event_tx.send(WorkerEvent {

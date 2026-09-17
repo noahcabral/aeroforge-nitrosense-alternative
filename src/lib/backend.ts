@@ -433,6 +433,10 @@ export async function getBackendPollSnapshot() {
   return invoke<BackendPollSnapshot>('get_backend_poll_snapshot')
 }
 
+export async function getControlSnapshot() {
+  return invoke<ControlSnapshot>('get_control_snapshot')
+}
+
 export async function getLiveControlSnapshot() {
   return invoke<LiveControlSnapshot>('get_live_control_snapshot')
 }

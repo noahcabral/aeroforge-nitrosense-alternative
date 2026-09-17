@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -107,7 +107,10 @@ fn validate_boot_logo_file(
         .to_ascii_lowercase();
     // Read once and keep the bytes: validating from a header read and then
     // copying from the path again let the file be swapped in between.
-    let bytes = fs::read(path_ref)?;
+    let mut bytes = Vec::new();
+    File::open(path_ref)?
+        .take(MAX_BOOT_LOGO_BYTES + 1)
+        .read_to_end(&mut bytes)?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_BOOT_LOGO_BYTES {
         return Err(format!("Boot-logo image changed size while being read: {} bytes.", bytes.len()).into());
     }
