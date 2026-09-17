@@ -30,7 +30,9 @@ type Options = {
  */
 export function usePerformanceLog(options: Options) {
   const optionsRef = useRef(options)
-  optionsRef.current = options
+  useEffect(() => {
+    optionsRef.current = options
+  })
 
   const [state, setState] = useState<PerformanceLogState>({
     path: null,
