@@ -151,7 +151,9 @@ the Desktop, or run `-ListOptions` to print every supported switch.
 - Fan curves are temperature/speed points for the CPU and GPU zones. `src/lib/curves.ts` owns the invariants (sorted, at least 2C apart, non-decreasing speed) and every curve that reaches the service passes through `normalizeCurvePoints`.
 - Boot image upload uses `URL.createObjectURL()` for the preview; `src/lib/bootLogo.ts` renders the firmware payload.
 - `src-tauri/src/backend/` holds the typed backend contract, capability snapshot, control snapshot, telemetry snapshot, and persistence-backed desktop state exposed through Tauri commands. Power, GPU tuning, and fan writes are routed through the AeroForge service.
-- Planned split of `App.tsx`, in order: extract the backend polling loop, performance log, toasts and frame sampler into hooks; then move each tab's JSX into a component under `src/components/`; then give the fan-curve editor ownership of drag state so a drag only re-renders the chart.
+- Hooks under `src/hooks/` own self-contained state: `useToasts`, `usePerformanceLog`, `useFrameStats` (rAF driver over the tested `lib/frameSampler`), `useDebugLog`. Remaining split, in order: the backend polling/bootstrap loop into a hook; each tab's JSX into a component under `src/components/`; the fan-curve editor owning drag state so a drag only re-renders the chart.
+- Backend responses are applied to UI state only for the fields that command is authoritative for (`applyAuthoritativeSnapshot`); bootstrap, tray events and settings import apply the whole snapshot. Persistence is gated until the bootstrap snapshot has loaded so an early click cannot write defaults over saved presets.
+- Stage auto-scaling (`measureStageFit`) currently runs only in dev builds; the gate looks like a debugging leftover and is left as-is pending a decision.
 
 ## AeroForge Windows service
 
@@ -202,6 +204,13 @@ Current read-only telemetry coverage:
 - direct HID status reads for CPU and GPU fan speed on supported Nitro hardware
 - ACPI thermal-zone data as fallback platform thermals on supported systems
 - independent CPU-package and system-board thermal separation is still incomplete until AeroForge adds deeper EC or ACPI decoding
+
+Trust model:
+
+- The service runs as SYSTEM. `C:\ProgramData\AeroForge\Service` is restricted to SYSTEM and Administrators (full) and Users (read/execute); both installers set this and the service re-applies it at startup. Child tools (`powercfg`, `powershell`, `reg`, `nvidia-smi`) and `nvapi64.dll` are launched or loaded by absolute System32 path so nothing dropped next to the service binary can shadow them.
+- The named pipe grants Authenticated Users read/write, so on a shared machine any signed-in local user can change fan and power state. The write token in `state\ipc-write-token.txt` is world-readable and does not change that; it exists to keep the desktop app and service in sync, not as an access control. Restricting control to one account would need the token created service-side with a per-user ACL, or the pipe SDDL narrowed.
+- Requests are capped at 32 MB, concurrent clients at 16, fan curves at 32 points; the pipe name is never shared with another process.
+- Updates are verified against the release's SHA256 sidecar (integrity in transit, not authenticity). Signing releases (minisign/Authenticode with a pinned key) is the missing piece for authenticity. The updater currently follows `noahcabral/aeroforge-nitrosense-alternative`; `scripts/Publish-GitHubRelease.ps1` publishes to this checkout's `origin`.
 
 Clean-room boundary:
 
