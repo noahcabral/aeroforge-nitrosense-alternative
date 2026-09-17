@@ -21,6 +21,7 @@ import { PresetPanel } from './components/PresetPanel'
 import { ProcessorStateControl } from './components/ProcessorStateControl'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
 import { ToastStack } from './components/ToastStack'
+import { useDebugLog } from './hooks/useDebugLog'
 import { useFrameStats } from './hooks/useFrameStats'
 import { usePerformanceLog } from './hooks/usePerformanceLog'
 import { useToasts } from './hooks/useToasts'
@@ -1029,8 +1030,6 @@ function App() {
   const queuedPowerProfileRef = useRef<PowerProfile['id'] | null>(null)
   const fanProfileApplyInFlightRef = useRef(false)
   const queuedFanProfileRef = useRef<FanProfile['id'] | null>(null)
-  const lastTransportDebugRef = useRef<string>('')
-  const lastPollHeartbeatRef = useRef(0)
   const hardwareReadinessRefreshRef = useRef(0)
   const runtimeEstimateSessionRef = useRef(false)
   const [activeTab, setActiveTab] = useState<ControlTab>('home')
@@ -1121,7 +1120,18 @@ function App() {
   const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('No telemetry')
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
-  const [debugEvents, setDebugEvents] = useState<string[]>([])
+  const {
+    events: debugEvents,
+    push: pushDebugEvent,
+    pushTransport: pushTransportDebugEvent,
+    pushHeartbeat: pushPollHeartbeat,
+    clear: clearDebugEvents,
+    reveal: revealDebugEvents,
+    snapshot: debugEventsSnapshot,
+  } = useDebugLog({
+    echoToConsole: () => diagnosticsEnabled(),
+    isVisible: () => activeTabRef.current === 'debug',
+  })
   const {
     state: performanceLogState,
     queueEvent: queuePerformanceEvent,
@@ -1168,7 +1178,6 @@ function App() {
   const initializedPersistenceRef = useRef(false)
   const stagedPersistenceTimerRef = useRef<number | null>(null)
   const activeTabRef = useRef(activeTab)
-  const debugEventsRef = useRef<string[]>([])
   const stageFitSignatureRef = useRef<Partial<Record<StageFitTarget, string>>>({})
   const stageFitSnapshotsRef = useRef<Partial<Record<StageFitTarget, StageFitSnapshot>>>({})
   const telemetrySnapshotRef = useRef<string | null>(null)
@@ -1469,9 +1478,9 @@ function App() {
       })
     }
     if (activeTab === 'debug') {
-      setDebugEvents([...debugEventsRef.current])
+      revealDebugEvents()
     }
-  }, [activeTab])
+  }, [activeTab, revealDebugEvents])
 
   useEffect(() => {
     stageFitSnapshotsRef.current = stageFitSnapshots
@@ -2199,40 +2208,8 @@ function App() {
   queuePerformanceEventRef.current = queuePerformanceEvent
   flushPerformanceLogRef.current = flushPerformanceLog
 
-  function pushDebugEvent(message: string) {
-    const entry = `${formatDebugClock(new Date())} ${message}`
-
-    if (diagnosticsEnabled()) {
-      console.debug(`[AeroForge debug] ${entry}`)
-    }
-
-    const next = [entry, ...debugEventsRef.current].slice(0, 8)
-    debugEventsRef.current = next
-
-    if (activeTabRef.current === 'debug') {
-      setDebugEvents(next)
-    }
-  }
   pushDebugEventRef.current = pushDebugEvent
 
-  function pushTransportDebugEvent(message: string) {
-    if (lastTransportDebugRef.current === message) {
-      return
-    }
-
-    lastTransportDebugRef.current = message
-    pushDebugEvent(message)
-  }
-
-  function pushPollHeartbeat(message: string) {
-    const now = Date.now()
-    if (now - lastPollHeartbeatRef.current < 5000) {
-      return
-    }
-
-    lastPollHeartbeatRef.current = now
-    pushDebugEvent(message)
-  }
   pushTransportDebugEventRef.current = pushTransportDebugEvent
   pushPollHeartbeatEventRef.current = pushPollHeartbeat
 
@@ -2869,7 +2846,7 @@ function App() {
       lastBackendError,
       lastBackendPollAt,
       telemetrySourceLabel,
-      recentEvents: debugEventsRef.current,
+      recentEvents: debugEventsSnapshot(),
       frameStats: {
         averageMs: frameStats.averageMs,
         maxMs: frameStats.maxMs,
@@ -2913,12 +2890,6 @@ function App() {
     }
   }
   exportDiagnosticsFileRef.current = exportDiagnosticsFile
-
-  function clearDebugEvents() {
-    const entry = `${formatDebugClock(new Date())} debug event log cleared`
-    debugEventsRef.current = [entry]
-    setDebugEvents([entry])
-  }
 
   function exportPresetPack() {
     try {
@@ -5963,7 +5934,7 @@ function App() {
                     {debugEvents.length === 0 ? (
                       <li>No recent debug events yet. Switch profiles or wait for a backend poll.</li>
                     ) : (
-                      debugEvents.map((event) => <li key={event}>{event}</li>)
+                      debugEvents.map((event) => <li key={event.id}>{event.text}</li>)
                     )}
                   </ul>
                 </div>
