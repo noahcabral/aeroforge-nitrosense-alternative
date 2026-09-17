@@ -88,11 +88,7 @@ fn persist_gain_id(gain_id: u8) -> Result<(), DynError> {
         .ok_or_else(|| io::Error::other("Quick Access settings.json was not a JSON object."))?;
     object.insert("BluelightShield".into(), Value::from(gain_id));
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(path, serde_json::to_string_pretty(&root)?)?;
+    super::state::write_text_atomically(path, &serde_json::to_string_pretty(&root)?)?;
     Ok(())
 }
 

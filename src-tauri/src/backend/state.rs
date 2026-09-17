@@ -132,9 +132,33 @@ impl BackendState {
 
     fn persist_controls(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let serialized = serde_json::to_string_pretty(&self.controls())?;
-        fs::write(&self.config_file, serialized)?;
-        Ok(())
+        write_text_atomically(&self.config_file, &serialized)
     }
+}
+
+/// Write via a sibling temp file plus rename so a crash or power loss mid-write
+/// can never leave a truncated file behind (rename replaces in place on NTFS).
+pub(crate) fn write_text_atomically(
+    path: &Path,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let parent = path.parent().ok_or("config path has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&temp_path)?;
+        io::Write::write_all(&mut file, content.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    Ok(result?)
 }
 
 fn load_controls(
@@ -711,6 +735,24 @@ fn nitrosense_anv15_51_memory_offset_from_pci_text(raw: &str) -> Option<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_in_place_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("aeroforge-atomic-{}", std::process::id()));
+        let path = dir.join("nested").join("control-state.json");
+
+        write_text_atomically(&path, "first").unwrap();
+        write_text_atomically(&path, "second").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn default_controls_start_balanced_with_nitrosense_gpu_presets() {

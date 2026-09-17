@@ -762,11 +762,7 @@ fn persist_battery_healthy(battery_healthy: u8) -> Result<(), DynError> {
         .ok_or_else(|| io::Error::other("Care Center settings.json was not a JSON object."))?;
     object.insert("BatteryHealthy".into(), Value::from(battery_healthy));
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(path, serde_json::to_string_pretty(&root)?)?;
+    super::state::write_text_atomically(path, &serde_json::to_string_pretty(&root)?)?;
     Ok(())
 }
 

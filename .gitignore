@@ -61,3 +61,6 @@ Thumbs.db
 !.env.example
 *.pem
 credentials.json
+
+# Knowledge-graph output (regenerate with /graphify)
+graphify-out/
