@@ -21,6 +21,7 @@ import { PresetPanel } from './components/PresetPanel'
 import { ProcessorStateControl } from './components/ProcessorStateControl'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
 import { ToastStack } from './components/ToastStack'
+import { usePerformanceLog } from './hooks/usePerformanceLog'
 import { useToasts } from './hooks/useToasts'
 import {
   applyAutoRefreshRate,
@@ -31,7 +32,6 @@ import {
   applyGpuTuning,
   applyPowerProfile,
   applySmartCharging,
-  appendPerformanceLog,
   checkForUpdates,
   getBackendBootstrap,
   getHardwareReadinessSnapshot,
@@ -52,7 +52,6 @@ import {
   type FeatureSupport,
   type HardwareReadinessSnapshot,
   type LiveControlSnapshot,
-  type PerformanceLogEvent,
   type ServiceStatus,
   type TelemetrySnapshot,
   type UpdateStatus,
@@ -167,14 +166,6 @@ type StageFitSnapshot = {
   windowWidth: number
   windowHeight: number
   updatedAt: string
-}
-
-type PerformanceLogState = {
-  path: string | null
-  lastFlushAt: string
-  pendingCount: number
-  eventCount: number
-  lastError: string | null
 }
 
 type PowerProfile = {
@@ -539,10 +530,7 @@ const BACKEND_SECONDARY_POLL_INTERVAL_MS = 10000
 const HIDDEN_BACKEND_POLL_INTERVAL_MS = 30000
 const HARDWARE_READINESS_REFRESH_MS = 15_000
 const RUNTIME_ESTIMATE_COUNTDOWN_SEC = 30
-const PERFORMANCE_LOG_BATCH_SIZE = 16
-const PERFORMANCE_LOG_FLUSH_DELAY_MS = 1500
 const PERFORMANCE_LOG_LONG_FRAME_MS = 34
-const PERFORMANCE_LOG_MAX_QUEUE = 200
 const FAN_PROFILE_APPLY_TIMEOUT_MS = 15_000
 
 function isDesktopRuntime() {
@@ -1142,12 +1130,15 @@ function App() {
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
   const [debugEvents, setDebugEvents] = useState<string[]>([])
-  const [performanceLogState, setPerformanceLogState] = useState<PerformanceLogState>({
-    path: null,
-    lastFlushAt: 'Waiting',
-    pendingCount: 0,
-    eventCount: 0,
-    lastError: null,
+  const {
+    state: performanceLogState,
+    queueEvent: queuePerformanceEvent,
+    flush: flushPerformanceLog,
+  } = usePerformanceLog({
+    enabled: () => isDesktopRuntime() && diagnosticsEnabled(),
+    canFlush: isDesktopRuntime,
+    activeTab: () => activeTabRef.current,
+    onError: (message) => pushDebugEventRef.current(message),
   })
   const [frameStats, setFrameStats] = useState<FrameStats>({
     averageMs: 0,
@@ -1179,13 +1170,6 @@ function App() {
   const [liveControlSnapshot, setLiveControlSnapshot] =
     useState<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
-  const performanceLogSessionIdRef = useRef(`af-${Date.now().toString(36)}`)
-  const performanceLogQueueRef = useRef<PerformanceLogEvent[]>([])
-  const performanceLogFlushTimerRef = useRef<number | null>(null)
-  const performanceLogFlushInFlightRef = useRef(false)
-  const performanceLogEventCountRef = useRef(0)
-  const performanceLogPathRef = useRef<string | null>(null)
-  const performanceLogLastErrorRef = useRef<string | null>(null)
   const queuePerformanceEventRef = useRef<
     (eventType: string, detail: string, payload?: Record<string, unknown>) => void
   >(() => {})
@@ -2199,109 +2183,10 @@ function App() {
     }
   }, [activeTab])
 
-  function schedulePerformanceLogFlush() {
-    if (performanceLogFlushTimerRef.current !== null) {
-      return
-    }
-
-    performanceLogFlushTimerRef.current = window.setTimeout(() => {
-      performanceLogFlushTimerRef.current = null
-      void flushPerformanceLog()
-    }, PERFORMANCE_LOG_FLUSH_DELAY_MS)
-  }
-
   function diagnosticsEnabled() {
     return isDevBuild() || activeTabRef.current === 'debug'
   }
 
-  function queuePerformanceEvent(
-    eventType: string,
-    detail: string,
-    payload: Record<string, unknown> = {},
-  ) {
-    if (!isDesktopRuntime() || !diagnosticsEnabled()) {
-      return
-    }
-
-    performanceLogQueueRef.current.push({
-      sessionId: performanceLogSessionIdRef.current,
-      eventType,
-      occurredAtUnixMs: Date.now(),
-      activeTab: activeTabRef.current,
-      detail,
-      payload: {
-        ...payload,
-        visibility: document.visibilityState,
-      },
-    })
-
-    performanceLogEventCountRef.current += 1
-
-    if (performanceLogQueueRef.current.length > PERFORMANCE_LOG_MAX_QUEUE) {
-      performanceLogQueueRef.current.splice(
-        0,
-        performanceLogQueueRef.current.length - PERFORMANCE_LOG_MAX_QUEUE,
-      )
-    }
-
-    if (performanceLogQueueRef.current.length >= PERFORMANCE_LOG_BATCH_SIZE) {
-      void flushPerformanceLog()
-    } else {
-      schedulePerformanceLogFlush()
-    }
-  }
-
-  async function flushPerformanceLog() {
-    if (!isDesktopRuntime() || performanceLogFlushInFlightRef.current) {
-      return
-    }
-
-    if (performanceLogFlushTimerRef.current !== null) {
-      window.clearTimeout(performanceLogFlushTimerRef.current)
-      performanceLogFlushTimerRef.current = null
-    }
-
-    const events = performanceLogQueueRef.current.splice(0)
-    if (events.length === 0) {
-      setPerformanceLogState((current) => ({
-        ...current,
-        pendingCount: 0,
-        eventCount: performanceLogEventCountRef.current,
-      }))
-      return
-    }
-
-    performanceLogFlushInFlightRef.current = true
-
-    try {
-      const path = await appendPerformanceLog(events)
-      performanceLogPathRef.current = path
-      performanceLogLastErrorRef.current = null
-      setPerformanceLogState({
-        path,
-        lastFlushAt: formatDebugClock(new Date()),
-        pendingCount: performanceLogQueueRef.current.length,
-        eventCount: performanceLogEventCountRef.current,
-        lastError: null,
-      })
-    } catch (error) {
-      const message = describeError(error)
-      performanceLogLastErrorRef.current = message
-      setPerformanceLogState({
-        path: performanceLogPathRef.current,
-        lastFlushAt: formatDebugClock(new Date()),
-        pendingCount: performanceLogQueueRef.current.length,
-        eventCount: performanceLogEventCountRef.current,
-        lastError: message,
-      })
-      pushDebugEvent(`performance log write failed: ${message}`)
-    } finally {
-      performanceLogFlushInFlightRef.current = false
-      if (performanceLogQueueRef.current.length > 0) {
-        schedulePerformanceLogFlush()
-      }
-    }
-  }
   queuePerformanceEventRef.current = queuePerformanceEvent
   flushPerformanceLogRef.current = flushPerformanceLog
 
@@ -2414,10 +2299,6 @@ function App() {
     })
 
     return () => {
-      if (performanceLogFlushTimerRef.current !== null) {
-        window.clearTimeout(performanceLogFlushTimerRef.current)
-        performanceLogFlushTimerRef.current = null
-      }
       void flushPerformanceLogRef.current()
     }
   }, [])
