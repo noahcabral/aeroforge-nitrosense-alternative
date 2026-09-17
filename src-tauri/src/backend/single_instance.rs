@@ -30,10 +30,10 @@ use windows_sys::Win32::{
 
 const EXISTING_INSTANCE_WAIT: Duration = Duration::from_secs(5);
 
-pub fn activate_existing_instance() -> bool {
+pub fn activate_existing_instance(show_window: bool) -> bool {
     #[cfg(windows)]
     {
-        activate_existing_instance_windows()
+        activate_existing_instance_windows(show_window)
     }
 
     #[cfg(not(windows))]
@@ -43,7 +43,7 @@ pub fn activate_existing_instance() -> bool {
 }
 
 #[cfg(windows)]
-fn activate_existing_instance_windows() -> bool {
+fn activate_existing_instance_windows(show_window: bool) -> bool {
     let Ok(app_exe) = env::current_exe() else {
         return false;
     };
@@ -52,7 +52,9 @@ fn activate_existing_instance_windows() -> bool {
 
     loop {
         if let Some(hwnd) = find_existing_main_window(&app_exe, current_pid) {
-            restore_native_window_to_foreground(hwnd);
+            if show_window {
+                restore_native_window_to_foreground(hwnd);
+            }
             return true;
         }
 

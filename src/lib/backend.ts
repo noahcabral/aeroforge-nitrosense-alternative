@@ -189,6 +189,7 @@ export type PersonalSettings = {
   usbPowerEnabled: boolean
   processorStateControlEnabled: boolean
   nvidiaTelemetryEnabled: boolean
+  keepUiPrewarmed: boolean
   blueLightFilterEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
@@ -216,6 +217,50 @@ export type ControlSnapshot = {
   personalSettings: PersonalSettings
 }
 
+export type QuietAutoFanMap = {
+  lastPercent: number | null
+  lastRpm: number | null
+  idlePercent: number | null
+  elevatedPercent: number | null
+}
+
+export type QuietAutoFanCalibration = {
+  cpu: QuietAutoFanMap
+  gpu: QuietAutoFanMap
+  lastTargetRpm: number | null
+  updatedAtUnix: number | null
+}
+
+export type QuietAutoThermalWarning = {
+  active: boolean
+  sensor: string | null
+  tempC: number | null
+  message: string | null
+  updatedAtUnix: number | null
+}
+
+export type FanSpeedCalibrationPoint = {
+  percent: number
+  cpuRpm: number | null
+  gpuRpm: number | null
+  cpuTempC: number | null
+  gpuTempC: number | null
+  systemTempC: number | null
+  sampledAtUnix: number
+}
+
+export type FanSpeedCalibrationSnapshot = {
+  running: boolean
+  status: string
+  startedAtUnix: number | null
+  updatedAtUnix: number | null
+  completedAtUnix: number | null
+  currentPercent: number | null
+  settleSeconds: number
+  points: FanSpeedCalibrationPoint[]
+  lastError: string | null
+}
+
 export type LiveControlSnapshot = {
   service: string
   cacheUpdatedAtUnix?: number | null
@@ -240,6 +285,9 @@ export type LiveControlSnapshot = {
   lastFanError: string | null
   lastFanLayerStatuses: ControlLayerStatus[]
   lastFanReadback: unknown | null
+  quietAutoFanCalibration: QuietAutoFanCalibration
+  quietAutoThermalWarning: QuietAutoThermalWarning | null
+  fanSpeedCalibration: FanSpeedCalibrationSnapshot
   bootLogoApplySupported: boolean
   lastBootLogoAppliedAtUnix: number | null
   lastBootLogoApplyDetail: string
@@ -469,6 +517,10 @@ export async function showUpdateNotification(versionLabel: string) {
   return invoke<void>('show_update_notification', { versionLabel })
 }
 
+export async function showThermalWarningNotification(sensorLabel: string, tempC: number) {
+  return invoke<void>('show_thermal_warning_notification', { sensorLabel, tempC })
+}
+
 export async function applyBlueLightFilter(enabled: boolean) {
   return invoke<BlueLightApplyResult>('apply_blue_light_filter', { enabled })
 }
@@ -517,6 +569,14 @@ export async function applyFanProfile(profileId: FanProfileId) {
 
 export async function applyCustomFanCurves(curves: FanCurveSet) {
   return invoke<FanControlApplyResult>('apply_custom_fan_curves', { curves })
+}
+
+export async function startFanSpeedCalibration() {
+  return invoke<FanSpeedCalibrationSnapshot>('start_fan_speed_calibration')
+}
+
+export async function cancelFanSpeedCalibration() {
+  return invoke<FanSpeedCalibrationSnapshot>('cancel_fan_speed_calibration')
 }
 
 export async function applyBootLogo(

@@ -229,6 +229,99 @@ pub struct AppliedGpuTuningSnapshot {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuietAutoFanMap {
+    #[serde(default)]
+    pub last_percent: Option<u8>,
+    #[serde(default)]
+    pub last_rpm: Option<u16>,
+    #[serde(default)]
+    pub idle_percent: Option<u8>,
+    #[serde(default)]
+    pub elevated_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuietAutoFanCalibration {
+    #[serde(default)]
+    pub cpu: QuietAutoFanMap,
+    #[serde(default)]
+    pub gpu: QuietAutoFanMap,
+    #[serde(default)]
+    pub last_target_rpm: Option<u16>,
+    #[serde(default)]
+    pub updated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuietAutoThermalWarning {
+    pub active: bool,
+    #[serde(default)]
+    pub sensor: Option<String>,
+    #[serde(default)]
+    pub temp_c: Option<u8>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub updated_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanSpeedCalibrationPoint {
+    pub percent: u8,
+    #[serde(default)]
+    pub cpu_rpm: Option<u16>,
+    #[serde(default)]
+    pub gpu_rpm: Option<u16>,
+    #[serde(default)]
+    pub cpu_temp_c: Option<u16>,
+    #[serde(default)]
+    pub gpu_temp_c: Option<u16>,
+    #[serde(default)]
+    pub system_temp_c: Option<u16>,
+    pub sampled_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanSpeedCalibrationSnapshot {
+    pub running: bool,
+    pub status: String,
+    #[serde(default)]
+    pub started_at_unix: Option<u64>,
+    #[serde(default)]
+    pub updated_at_unix: Option<u64>,
+    #[serde(default)]
+    pub completed_at_unix: Option<u64>,
+    #[serde(default)]
+    pub current_percent: Option<u8>,
+    pub settle_seconds: u64,
+    #[serde(default)]
+    pub points: Vec<FanSpeedCalibrationPoint>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for FanSpeedCalibrationSnapshot {
+    fn default() -> Self {
+        Self {
+            running: false,
+            status: "Fan speed calibration has not been run.".into(),
+            started_at_unix: None,
+            updated_at_unix: None,
+            completed_at_unix: None,
+            current_percent: None,
+            settle_seconds: 20,
+            points: Vec::new(),
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedFanControlSnapshot {
@@ -239,6 +332,10 @@ pub struct AppliedFanControlSnapshot {
     #[serde(default)]
     pub layer_statuses: Vec<ControlLayerStatus>,
     pub readback: Option<Value>,
+    #[serde(default)]
+    pub quiet_auto_fan_calibration: Option<QuietAutoFanCalibration>,
+    #[serde(default)]
+    pub quiet_auto_thermal_warning: Option<QuietAutoThermalWarning>,
     pub applied_at_unix: u64,
     pub detail: String,
 }
@@ -325,6 +422,12 @@ pub struct ControlSnapshot {
     pub last_fan_layer_statuses: Vec<ControlLayerStatus>,
     #[serde(default)]
     pub last_fan_readback: Option<Value>,
+    #[serde(default)]
+    pub quiet_auto_fan_calibration: QuietAutoFanCalibration,
+    #[serde(default)]
+    pub quiet_auto_thermal_warning: Option<QuietAutoThermalWarning>,
+    #[serde(default)]
+    pub fan_speed_calibration: FanSpeedCalibrationSnapshot,
     #[serde(default = "default_true")]
     pub boot_logo_apply_supported: bool,
     #[serde(default)]
@@ -384,6 +487,9 @@ impl ControlSnapshot {
             last_fan_error: None,
             last_fan_layer_statuses: Vec::new(),
             last_fan_readback: None,
+            quiet_auto_fan_calibration: QuietAutoFanCalibration::default(),
+            quiet_auto_thermal_warning: None,
+            fan_speed_calibration: FanSpeedCalibrationSnapshot::default(),
             boot_logo_apply_supported: true,
             last_boot_logo_applied_at_unix: None,
             last_boot_logo_apply_detail: default_waiting_boot_logo_apply_detail(),

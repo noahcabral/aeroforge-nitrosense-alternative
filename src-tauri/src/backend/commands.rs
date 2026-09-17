@@ -223,41 +223,47 @@ pub fn install_staged_update(state: State<'_, BackendState>) -> Result<UpdateSta
 
 #[tauri::command]
 pub fn show_update_notification(version_label: String) -> Result<(), String> {
-    show_desktop_update_notification(&version_label)
-}
-
-#[cfg(windows)]
-fn show_desktop_update_notification(version_label: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let version = normalize_notification_text(version_label, 80);
+    let version = normalize_notification_text(&version_label, 80);
     let body = if version.is_empty() {
         "A new AeroForge build is ready to download.".to_string()
     } else {
         format!("{version} is ready to download.")
     };
-    let script = build_windows_notification_script("AeroForge update available", &body);
 
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            &script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
+    show_desktop_notification("AeroForge update available", &body)
+}
+
+#[tauri::command]
+pub fn show_thermal_warning_notification(sensor_label: String, temp_c: u8) -> Result<(), String> {
+    let sensor = normalize_notification_text(&sensor_label, 30);
+    let sensor = if sensor.is_empty() {
+        "CPU".to_string()
+    } else {
+        sensor
+    };
+    let temp_c = temp_c.min(120);
+    let body = format!(
+        "{sensor} reached {temp_c}C while Quiet Auto fan control is active. Switch to Max/Turbo or reduce load if it keeps climbing."
+    );
+
+    show_desktop_notification("AeroForge temperature warning", &body)
+}
+
+#[cfg(windows)]
+fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
+    let title = normalize_notification_text(title, 80);
+    let body = normalize_notification_text(body, 220);
+    let script = build_windows_notification_script(&title, &body);
+
+    super::process::hidden_powershell()
+        .args(["-Command", &script])
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Could not launch Windows notification helper: {error}"))
 }
 
 #[cfg(not(windows))]
-fn show_desktop_update_notification(_version_label: &str) -> Result<(), String> {
+fn show_desktop_notification(_title: &str, _body: &str) -> Result<(), String> {
     Err("Windows notifications are only available on Windows builds.".into())
 }
 
@@ -615,6 +621,24 @@ pub async fn apply_custom_fan_curves(
         applied_at_unix: applied.applied_at_unix,
         detail: applied.detail,
     })
+}
+
+#[tauri::command]
+pub async fn start_fan_speed_calibration(
+) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(service_pipe::start_fan_speed_calibration)
+        .await
+        .map_err(|error| format!("Fan speed calibration worker failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_fan_speed_calibration(
+) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(service_pipe::cancel_fan_speed_calibration)
+        .await
+        .map_err(|error| format!("Fan speed calibration cancel worker failed: {error}"))?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

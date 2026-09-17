@@ -34,6 +34,7 @@ import {
   applyGpuTuning,
   applyPowerProfile,
   applySmartCharging,
+  cancelFanSpeedCalibration,
   checkForUpdates,
   getBackendBootstrap,
   getHardwareReadinessSnapshot,
@@ -45,8 +46,10 @@ import {
   requestServiceHeal,
   saveControlSnapshot,
   setNvidiaTelemetryEnabled,
+  showThermalWarningNotification,
   showUpdateNotification,
   stageUpdateDownload,
+  startFanSpeedCalibration,
   type CapabilitySnapshot,
   type ControlLayerStatus,
   type ControlSnapshot,
@@ -120,7 +123,7 @@ import {
 } from './lib/settingsPortable'
 
 type ControlTab = 'home' | 'power' | 'fans' | 'personal' | 'debug'
-type PersonalSection = 'updates' | 'charge' | 'screen' | 'boot' | 'backup'
+type PersonalSection = 'updates' | 'charge' | 'screen' | 'config' | 'boot' | 'backup'
 type UpdateChannel = ControlSnapshot['personalSettings']['updateChannel']
 type UpdateAction = 'check' | 'stage' | 'install'
 type SettingsActionPending =
@@ -132,6 +135,8 @@ type SettingsActionPending =
   | 'nvidia-telemetry'
   | 'hardware-repair'
   | 'hardware-start'
+  | 'fan-calibration'
+  | 'fan-calibration-cancel'
 type TrayControlEventPayload = {
   action: string
   detail: string
@@ -192,6 +197,7 @@ type PersistControlOverrides = {
   smartChargingEnabled?: boolean
   processorStateControlEnabled?: boolean
   nvidiaTelemetryEnabled?: boolean
+  keepUiPrewarmed?: boolean
   autoRefreshRateOnBatteryEnabled?: boolean
   autoRefreshRateRestoreHz?: number | null
   blueLightFilterEnabled?: boolean
@@ -481,6 +487,7 @@ const personalSections: {
   id: PersonalSection
   label: string
   description: string
+  disabled?: boolean
 }[] = [
   {
     id: 'updates',
@@ -498,9 +505,15 @@ const personalSections: {
     description: 'Display comfort controls and eye-care settings.',
   },
   {
+    id: 'config',
+    label: 'Config',
+    description: 'Hardware calibration and local tuning data.',
+  },
+  {
     id: 'boot',
     label: 'System Boot Effect',
-    description: 'Boot image preview, selection, and upload staging.',
+    description: 'Disabled until this path is reliable.',
+    disabled: true,
   },
   {
     id: 'backup',
@@ -915,6 +928,7 @@ function buildControlSnapshotForPersistence(input: {
   smartChargingEnabled: boolean
   processorStateControlEnabled: boolean
   nvidiaTelemetryEnabled: boolean
+  keepUiPrewarmed: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
   usbPowerEnabled: boolean
@@ -947,6 +961,7 @@ function buildControlSnapshotForPersistence(input: {
       usbPowerEnabled: input.usbPowerEnabled,
       processorStateControlEnabled: input.processorStateControlEnabled,
       nvidiaTelemetryEnabled: input.nvidiaTelemetryEnabled,
+      keepUiPrewarmed: input.keepUiPrewarmed,
       blueLightFilterEnabled: input.blueLightFilterEnabled,
       autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
       autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
@@ -974,6 +989,7 @@ function applyBackendControlSnapshot(
   setSmartChargingEnabled: (enabled: boolean) => void,
   setProcessorStateControlEnabled: (enabled: boolean) => void,
   setNvidiaTelemetryEnabled: (enabled: boolean) => void,
+  setKeepUiPrewarmed: (enabled: boolean) => void,
   setUsbPowerEnabled: (enabled: boolean) => void,
   setBlueLightFilterEnabled: (enabled: boolean) => void,
   setSelectedBootArt: (art: string) => void,
@@ -1001,6 +1017,7 @@ function applyBackendControlSnapshot(
   setSmartChargingEnabled(controls.personalSettings.smartChargingEnabled)
   setProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
   setNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? false)
+  setKeepUiPrewarmed(controls.personalSettings.keepUiPrewarmed ?? false)
   setUsbPowerEnabled(controls.personalSettings.usbPowerEnabled)
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
   setAutoRefreshRateSettings?.(
@@ -1074,6 +1091,8 @@ function App() {
   const processorStateControlEnabledRef = useRef(true)
   const [nvidiaTelemetryEnabled, setNvidiaTelemetryEnabledState] = useState(false)
   const nvidiaTelemetryEnabledRef = useRef(false)
+  const [keepUiPrewarmed, setKeepUiPrewarmed] = useState(false)
+  const keepUiPrewarmedRef = useRef(false)
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
   const [blueLightFilterEnabled, setBlueLightFilterEnabled] = useState(false)
   const blueLightFilterEnabledRef = useRef(false)
@@ -1097,6 +1116,7 @@ function App() {
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
   const autoUpdateCheckTriggeredRef = useRef(false)
   const updateNotificationKeyRef = useRef<string | null>(null)
+  const quietAutoThermalNotificationKeyRef = useRef<string | null>(null)
   const [statusMessage, setStatusMessage] = useState(
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
@@ -1242,6 +1262,20 @@ function App() {
   const fanLayerStatuses = liveControlSnapshot?.lastFanLayerStatuses ?? []
   const powerHardwareApplyReady = serviceConnected && (hardwareReadiness?.ready ?? true)
   const fanHardwareApplyReady = serviceConnected && (hardwareReadiness?.ready ?? true)
+  const fanCalibrationPending = settingsActionPending === 'fan-calibration'
+  const fanCalibrationCancelPending = settingsActionPending === 'fan-calibration-cancel'
+  const fanSpeedCalibration = liveControlSnapshot?.fanSpeedCalibration
+  const fanCalibrationRunning = fanSpeedCalibration?.running ?? false
+  const fanCalibrationPointCount = fanSpeedCalibration?.points?.length ?? 0
+  const fanCalibrationProgressLabel =
+    fanSpeedCalibration?.currentPercent !== null &&
+    fanSpeedCalibration?.currentPercent !== undefined
+      ? `${fanSpeedCalibration.currentPercent}%`
+      : fanCalibrationRunning
+        ? 'Queued'
+        : fanCalibrationPointCount > 0
+          ? `${fanCalibrationPointCount} points`
+          : 'Not run'
   const currentPowerProfile = powerProfiles.find(
     (profile) => profile.id === activePowerProfile,
   )!
@@ -1263,10 +1297,13 @@ function App() {
     backendCapabilities?.blueLightFilter,
     'AeroForge could not expose the blue light filter on this machine.',
   )
-  const bootLogoDisabledReason = describeFeatureSupport(
-    backendCapabilities?.bootLogo,
-    'Boot-logo apply requires the AeroForge service and an unambiguous EFI System Partition.',
-  )
+  const bootEffectPanelDisabled = true
+  const bootLogoDisabledReason = bootEffectPanelDisabled
+    ? 'System Boot Effect is disabled in this build.'
+    : describeFeatureSupport(
+        backendCapabilities?.bootLogo,
+        'Boot-logo apply requires the AeroForge service and an unambiguous EFI System Partition.',
+      )
   const smartChargeWritable = !smartChargeDisabledReason
   const usbPowerVisible = backendCapabilities?.usbPower.available ?? false
   const usbPowerWritable = !usbPowerDisabledReason
@@ -1666,6 +1703,11 @@ function App() {
     setNvidiaTelemetryEnabledState(enabled)
   }
 
+  function commitKeepUiPrewarmed(enabled: boolean) {
+    keepUiPrewarmedRef.current = enabled
+    setKeepUiPrewarmed(enabled)
+  }
+
   function commitBlueLightFilterEnabled(enabled: boolean) {
     blueLightFilterEnabledRef.current = enabled
     setBlueLightFilterEnabled(enabled)
@@ -1739,6 +1781,8 @@ function App() {
       overrides?.processorStateControlEnabled ?? processorStateControlEnabledRef.current
     const nextNvidiaTelemetryEnabled =
       overrides?.nvidiaTelemetryEnabled ?? nvidiaTelemetryEnabledRef.current
+    const nextKeepUiPrewarmed =
+      overrides?.keepUiPrewarmed ?? keepUiPrewarmedRef.current
     const nextAutoRefreshRateOnBatteryEnabled =
       overrides?.autoRefreshRateOnBatteryEnabled ??
       autoRefreshRateOnBatteryEnabledRef.current
@@ -1772,6 +1816,7 @@ function App() {
           smartChargingEnabled: nextSmartChargingEnabled,
           processorStateControlEnabled: nextProcessorStateControlEnabled,
           nvidiaTelemetryEnabled: nextNvidiaTelemetryEnabled,
+          keepUiPrewarmed: nextKeepUiPrewarmed,
           autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
           autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
           usbPowerEnabled,
@@ -1837,6 +1882,7 @@ function App() {
     smartChargingEnabled,
     processorStateControlEnabled,
     nvidiaTelemetryEnabled,
+    keepUiPrewarmed,
     autoRefreshRateOnBatteryEnabled,
     autoRefreshRateRestoreHz,
     usbPowerEnabled,
@@ -1896,6 +1942,7 @@ function App() {
             commitSmartChargingEnabled,
             commitProcessorStateControlEnabled,
             commitNvidiaTelemetryEnabled,
+            commitKeepUiPrewarmed,
             setUsbPowerEnabled,
             commitBlueLightFilterEnabled,
             setSelectedBootArt,
@@ -2509,6 +2556,7 @@ function App() {
             commitSmartChargingEnabled,
             commitProcessorStateControlEnabled,
             commitNvidiaTelemetryEnabled,
+            commitKeepUiPrewarmed,
             setUsbPowerEnabled,
             commitBlueLightFilterEnabled,
             setSelectedBootArt,
@@ -2618,6 +2666,7 @@ function App() {
                 commitSmartChargingEnabled,
                 commitProcessorStateControlEnabled,
                 commitNvidiaTelemetryEnabled,
+                commitKeepUiPrewarmed,
                 setUsbPowerEnabled,
                 commitBlueLightFilterEnabled,
                 setSelectedBootArt,
@@ -2939,6 +2988,7 @@ function App() {
         smartChargingEnabled,
         processorStateControlEnabled,
         nvidiaTelemetryEnabled,
+        keepUiPrewarmed,
         autoRefreshRateOnBatteryEnabled,
         autoRefreshRateRestoreHz,
         usbPowerEnabled,
@@ -2976,6 +3026,13 @@ function App() {
       return
     }
 
+    if (!controlsBootstrappedRef.current) {
+      // persistStagedControls silently skips saves until the backend controls
+      // are loaded, so importing now would look successful but never persist.
+      showToast('error', 'Settings import failed', 'AeroForge is still loading saved controls. Try again in a moment.')
+      return
+    }
+
     try {
       const raw = await file.text()
       const parsed = parsePortableSettings(raw)
@@ -3000,6 +3057,7 @@ function App() {
         commitSmartChargingEnabled,
         commitProcessorStateControlEnabled,
         commitNvidiaTelemetryEnabled,
+        commitKeepUiPrewarmed,
         setUsbPowerEnabled,
         commitBlueLightFilterEnabled,
         setSelectedBootArt,
@@ -3031,6 +3089,7 @@ function App() {
           parsed.payload.controls.personalSettings.processorStateControlEnabled,
         nvidiaTelemetryEnabled:
           parsed.payload.controls.personalSettings.nvidiaTelemetryEnabled,
+        keepUiPrewarmed: parsed.payload.controls.personalSettings.keepUiPrewarmed ?? false,
         autoRefreshRateOnBatteryEnabled:
           parsed.payload.controls.personalSettings.autoRefreshRateOnBatteryEnabled,
         autoRefreshRateRestoreHz:
@@ -3962,6 +4021,34 @@ function App() {
     }
   }
 
+  const quietAutoThermalWarningActive = liveControlSnapshot?.quietAutoThermalWarning?.active ?? false
+  const quietAutoThermalWarningSensor = liveControlSnapshot?.quietAutoThermalWarning?.sensor ?? null
+  const quietAutoThermalWarningTempC = liveControlSnapshot?.quietAutoThermalWarning?.tempC ?? null
+
+  useEffect(() => {
+    if (!quietAutoThermalWarningActive || quietAutoThermalWarningTempC == null) {
+      quietAutoThermalNotificationKeyRef.current = null
+      return
+    }
+
+    const sensorLabel = quietAutoThermalWarningSensor?.trim() || 'CPU'
+    const notificationKey = `${sensorLabel}:quiet-auto-hot`
+    if (
+      !isDesktopRuntime() ||
+      quietAutoThermalNotificationKeyRef.current === notificationKey
+    ) {
+      return
+    }
+
+    quietAutoThermalNotificationKeyRef.current = notificationKey
+    void showThermalWarningNotification(sensorLabel, quietAutoThermalWarningTempC).catch((error) => {
+      quietAutoThermalNotificationKeyRef.current = null
+      pushTransportDebugEventRef.current(
+        `windows thermal warning notification failed: ${describeError(error)}`,
+      )
+    })
+  }, [quietAutoThermalWarningActive, quietAutoThermalWarningSensor, quietAutoThermalWarningTempC])
+
   async function runUpdateCheck(manual: boolean, channelOverride?: UpdateChannel) {
     setUpdateActionPending('check')
     setUpdateActionMessage('Checking the published GitHub release feed...')
@@ -4264,6 +4351,54 @@ function App() {
     }
   }
 
+  async function handleKeepUiPrewarmedToggle() {
+    const nextEnabled = !keepUiPrewarmedRef.current
+
+    commitKeepUiPrewarmed(nextEnabled)
+    await persistStagedControlsRef.current({ keepUiPrewarmed: nextEnabled })
+    setStatusMessage(
+      nextEnabled
+        ? 'AeroForge will relaunch a hidden UI instance after a tray Exit. RAM usage will increase while this is enabled.'
+        : 'AeroForge UI prewarm disabled. Closing the window still hides to the tray; after a tray Exit the next open cold-starts.',
+    )
+  }
+
+  async function handleFanSpeedCalibration() {
+    if (settingsActionPending) {
+      return
+    }
+
+    if (fanCalibrationRunning) {
+      setSettingsActionPending('fan-calibration-cancel')
+      setStatusMessage('Canceling fan speed calibration and restoring the previous fan mode.')
+
+      try {
+        const result = await cancelFanSpeedCalibration()
+        setStatusMessage(result.status)
+      } catch (error) {
+        setStatusMessage(`Fan speed calibration cancel failed: ${describeError(error)}`)
+      } finally {
+        setSettingsActionPending((current) =>
+          current === 'fan-calibration-cancel' ? null : current,
+        )
+      }
+
+      return
+    }
+
+    setSettingsActionPending('fan-calibration')
+    setStatusMessage('Starting fan speed calibration. AeroForge will test every 5% and record RPM readback.')
+
+    try {
+      const result = await startFanSpeedCalibration()
+      setStatusMessage(result.status)
+    } catch (error) {
+      setStatusMessage(`Fan speed calibration failed to start: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'fan-calibration' ? null : current))
+    }
+  }
+
   function updateCustomProcessorState(
     field: 'min' | 'max',
     rawValue: number,
@@ -4408,6 +4543,7 @@ function App() {
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
           nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+          keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -4460,6 +4596,7 @@ function App() {
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
           nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+          keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
           usbPowerEnabled,
@@ -5239,8 +5376,14 @@ function App() {
                         key={section.id}
                         className={`personal-sidebar__item ${
                           activePersonalSection === section.id ? 'is-active' : ''
-                        }`}
-                        onClick={() => setActivePersonalSection(section.id)}
+                        }${section.disabled ? ' is-disabled' : ''}`}
+                        disabled={section.disabled}
+                        aria-disabled={section.disabled}
+                        onClick={() => {
+                          if (!section.disabled) {
+                            setActivePersonalSection(section.id)
+                          }
+                        }}
                       >
                         <strong>{section.label}</strong>
                         <small>{section.description}</small>
@@ -5605,8 +5748,92 @@ function App() {
                         </div>
                       </div>
                     </section>
-                  ) : activePersonalSection === 'boot' ? (
+                  ) : activePersonalSection === 'config' ? (
                     <section className="personal-frame">
+                      <div className="personal-frame__header">
+                        <span className="eyebrow">Config</span>
+                      </div>
+
+                      <div className="personal-frame__body">
+                        <div className="settings-summary-grid">
+                          <div className="settings-summary-card">
+                            <span className="eyebrow">Fan Calibration</span>
+                            <strong>{fanCalibrationRunning ? 'Running' : 'Ready'}</strong>
+                            <small>{fanSpeedCalibration?.status ?? 'No calibration data recorded yet.'}</small>
+                          </div>
+
+                          <div className="settings-summary-card">
+                            <span className="eyebrow">Current Step</span>
+                            <strong>{fanCalibrationProgressLabel}</strong>
+                            <small>
+                              Tests 0% through 100% in 5% increments and records CPU/GPU RPM.
+                            </small>
+                          </div>
+
+                          <div className="settings-summary-card">
+                            <span className="eyebrow">Settle Time</span>
+                            <strong>{fanSpeedCalibration?.settleSeconds ?? 20}s</strong>
+                            <small>{fanCalibrationPointCount} recorded calibration points.</small>
+                          </div>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>Keep AeroForge Prewarmed</strong>
+                            <p>
+                              {keepUiPrewarmed
+                                ? 'AeroForge relaunches a hidden UI instance after a tray Exit so the next open is faster.'
+                                : 'Closing the window hides AeroForge to the tray. After a tray Exit, the next open will cold-start the UI.'}
+                            </p>
+                            <small>Warning: this increases RAM usage while enabled.</small>
+                          </div>
+
+                          <button
+                            className={`toggle ${keepUiPrewarmed ? 'is-on' : ''}`}
+                            onClick={() => void handleKeepUiPrewarmedToggle()}
+                            aria-pressed={keepUiPrewarmed}
+                            type="button"
+                          >
+                            <span />
+                          </button>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>
+                              {fanCalibrationRunning
+                                ? 'Cancel Fan Speed Calibration'
+                                : 'Run Fan Speed Calibration'}
+                            </strong>
+                            <p>
+                              {fanCalibrationRunning
+                                ? 'Stops the active calibration pass and restores the fan mode that was active before calibration started.'
+                                : 'Builds a percent-to-RPM table by applying every 5% fan target, waiting for RPM to settle, then writing the readback into AeroForge service config.'}
+                            </p>
+                            {fanSpeedCalibration?.lastError && (
+                              <small>{fanSpeedCalibration.lastError}</small>
+                            )}
+                          </div>
+
+                          <button
+                            className="button"
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleFanSpeedCalibration()}
+                            type="button"
+                          >
+                            {fanCalibrationCancelPending
+                              ? 'Canceling'
+                              : fanCalibrationPending
+                                ? 'Starting'
+                                : fanCalibrationRunning
+                                  ? 'Cancel Calibration'
+                                  : 'Run Calibration'}
+                          </button>
+                        </div>
+                      </div>
+                    </section>
+                  ) : activePersonalSection === 'boot' ? (
+                    <section className="personal-frame personal-frame--disabled" aria-disabled="true">
                       <div className="personal-frame__header">
                         <span className="eyebrow">System Boot Effect</span>
                       </div>
@@ -5615,13 +5842,10 @@ function App() {
                           <div className="boot-setting-copy">
                             <strong>Boot Logo Customization</strong>
                             <p>
-                              {bootLogoWritable
-                                ? 'Click a built-in AeroForge splash to apply it, or upload an image. AeroForge preserves GIF files and converts static images to firmware-safe JPEG before apply.'
-                                : bootLogoStatusText}
+                              {bootLogoStatusText}
                             </p>
                             <p className="boot-logo-notice">
-                              Boot logo changing is currently non-functional. If you want this
-                              feature to become reliable, consider contributing to the project.
+                              Boot logo changing is currently non-functional, so this panel is disabled.
                             </p>
                           </div>
 
@@ -5694,8 +5918,8 @@ function App() {
                                   key={art.id}
                                   className={`art-tile ${
                                     selectedBootArt === art.id ? 'is-selected' : ''
-                                  }`}
-                                  disabled={settingsActionPending !== null}
+                                  }${!bootLogoWritable || settingsActionPending !== null ? ' is-disabled' : ''}`}
+                                  disabled={!bootLogoWritable || settingsActionPending !== null}
                                   onClick={() => void handleBootArtworkApply(art)}
                                 >
                                   <div className="art-tile__swatch art-tile__swatch--boot">

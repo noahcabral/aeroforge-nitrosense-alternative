@@ -9,7 +9,7 @@ use std::{
 
 use super::models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
-    AppliedPowerProfileSnapshot, ControlSnapshot,
+    AppliedPowerProfileSnapshot, ControlSnapshot, FanSpeedCalibrationSnapshot,
 };
 
 pub fn load_snapshot(
@@ -110,6 +110,10 @@ pub fn persist_fan_apply_success(
     snapshot.last_fan_error = None;
     snapshot.last_fan_layer_statuses = applied.layer_statuses.clone();
     snapshot.last_fan_readback = applied.readback.clone();
+    if let Some(calibration) = applied.quiet_auto_fan_calibration.clone() {
+        snapshot.quiet_auto_fan_calibration = calibration;
+    }
+    snapshot.quiet_auto_thermal_warning = applied.quiet_auto_thermal_warning.clone();
     persist_snapshot(paths, &snapshot)
 }
 
@@ -132,6 +136,15 @@ pub fn persist_telemetry_settings(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut snapshot = load_snapshot(paths)?;
     snapshot.nvidia_telemetry_enabled = nvidia_telemetry_enabled;
+    persist_snapshot(paths, &snapshot)
+}
+
+pub fn persist_fan_speed_calibration(
+    paths: &ServicePaths,
+    calibration: FanSpeedCalibrationSnapshot,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut snapshot = load_snapshot(paths)?;
+    snapshot.fan_speed_calibration = calibration;
     persist_snapshot(paths, &snapshot)
 }
 

@@ -390,6 +390,16 @@ fn build_contract() -> BackendContract {
                 purpose: "Validate CPU and GPU fan curves and write current-temperature targets through the AeroForge service.".into(),
             },
             CommandDescriptor {
+                command: "start_fan_speed_calibration".into(),
+                stage: "implemented".into(),
+                purpose: "Start a background fan percent-to-RPM calibration pass and persist the recorded table in service state.".into(),
+            },
+            CommandDescriptor {
+                command: "cancel_fan_speed_calibration".into(),
+                stage: "implemented".into(),
+                purpose: "Request cancellation of the active fan calibration pass and restore the previous fan mode.".into(),
+            },
+            CommandDescriptor {
                 command: "apply_smart_charging".into(),
                 stage: "implemented".into(),
                 purpose: "Apply Acer battery-health charging mode and persist the staged smart-charge state.".into(),
@@ -564,6 +574,7 @@ fn build_default_controls() -> ControlSnapshot {
             usb_power_enabled: true,
             processor_state_control_enabled: true,
             nvidia_telemetry_enabled: false,
+            keep_ui_prewarmed: false,
             blue_light_filter_enabled: false,
             auto_refresh_rate_on_battery_enabled: false,
             auto_refresh_rate_restore_hz: None,

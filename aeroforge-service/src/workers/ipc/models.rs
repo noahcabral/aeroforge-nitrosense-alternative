@@ -38,6 +38,14 @@ pub enum PipeRequest {
         #[serde(default)]
         write_token: Option<String>,
     },
+    StartFanSpeedCalibration {
+        #[serde(default)]
+        write_token: Option<String>,
+    },
+    CancelFanSpeedCalibration {
+        #[serde(default)]
+        write_token: Option<String>,
+    },
     ApplyBootLogo {
         payload: ApplyBootLogoRequest,
         #[serde(default)]

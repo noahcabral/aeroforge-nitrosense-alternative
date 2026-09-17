@@ -64,6 +64,8 @@ const DEBOUNCE_MS: u64 = 750;
 const ASFW_ANY: u32 = u32::MAX;
 const BACKGROUND_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const BACKGROUND_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const UI_PREWARM_INITIAL_DELAY: Duration = Duration::from_secs(10);
+const UI_PREWARM_INTERVAL: Duration = Duration::from_secs(30);
 
 static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
 static APP_EXE: OnceLock<PathBuf> = OnceLock::new();
@@ -113,6 +115,7 @@ fn main() {
         &format!("hotkey helper daemon started for {}", app_exe.display()),
     );
     spawn_background_update_worker(&log_path);
+    spawn_ui_prewarm_worker(&log_path, &app_exe);
 
     if let Err(error) = run_raw_input_loop(&log_path) {
         write_log(&log_path, &format!("raw-input loop stopped: {error}"));
@@ -169,6 +172,53 @@ fn spawn_background_update_worker(log_path: &Path) {
     });
 }
 
+fn spawn_ui_prewarm_worker(log_path: &Path, app_exe: &Path) {
+    let log_path = log_path.to_path_buf();
+    let app_exe = app_exe.to_path_buf();
+    thread::spawn(move || {
+        sleep(UI_PREWARM_INITIAL_DELAY);
+        loop {
+            if let Err(error) = reconcile_ui_prewarm(&log_path, &app_exe) {
+                write_log(&log_path, &format!("UI prewarm check failed: {error}"));
+            }
+            sleep(UI_PREWARM_INTERVAL);
+        }
+    });
+}
+
+fn reconcile_ui_prewarm(
+    log_path: &Path,
+    app_exe: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
+        return Err("could not resolve AeroForge config root".into());
+    };
+
+    let settings = load_helper_settings(&config_root);
+    if !settings.keep_ui_prewarmed {
+        return Ok(());
+    }
+
+    if is_app_process_running(app_exe) {
+        return Ok(());
+    }
+
+    match Command::new(app_exe).arg("--prewarm").spawn() {
+        Ok(child) => {
+            write_log(
+                log_path,
+                &format!(
+                    "launched hidden UI prewarm {} pid={}",
+                    app_exe.display(),
+                    child.id()
+                ),
+            );
+            Ok(())
+        }
+        Err(error) => Err(format!("failed to launch hidden UI prewarm: {error}").into()),
+    }
+}
+
 fn run_background_update_check(
     log_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -177,7 +227,7 @@ fn run_background_update_check(
     };
     fs::create_dir_all(&config_root)?;
 
-    let settings = load_background_update_settings(&config_root);
+    let settings = load_helper_settings(&config_root);
     if !settings.enabled {
         write_log(
             log_path,
@@ -240,21 +290,22 @@ fn background_update_notification_key(
     format!("{version}|{asset}")
 }
 
-fn load_background_update_settings(config_root: &Path) -> BackgroundUpdateSettings {
+fn load_helper_settings(config_root: &Path) -> HelperSettings {
     let control_file = config_root.join("control-state.json");
     let Ok(raw) = fs::read_to_string(control_file) else {
-        return BackgroundUpdateSettings::default();
+        return HelperSettings::default();
     };
     let Ok(parsed) = serde_json::from_str::<BackgroundControlState>(&raw) else {
-        return BackgroundUpdateSettings::default();
+        return HelperSettings::default();
     };
     let Some(personal_settings) = parsed.personal_settings else {
-        return BackgroundUpdateSettings::default();
+        return HelperSettings::default();
     };
 
-    BackgroundUpdateSettings {
+    HelperSettings {
         enabled: personal_settings.check_for_updates_on_launch,
         channel: personal_settings.update_channel,
+        keep_ui_prewarmed: personal_settings.keep_ui_prewarmed,
     }
 }
 
@@ -283,16 +334,18 @@ fn unix_now() -> u64 {
 }
 
 #[derive(Debug, Clone)]
-struct BackgroundUpdateSettings {
+struct HelperSettings {
     enabled: bool,
     channel: UpdateChannelId,
+    keep_ui_prewarmed: bool,
 }
 
-impl Default for BackgroundUpdateSettings {
+impl Default for HelperSettings {
     fn default() -> Self {
         Self {
             enabled: true,
             channel: UpdateChannelId::Stable,
+            keep_ui_prewarmed: false,
         }
     }
 }
@@ -310,6 +363,8 @@ struct BackgroundPersonalSettings {
     check_for_updates_on_launch: bool,
     #[serde(default = "default_stable_channel")]
     update_channel: UpdateChannelId,
+    #[serde(default)]
+    keep_ui_prewarmed: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

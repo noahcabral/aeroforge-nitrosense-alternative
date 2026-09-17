@@ -1,5 +1,7 @@
 pub mod backend;
 
+use std::env;
+
 use backend::{
     blue_light, commands, nitro_guard, nitro_key, service_pipe, single_instance, smart_charge,
     state::BackendState, tray,
@@ -8,7 +10,11 @@ use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if single_instance::activate_existing_instance() {
+    let prewarm_mode = env::args()
+        .skip(1)
+        .any(|arg| arg == "--prewarm" || arg == "--background");
+
+    if single_instance::activate_existing_instance(!prewarm_mode) {
         return;
     }
 
@@ -33,6 +39,7 @@ pub fn run() {
             commands::stage_update_download,
             commands::install_staged_update,
             commands::show_update_notification,
+            commands::show_thermal_warning_notification,
             commands::append_performance_log,
             commands::apply_blue_light_filter,
             commands::apply_smart_charging,
@@ -44,6 +51,8 @@ pub fn run() {
             commands::apply_gpu_tuning,
             commands::apply_fan_profile,
             commands::apply_custom_fan_curves,
+            commands::start_fan_speed_calibration,
+            commands::cancel_fan_speed_calibration,
             commands::apply_boot_logo
         ])
         .on_window_event(|window, event| {
@@ -85,36 +94,6 @@ pub fn run() {
             nitro_guard::start();
             nitro_key::start(app.handle().clone());
 
-            if let Err(error) = service_pipe::ensure_service_running() {
-                eprintln!("AeroForge service startup check failed: {error}");
-            }
-            if let Err(error) = service_pipe::restore_startup_state() {
-                eprintln!("AeroForge manual-launch restore failed during startup: {error}");
-            }
-            if let Err(error) = blue_light::sync_saved_state(saved_blue_light_state) {
-                eprintln!("AeroForge blue-light sync failed during startup: {error}");
-            }
-            let smart_charge_sync = match service_pipe::apply_smart_charging(saved_smart_charge_state)
-            {
-                Ok(_) => Ok(()),
-                Err(service_error) => tauri::async_runtime::block_on(smart_charge::sync_saved_state(
-                    saved_smart_charge_state,
-                ))
-                .map(|_| ())
-                .map_err(|desktop_error| {
-                    format!(
-                        "service path failed: {service_error}; desktop fallback failed: {desktop_error}"
-                    )
-                }),
-            };
-            if let Err(error) = smart_charge_sync {
-                eprintln!("AeroForge smart-charge sync failed during startup: {error}");
-            }
-            if let Err(error) = service_pipe::apply_telemetry_settings(saved_nvidia_telemetry_state)
-            {
-                eprintln!("AeroForge NVIDIA telemetry sync failed during startup: {error}");
-            }
-
             if let Err(error) = tray::setup(app) {
                 eprintln!("AeroForge tray setup failed: {error}");
             }
@@ -132,12 +111,58 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
+                if prewarm_mode {
+                    let _ = window.hide();
+                    return Ok(());
+                }
+
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
+            tauri::async_runtime::spawn_blocking(move || {
+                run_startup_reconcile(
+                    saved_blue_light_state,
+                    saved_smart_charge_state,
+                    saved_nvidia_telemetry_state,
+                );
+            });
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn run_startup_reconcile(
+    saved_blue_light_state: bool,
+    saved_smart_charge_state: bool,
+    saved_nvidia_telemetry_state: bool,
+) {
+    if let Err(error) = service_pipe::ensure_service_running() {
+        eprintln!("AeroForge service startup check failed: {error}");
+    }
+    if let Err(error) = service_pipe::restore_startup_state() {
+        eprintln!("AeroForge manual-launch restore failed during startup: {error}");
+    }
+    if let Err(error) = blue_light::sync_saved_state(saved_blue_light_state) {
+        eprintln!("AeroForge blue-light sync failed during startup: {error}");
+    }
+    let smart_charge_sync = match service_pipe::apply_smart_charging(saved_smart_charge_state) {
+        Ok(_) => Ok(()),
+        Err(service_error) => {
+            tauri::async_runtime::block_on(smart_charge::sync_saved_state(saved_smart_charge_state))
+                .map(|_| ())
+                .map_err(|desktop_error| {
+                    format!(
+                "service path failed: {service_error}; desktop fallback failed: {desktop_error}"
+            )
+                })
+        }
+    };
+    if let Err(error) = smart_charge_sync {
+        eprintln!("AeroForge smart-charge sync failed during startup: {error}");
+    }
+    if let Err(error) = service_pipe::apply_telemetry_settings(saved_nvidia_telemetry_state) {
+        eprintln!("AeroForge NVIDIA telemetry sync failed during startup: {error}");
+    }
 }

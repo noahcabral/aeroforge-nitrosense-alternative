@@ -16,6 +16,7 @@ Laptop fan control and battery / power management for Acer Nitro hardware. Three
 - Power profile switching
 - Fan profile switching
 - Smart charging toggle with an 80% charge cap preview
+- Personal > Config: fan speed calibration (0-100% in 5% steps with RPM readback) and the "Keep AeroForge Prewarmed" toggle
 - Boot splash image swapping with preset art and custom upload preview
 
 ## Tech stack
@@ -175,7 +176,9 @@ Current fan control path:
 - the service calls `ROOT\\WMI` `AcerGamingFunction` directly on supported Acer Nitro hardware
 - `SetGamingFanBehavior` receives Acer behavior inputs for auto, max, and mixed custom fan profiles
 - `SetGamingFanSpeed` receives per-fan target inputs for CPU and GPU fan percentages
-- when Custom is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
+- when Custom or Cool is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
+- Quiet Auto: with the BatteryGuard power profile and Auto fan profile both active, the service runs a closed-loop fan policy from the calibration table every 5 seconds and raises a thermal warning (surfaced as a Windows notification) when the CPU or GPU runs hot
+- fan speed calibration steps every 5% target, waits for RPM to settle, and writes the percent-to-RPM table into the service config; the previous fan profile is restored afterwards or on cancel
 - RPM movement is verified separately through direct Acer sensor telemetry rather than trusting the write call alone
 - no NitroSense websocket, AcerAgentService PSSDK socket, or PredatorSense pipe dependency is used for AeroForge fan writes
 
@@ -209,6 +212,7 @@ Trust model:
 
 - The service runs as SYSTEM. `C:\ProgramData\AeroForge\Service` is restricted to SYSTEM and Administrators (full) and Users (read/execute); both installers set this and the service re-applies it at startup. Child tools (`powercfg`, `powershell`, `reg`, `nvidia-smi`) and `nvapi64.dll` are launched or loaded by absolute System32 path so nothing dropped next to the service binary can shadow them.
 - The named pipe grants Authenticated Users read/write, so on a shared machine any signed-in local user can change fan and power state. The write token in `state\ipc-write-token.txt` is world-readable and does not change that; it exists to keep the desktop app and service in sync, not as an access control. Restricting control to one account would need the token created service-side with a per-user ACL, or the pipe SDDL narrowed.
+- Every mutating pipe request, including fan calibration start/cancel, carries the write token; requests without it are rejected.
 - Requests are capped at 32 MB, concurrent clients at 16, fan curves at 32 points; the pipe name is never shared with another process.
 - Updates are verified against the release's SHA256 sidecar (integrity in transit, not authenticity). Signing releases (minisign/Authenticode with a pinned key) is the missing piece for authenticity. The updater currently follows `noahcabral/aeroforge-nitrosense-alternative`; `scripts/Publish-GitHubRelease.ps1` publishes to this checkout's `origin`.
 

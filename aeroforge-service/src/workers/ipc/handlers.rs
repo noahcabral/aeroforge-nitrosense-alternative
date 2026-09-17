@@ -136,6 +136,40 @@ pub fn process_request(
                 },
             }
         }
+        PipeRequest::CancelFanSpeedCalibration { write_token } => {
+            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
+                return PipeResponse::Error { message };
+            }
+            match control::cancel_fan_speed_calibration(paths) {
+                Ok(calibration) => PipeResponse::Ok {
+                    payload: serde_json::to_value(calibration).unwrap_or_else(|error| {
+                        json!({
+                            "detail": format!("Canceled fan speed calibration but failed to serialize response: {error}")
+                        })
+                    }),
+                },
+                Err(error) => PipeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
+        PipeRequest::StartFanSpeedCalibration { write_token } => {
+            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
+                return PipeResponse::Error { message };
+            }
+            match control::start_fan_speed_calibration(paths) {
+                Ok(calibration) => PipeResponse::Ok {
+                    payload: serde_json::to_value(calibration).unwrap_or_else(|error| {
+                        json!({
+                            "detail": format!("Started fan speed calibration but failed to serialize response: {error}")
+                        })
+                    }),
+                },
+                Err(error) => PipeResponse::Error {
+                    message: error.to_string(),
+                },
+            }
+        }
         PipeRequest::ApplyBootLogo {
             payload,
             write_token,

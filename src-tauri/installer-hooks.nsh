@@ -3,6 +3,82 @@ Var NitroSenseUninstallString
 Var AeroForgeInstallDirSafeToWipe
 Var AeroForgeInstallPawnIO
 
+Function ClearAeroForgePostRebootInstallResidue
+  DetailPrint "Clearing stale AeroForge post-reboot installer launchers..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1" w
+  FileWrite $9 "param([string]$$CurrentInstallerPath, [switch]$$RemovePendingRoot)$\r$\n"
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "$$taskName = 'AeroForgePostRebootInstall'$\r$\n"
+  FileWrite $9 "Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "Unregister-ScheduledTask -TaskName $$taskName -Confirm:$$false -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "& schtasks.exe /End /TN $$taskName 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "& schtasks.exe /Delete /TN $$taskName /F 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "foreach ($$root in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce')) {$\r$\n"
+  FileWrite $9 "  Remove-ItemProperty -Path $$root -Name $$taskName -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "$$pendingRoot = Join-Path $$env:ProgramData 'AeroForge\PendingInstall'$\r$\n"
+  FileWrite $9 "$$shouldRemovePendingRoot = $$RemovePendingRoot.IsPresent$\r$\n"
+  FileWrite $9 "if (-not $$shouldRemovePendingRoot -and -not [string]::IsNullOrWhiteSpace($$CurrentInstallerPath)) {$\r$\n"
+  FileWrite $9 "  try {$\r$\n"
+  FileWrite $9 "    $$currentFull = [IO.Path]::GetFullPath($$CurrentInstallerPath)$\r$\n"
+  FileWrite $9 "    $$pendingFull = [IO.Path]::GetFullPath($$pendingRoot).TrimEnd('\') + '\'$\r$\n"
+  FileWrite $9 "    $$shouldRemovePendingRoot = -not $$currentFull.StartsWith($$pendingFull, [StringComparison]::OrdinalIgnoreCase)$\r$\n"
+  FileWrite $9 "  } catch { $$shouldRemovePendingRoot = $$true }$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "if ($$shouldRemovePendingRoot -and (Test-Path -LiteralPath $$pendingRoot)) {$\r$\n"
+  FileWrite $9 "  Remove-Item -LiteralPath $$pendingRoot -Recurse -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "exit 0$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1" "$EXEPATH"' $8
+FunctionEnd
+
+Function ClearAeroForgePostRebootInstallResidueAfterInstall
+  DetailPrint "Clearing completed AeroForge post-reboot installer staging..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1" w
+  FileWrite $9 "param([string]$$CurrentInstallerPath, [switch]$$RemovePendingRoot)$\r$\n"
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "$$taskName = 'AeroForgePostRebootInstall'$\r$\n"
+  FileWrite $9 "Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "Unregister-ScheduledTask -TaskName $$taskName -Confirm:$$false -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "& schtasks.exe /End /TN $$taskName 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "& schtasks.exe /Delete /TN $$taskName /F 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "foreach ($$root in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce')) {$\r$\n"
+  FileWrite $9 "  Remove-ItemProperty -Path $$root -Name $$taskName -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "$$pendingRoot = Join-Path $$env:ProgramData 'AeroForge\PendingInstall'$\r$\n"
+  FileWrite $9 "if (Test-Path -LiteralPath $$pendingRoot) {$\r$\n"
+  FileWrite $9 "  Remove-Item -LiteralPath $$pendingRoot -Recurse -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "exit 0$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1" "$EXEPATH" -RemovePendingRoot' $8
+FunctionEnd
+
+Function un.ClearAeroForgePostRebootInstallResidue
+  DetailPrint "Clearing stale AeroForge post-reboot installer launchers..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1" w
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "$$taskName = 'AeroForgePostRebootInstall'$\r$\n"
+  FileWrite $9 "Stop-ScheduledTask -TaskName $$taskName -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "Unregister-ScheduledTask -TaskName $$taskName -Confirm:$$false -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "& schtasks.exe /End /TN $$taskName 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "& schtasks.exe /Delete /TN $$taskName /F 2>$$null | Out-Null$\r$\n"
+  FileWrite $9 "foreach ($$root in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce')) {$\r$\n"
+  FileWrite $9 "  Remove-ItemProperty -Path $$root -Name $$taskName -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "$$pendingRoot = Join-Path $$env:ProgramData 'AeroForge\PendingInstall'$\r$\n"
+  FileWrite $9 "if (Test-Path -LiteralPath $$pendingRoot) {$\r$\n"
+  FileWrite $9 "  Remove-Item -LiteralPath $$pendingRoot -Recurse -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "exit 0$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\ClearAeroForgePostRebootInstall.ps1"' $8
+FunctionEnd
+
 Function CleanAeroForgeInstallDirForInstall
   IfFileExists "$INSTDIR\aeroforge-control.exe" 0 check_display_exe_install
     Goto clean_install_dir
@@ -256,6 +332,7 @@ Function RunNitroSenseUninstall
 FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
+  Call ClearAeroForgePostRebootInstallResidue
   Call StopAeroForgeRuntimeForInstall
   Call DetectNitroSense
   StrCmp $NitroSenseUninstallString "" nitro_preinstall_done
@@ -406,12 +483,42 @@ Function un.VerifyAeroForgeRemoved
   ${EndIf}
 FunctionEnd
 
+Function un.CloseSameVersionMaintenanceInstallerParent
+  DetailPrint "Closing same-version AeroForge maintenance installer parent if present..."
+  InitPluginsDir
+  FileOpen $9 "$PLUGINSDIR\CloseSameVersionMaintenanceInstallerParent.ps1" w
+  FileWrite $9 "param([string]$$InstalledVersion)$\r$\n"
+  FileWrite $9 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
+  FileWrite $9 "function Normalize-VersionText { param([string]$$Text) if ([string]::IsNullOrWhiteSpace($$Text)) { return '' } $$m = [regex]::Match($$Text, '\d+(?:\.\d+){1,3}'); if (-not $$m.Success) { return '' } $$parts = @($$m.Value.Split('.') | Select-Object -First 3); while ($$parts.Count -lt 3) { $$parts += '0' }; return ($$parts -join '.') }$\r$\n"
+  FileWrite $9 "$$self = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $$PID)$\r$\n"
+  FileWrite $9 "if (-not $$self) { exit 0 }$\r$\n"
+  FileWrite $9 "$$uninstaller = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $$self.ParentProcessId)$\r$\n"
+  FileWrite $9 "if (-not $$uninstaller) { exit 0 }$\r$\n"
+  FileWrite $9 "$$parent = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $$uninstaller.ParentProcessId)$\r$\n"
+  FileWrite $9 "if (-not $$parent -or [string]::IsNullOrWhiteSpace($$parent.ExecutablePath)) { exit 0 }$\r$\n"
+  FileWrite $9 "$$parentName = [IO.Path]::GetFileName($$parent.ExecutablePath)$\r$\n"
+  FileWrite $9 "$$looksLikeAeroForgeSetup = $$parentName -match '^(AeroForge-Control-Setup.*|AeroForge Control_.*setup.*)\.exe$$' -or $$parentName -eq 'AeroForge-Control-Setup-Pending.exe'$\r$\n"
+  FileWrite $9 "if (-not $$looksLikeAeroForgeSetup) { exit 0 }$\r$\n"
+  FileWrite $9 "$$targetVersion = Normalize-VersionText $$InstalledVersion$\r$\n"
+  FileWrite $9 "$$parentVersion = ''$\r$\n"
+  FileWrite $9 "try { $$parentVersion = Normalize-VersionText ((Get-Item -LiteralPath $$parent.ExecutablePath).VersionInfo.ProductVersion) } catch {}$\r$\n"
+  FileWrite $9 "if ([string]::IsNullOrWhiteSpace($$parentVersion)) { $$parentVersion = Normalize-VersionText $$parentName }$\r$\n"
+  FileWrite $9 "if (-not [string]::IsNullOrWhiteSpace($$targetVersion) -and $$parentVersion -eq $$targetVersion) {$\r$\n"
+  FileWrite $9 "  Stop-Process -Id $$parent.ProcessId -Force -ErrorAction SilentlyContinue$\r$\n"
+  FileWrite $9 "}$\r$\n"
+  FileWrite $9 "exit 0$\r$\n"
+  FileClose $9
+  ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\CloseSameVersionMaintenanceInstallerParent.ps1" "${VERSION}"' $8
+FunctionEnd
+
 !macro NSIS_HOOK_POSTINSTALL
   Call InstallAeroForgeService
   Call InstallAeroForgeUserRuntime
+  Call ClearAeroForgePostRebootInstallResidueAfterInstall
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  Call un.ClearAeroForgePostRebootInstallResidue
   Call un.MarkAeroForgeInstallDirForWipe
   Call un.StopAeroForgeRuntimeForUninstall
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "AeroForgeHotkeyHelper"
@@ -421,4 +528,5 @@ FunctionEnd
 !macro NSIS_HOOK_POSTUNINSTALL
   Call un.RemoveAeroForgeInstallDir
   Call un.VerifyAeroForgeRemoved
+  Call un.CloseSameVersionMaintenanceInstallerParent
 !macroend

@@ -44,6 +44,7 @@ const controls: ControlSnapshot = {
     usbPowerEnabled: true,
     processorStateControlEnabled: true,
     nvidiaTelemetryEnabled: false,
+    keepUiPrewarmed: false,
     blueLightFilterEnabled: false,
     autoRefreshRateOnBatteryEnabled: false,
     autoRefreshRateRestoreHz: null,

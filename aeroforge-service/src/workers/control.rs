@@ -16,15 +16,21 @@ use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, unix_timestamp, WorkerEventSender, WorkerRegistration},
 };
-use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
+    thread,
+};
 
 pub use models::{
     AppliedBootLogoSnapshot, AppliedFanControlSnapshot, AppliedGpuTuningSnapshot,
     AppliedPowerProfileSnapshot, AppliedSmartChargeSnapshot, AppliedTelemetrySettingsSnapshot,
     ApplyBootLogoRequest, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
     ApplyGpuTuningRequest, ApplyPowerProfileRequest, ApplySmartChargeRequest,
-    ApplyTelemetrySettingsRequest, FanProfileId,
+    ApplyTelemetrySettingsRequest, FanProfileId, FanSpeedCalibrationSnapshot,
 };
 
 const WORKER_NAME: &str = "control-worker";
@@ -32,9 +38,12 @@ const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const ADAPTIVE_FAN_REFRESH_INTERVAL_SECS: u64 = 5;
 const ADAPTIVE_FAN_TARGET_CHANGE_THRESHOLD_PERCENT: u8 = 3;
 const ADAPTIVE_FAN_FORCE_REFRESH_SECS: u64 = 60;
+const QUIET_AUTO_REFRESH_INTERVAL_SECS: u64 = 5;
 const STARTUP_RECONCILE_CHECKPOINTS_SECS: [u64; 3] = [15, 45, 120];
 static FAN_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static STARTUP_RECONCILE_STATE: OnceLock<Mutex<StartupReconcileState>> = OnceLock::new();
+static FAN_CALIBRATION_RUNNING: AtomicBool = AtomicBool::new(false);
+static FAN_CALIBRATION_CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 struct StartupReconcileState {
     started_at: Instant,
@@ -85,17 +94,24 @@ pub fn apply_fan_profile(
     paths: &ServicePaths,
     request: ApplyFanProfileRequest,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
+        return Err(
+            "Fan speed calibration is running. Wait for it to finish before changing fan modes."
+                .into(),
+        );
+    }
+
     let _fan_apply_guard = FAN_APPLY_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| "Fan apply lock was poisoned.")?;
 
+    let snapshot = state::load_snapshot(paths)?;
+
     if matches!(request.profile_id, FanProfileId::Custom) {
-        let curves = state::load_snapshot(paths)?
-            .active_fan_curves
-            .ok_or_else(|| {
-                "Custom fan mode requires a saved curve before it can be applied.".to_string()
-            })?;
+        let curves = snapshot.active_fan_curves.ok_or_else(|| {
+            "Custom fan mode requires a saved curve before it can be applied.".to_string()
+        })?;
 
         return apply_custom_fan_curves_unlocked(
             paths,
@@ -104,6 +120,26 @@ pub fn apply_fan_profile(
                 quiet_success_log: false,
             },
         );
+    }
+
+    if matches!(request.profile_id, FanProfileId::Auto)
+        && matches!(
+            snapshot.active_power_profile,
+            Some(models::PowerProfileId::BatteryGuard)
+        )
+    {
+        match fan::apply_quiet_auto_fan_policy(paths, &snapshot, false) {
+            Ok(applied) => {
+                state::persist_fan_apply_success(paths, &applied)?;
+                return Ok(applied);
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
+                let _ = state::persist_fan_apply_error(paths, &detail);
+                return Err(error);
+            }
+        }
     }
 
     match fan::apply_fan_profile(paths, request) {
@@ -188,6 +224,13 @@ pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
+        return Err(
+            "Fan speed calibration is running. Wait for it to finish before changing fan curves."
+                .into(),
+        );
+    }
+
     let _fan_apply_guard = FAN_APPLY_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -212,6 +255,114 @@ fn apply_custom_fan_curves_unlocked(
             Err(error)
         }
     }
+}
+
+pub fn start_fan_speed_calibration(
+    paths: &ServicePaths,
+) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    if FAN_CALIBRATION_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(state::load_snapshot(paths)?.fan_speed_calibration);
+    }
+
+    FAN_CALIBRATION_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+
+    let now = unix_timestamp();
+    let calibration = FanSpeedCalibrationSnapshot {
+        running: true,
+        status: "Fan speed calibration queued. Testing every 5% with a 20 second settle per step."
+            .into(),
+        started_at_unix: Some(now),
+        updated_at_unix: Some(now),
+        completed_at_unix: None,
+        current_percent: None,
+        settle_seconds: 20,
+        points: Vec::new(),
+        last_error: None,
+    };
+    state::persist_fan_speed_calibration(paths, calibration.clone())?;
+
+    let job_paths = paths.clone();
+    thread::Builder::new()
+        .name("aeroforge-fan-calibration".into())
+        .spawn(move || {
+            let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                let _fan_apply_guard = FAN_APPLY_LOCK
+                    .get_or_init(|| Mutex::new(()))
+                    .lock()
+                    .map_err(|_| "Fan apply lock was poisoned.")?;
+                let completed = fan::run_fan_speed_calibration(&job_paths, &|| {
+                    FAN_CALIBRATION_CANCEL_REQUESTED.load(Ordering::SeqCst)
+                })?;
+                state::persist_fan_speed_calibration(&job_paths, completed)?;
+                Ok(())
+            })();
+
+            if let Err(error) = result {
+                let detail = error.to_string();
+                let _ = write_log_line(
+                    &job_paths.component_log("control-fan"),
+                    "ERROR",
+                    &format!("Fan speed calibration failed: {detail}"),
+                );
+                let mut snapshot = state::load_snapshot(&job_paths)
+                    .unwrap_or_else(|_| models::ControlSnapshot::default_snapshot(WORKER_NAME));
+                snapshot.fan_speed_calibration.running = false;
+                snapshot.fan_speed_calibration.current_percent = None;
+                snapshot.fan_speed_calibration.updated_at_unix = Some(unix_timestamp());
+                snapshot.fan_speed_calibration.completed_at_unix = Some(unix_timestamp());
+                snapshot.fan_speed_calibration.status =
+                    format!("Fan speed calibration failed. {detail}");
+                snapshot.fan_speed_calibration.last_error = Some(detail);
+                let _ = state::persist_fan_speed_calibration(
+                    &job_paths,
+                    snapshot.fan_speed_calibration,
+                );
+            }
+
+            FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
+            FAN_CALIBRATION_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+        })?;
+
+    Ok(calibration)
+}
+
+pub fn cancel_fan_speed_calibration(
+    paths: &ServicePaths,
+) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let mut snapshot = state::load_snapshot(paths)?;
+    if !FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
+        if snapshot.fan_speed_calibration.running {
+            let now = unix_timestamp();
+            snapshot.fan_speed_calibration.running = false;
+            snapshot.fan_speed_calibration.current_percent = None;
+            snapshot.fan_speed_calibration.updated_at_unix = Some(now);
+            snapshot.fan_speed_calibration.completed_at_unix = Some(now);
+            snapshot.fan_speed_calibration.status =
+                "Fan speed calibration was not running; cleared stale running state.".into();
+            state::persist_fan_speed_calibration(paths, snapshot.fan_speed_calibration.clone())?;
+        }
+        return Ok(snapshot.fan_speed_calibration);
+    }
+
+    FAN_CALIBRATION_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+
+    let now = unix_timestamp();
+    snapshot.fan_speed_calibration.updated_at_unix = Some(now);
+    snapshot.fan_speed_calibration.status =
+        "Fan speed calibration cancel requested. Restoring the previous fan mode.".into();
+    snapshot.fan_speed_calibration.last_error = None;
+    state::persist_fan_speed_calibration(paths, snapshot.fan_speed_calibration.clone())?;
+
+    write_log_line(
+        &paths.component_log("control-fan"),
+        "INFO",
+        "Fan speed calibration cancel requested by UI.",
+    )?;
+
+    Ok(snapshot.fan_speed_calibration)
 }
 
 fn run(
@@ -241,6 +392,10 @@ fn run(
 fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(paths)?;
 
+    if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
     let initial_snapshot = match state::load_snapshot(paths) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -256,6 +411,54 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     };
 
     if run_due_startup_reconcile(paths)? {
+        return Ok(());
+    }
+
+    if matches!(
+        initial_snapshot.active_power_profile,
+        Some(models::PowerProfileId::BatteryGuard)
+    ) && matches!(
+        initial_snapshot.active_fan_profile,
+        Some(FanProfileId::Auto)
+    ) {
+        if !quiet_auto_refresh_due(initial_snapshot.last_fan_applied_at_unix) {
+            return Ok(());
+        }
+
+        let _fan_apply_guard = FAN_APPLY_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "Fan apply lock was poisoned.")?;
+
+        let snapshot = match state::load_snapshot(paths) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = write_log_line(
+                    &paths.component_log("control-worker"),
+                    "ERROR",
+                    &format!("Control snapshot unavailable after lock acquisition: {error}"),
+                );
+                return Ok(());
+            }
+        };
+
+        if !matches!(
+            snapshot.active_power_profile,
+            Some(models::PowerProfileId::BatteryGuard)
+        ) || !matches!(snapshot.active_fan_profile, Some(FanProfileId::Auto))
+        {
+            return Ok(());
+        }
+
+        match fan::apply_quiet_auto_fan_policy(paths, &snapshot, true) {
+            Ok(applied) => state::persist_fan_apply_success(paths, &applied)?,
+            Err(error) => {
+                let detail = format!("Periodic Quiet Auto fan policy refresh failed: {error}");
+                let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
+                state::persist_fan_apply_error(paths, &detail)?;
+            }
+        }
+
         return Ok(());
     }
 
@@ -382,11 +585,19 @@ fn fan_profile_refreshable(profile_id: Option<&FanProfileId>, has_saved_curves: 
 }
 
 fn adaptive_fan_refresh_due(last_applied_at_unix: Option<u64>) -> bool {
+    fan_refresh_due(last_applied_at_unix, ADAPTIVE_FAN_REFRESH_INTERVAL_SECS)
+}
+
+fn quiet_auto_refresh_due(last_applied_at_unix: Option<u64>) -> bool {
+    fan_refresh_due(last_applied_at_unix, QUIET_AUTO_REFRESH_INTERVAL_SECS)
+}
+
+fn fan_refresh_due(last_applied_at_unix: Option<u64>, interval_secs: u64) -> bool {
     let Some(last_applied_at_unix) = last_applied_at_unix else {
         return true;
     };
 
-    unix_timestamp().saturating_sub(last_applied_at_unix) >= ADAPTIVE_FAN_REFRESH_INTERVAL_SECS
+    unix_timestamp().saturating_sub(last_applied_at_unix) >= interval_secs
 }
 
 fn adaptive_fan_target_refresh_needed(

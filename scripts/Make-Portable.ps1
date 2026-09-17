@@ -39,7 +39,15 @@ if (Test-Path -LiteralPath $portableDir) {
       Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
   }
-  Get-Process aeroforge-hotkey-helper -ErrorAction SilentlyContinue | Stop-Process -Force
+  $portableDirPrefix = ([System.IO.Path]::GetFullPath($portableDir)).TrimEnd('\') + '\'
+  Get-CimInstance Win32_Process -Filter "Name='aeroforge-hotkey-helper.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.ExecutablePath -and
+      ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($portableDirPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
   try {
     Remove-Item -LiteralPath $portableDir -Recurse -Force
   } catch {

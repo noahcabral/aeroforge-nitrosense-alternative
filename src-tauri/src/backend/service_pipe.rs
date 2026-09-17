@@ -68,6 +68,12 @@ enum PipeRequest {
         payload: ApplyCustomFanCurvesRequest,
         write_token: String,
     },
+    StartFanSpeedCalibration {
+        write_token: String,
+    },
+    CancelFanSpeedCalibration {
+        write_token: String,
+    },
     ApplyBootLogo {
         payload: ApplyBootLogoRequest,
         write_token: String,
@@ -386,6 +392,26 @@ pub fn apply_custom_fan_curves(
         write_token: load_or_create_write_token()?,
     })?;
     Ok(serde_json::from_value::<AppliedFanControlPayload>(payload)?)
+}
+
+pub fn start_fan_speed_calibration(
+) -> Result<super::models::FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = request(PipeRequest::StartFanSpeedCalibration {
+        write_token: load_or_create_write_token()?,
+    })?;
+    Ok(serde_json::from_value::<
+        super::models::FanSpeedCalibrationSnapshot,
+    >(payload)?)
+}
+
+pub fn cancel_fan_speed_calibration(
+) -> Result<super::models::FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let payload = request(PipeRequest::CancelFanSpeedCalibration {
+        write_token: load_or_create_write_token()?,
+    })?;
+    Ok(serde_json::from_value::<
+        super::models::FanSpeedCalibrationSnapshot,
+    >(payload)?)
 }
 
 pub fn apply_boot_logo(
