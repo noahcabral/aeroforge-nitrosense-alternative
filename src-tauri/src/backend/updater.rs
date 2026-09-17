@@ -175,6 +175,17 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
     if !staged_file.exists() {
         return Err(io::Error::other("The staged update file no longer exists on disk.").into());
     }
+    // Re-verify right before the elevated launch: the stage-time result lives in
+    // a user-writable state file and the EXE in %APPDATA% could have been swapped.
+    let staged_sha256 = format!("{:x}", Sha256::digest(fs::read(&staged_file)?));
+    if Some(staged_sha256.as_str()) != status.staged_sha256.as_deref() {
+        status.can_install_update = false;
+        status.staged_sha256_verified = false;
+        return Err(io::Error::other(
+            "The staged update file no longer matches its verified SHA256. Stage the update again.",
+        )
+        .into());
+    }
     let extension = staged_file
         .extension()
         .and_then(|extension| extension.to_str())
@@ -298,10 +309,7 @@ fn resolve_update_candidate(
         status.latest_published_at = release.published_at.clone();
         status.latest_commit_sha = None;
         status.latest_asset_name = latest_asset.as_ref().map(|asset| asset.name.clone());
-        status.update_available = match (current_version, release_version) {
-            (Some(current), Some(remote)) => remote > current,
-            _ => latest_version != env!("CARGO_PKG_VERSION"),
-        };
+        status.update_available = is_newer_release(current_version.as_ref(), release_version.as_ref());
         status.can_stage_update = latest_asset.is_some() && status.update_available;
         status.can_install_update = staged_update_ready(&status);
         status.detail = if let Some(asset) = latest_asset.as_ref() {
@@ -606,6 +614,12 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// A tag that does not parse as semver is never treated as newer; a string
+/// inequality fallback would offer a downgrade to whatever a malformed tag names.
+fn is_newer_release(current: Option<&Version>, remote: Option<&Version>) -> bool {
+    matches!((current, remote), (Some(current), Some(remote)) if remote > current)
+}
+
 fn normalize_release_version(tag_name: &str) -> Option<String> {
     let trimmed = tag_name.trim().trim_start_matches(['v', 'V']);
     Version::parse(trimmed)
@@ -903,6 +917,16 @@ mod tests {
         let selected = select_sha256_asset(&assets, "AeroForge-Control-Setup-1.0.0.exe")
             .expect("expected asset-specific checksum");
         assert_eq!(selected.name, "AeroForge-Control-Setup-1.0.0.exe.sha256");
+    }
+
+    #[test]
+    fn unparseable_release_tag_never_counts_as_newer() {
+        let current = Version::parse("0.15.6").unwrap();
+        assert!(is_newer_release(Some(&current), Some(&Version::parse("0.16.0").unwrap())));
+        assert!(!is_newer_release(Some(&current), Some(&Version::parse("0.15.6").unwrap())));
+        assert!(!is_newer_release(Some(&current), Some(&Version::parse("0.15.5").unwrap())));
+        assert!(!is_newer_release(Some(&current), None));
+        assert!(!is_newer_release(None, Some(&current)));
     }
 
     #[test]
