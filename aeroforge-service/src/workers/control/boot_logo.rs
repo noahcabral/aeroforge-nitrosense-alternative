@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -33,10 +33,15 @@ pub fn apply_boot_logo(
     }
 
     let write_result = write_logo_to_esp(paths, &staged, &esp)?;
+    let describe_mirror = |path: &Option<PathBuf>| {
+        path.as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "skipped (directory not present)".into())
+    };
     let detail = format!(
         "Boot logo staged in Acer program data at {}, Acer recovery at {}, and on the EFI System Partition as {}. Backup: {}. Reboot is required to verify firmware pickup.",
-        write_result.acer_programdata_target_path.display(),
-        write_result.acer_recovery_target_path.display(),
+        describe_mirror(&write_result.acer_programdata_target_path),
+        describe_mirror(&write_result.acer_recovery_target_path),
         write_result.target_path.display(),
         write_result
             .backup_dir
@@ -59,8 +64,8 @@ pub fn apply_boot_logo(
             "efiMarker": esp.marker_path.display().to_string(),
             "targetPath": write_result.target_path.display().to_string(),
             "targetBytes": write_result.target_size,
-            "acerProgramDataTargetPath": write_result.acer_programdata_target_path.display().to_string(),
-            "acerRecoveryTargetPath": write_result.acer_recovery_target_path.display().to_string(),
+            "acerProgramDataTargetPath": write_result.acer_programdata_target_path.as_ref().map(|path| path.display().to_string()),
+            "acerRecoveryTargetPath": write_result.acer_recovery_target_path.as_ref().map(|path| path.display().to_string()),
             "targetFormat": staged.format.as_str(),
             "alternateRemoved": write_result.alternate_removed,
             "backupDir": write_result
@@ -100,15 +105,19 @@ fn validate_boot_logo_file(
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let mut header = [0u8; 12];
-    let mut file = File::open(path_ref)?;
-    let header_len = file.read(&mut header)?;
-    let format = BootLogoFormat::from_extension_and_header(&extension, &header[..header_len])?;
+    // Read once and keep the bytes: validating from a header read and then
+    // copying from the path again let the file be swapped in between.
+    let bytes = fs::read(path_ref)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_BOOT_LOGO_BYTES {
+        return Err(format!("Boot-logo image changed size while being read: {} bytes.", bytes.len()).into());
+    }
+    let header_len = bytes.len().min(12);
+    let format = BootLogoFormat::from_extension_and_header(&extension, &bytes[..header_len])?;
 
     Ok(ValidatedBootLogo {
-        path: path_ref.to_path_buf(),
         format,
-        size,
+        size: bytes.len() as u64,
+        bytes,
     })
 }
 
@@ -137,7 +146,7 @@ fn write_logo_to_esp(
     remove_file_if_exists(&temp_path)?;
     let backup_dir = backup_existing_logos(paths, &target_dir)?;
 
-    copy_file_synced(&staged.path, &temp_path)?;
+    write_bytes_synced(&staged.bytes, &temp_path)?;
     let temp_size = fs::metadata(&temp_path)?.len();
     if temp_size != staged.size {
         remove_file_if_exists(&temp_path)?;
@@ -232,6 +241,16 @@ fn rollback_from_backup(target_dir: &Path, backup_dir: Option<&Path>) -> Result<
         }
     }
 
+    Ok(())
+}
+
+fn write_bytes_synced(bytes: &[u8], destination: &Path) -> Result<(), io::Error> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    output.write_all(bytes)?;
+    output.sync_all()?;
     Ok(())
 }
 
@@ -337,9 +356,9 @@ impl BootLogoFormat {
 }
 
 struct ValidatedBootLogo {
-    path: PathBuf,
     format: BootLogoFormat,
     size: u64,
+    bytes: Vec<u8>,
 }
 
 struct BootLogoWriteResult {
@@ -347,8 +366,8 @@ struct BootLogoWriteResult {
     target_size: u64,
     alternate_removed: bool,
     backup_dir: Option<PathBuf>,
-    acer_programdata_target_path: PathBuf,
-    acer_recovery_target_path: PathBuf,
+    acer_programdata_target_path: Option<PathBuf>,
+    acer_recovery_target_path: Option<PathBuf>,
 }
 
 fn stage_logo_pair(
@@ -357,7 +376,18 @@ fn stage_logo_pair(
     target_dir: &Path,
     stage_name: &str,
 ) -> Result<StageWriteResult, Box<dyn std::error::Error + Send + Sync>> {
-    fs::create_dir_all(target_dir)?;
+    if !target_dir.is_dir() {
+        write_log_line(
+            &paths.component_log("control-boot-logo"),
+            "INFO",
+            &format!(
+                "Boot-logo {stage_name} mirror skipped: {} is not present.",
+                target_dir.display()
+            ),
+        )?;
+        return Ok(StageWriteResult { target_path: None });
+    }
+    ensure_no_reparse_points(target_dir)?;
     let target_path = target_dir.join(staged.format.target_file_name());
     let alternate_path = target_dir.join(staged.format.alternate_file_name());
     let temp_path = target_dir.join(format!(
@@ -368,7 +398,7 @@ fn stage_logo_pair(
 
     remove_file_if_exists(&temp_path)?;
     backup_existing_logo_pair(paths, target_dir, stage_name)?;
-    copy_file_synced(&staged.path, &temp_path)?;
+    write_bytes_synced(&staged.bytes, &temp_path)?;
     let temp_size = fs::metadata(&temp_path)?.len();
     if temp_size != staged.size {
         remove_file_if_exists(&temp_path)?;
@@ -392,7 +422,28 @@ fn stage_logo_pair(
         .into());
     }
 
-    Ok(StageWriteResult { target_path })
+    Ok(StageWriteResult {
+        target_path: Some(target_path),
+    })
+}
+
+/// Every component of `dir` must be a real directory. A junction or symlink
+/// planted by a local user would otherwise redirect SYSTEM's reads, deletes
+/// and writes somewhere else.
+fn ensure_no_reparse_points(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for ancestor in dir.ancestors() {
+        if ancestor.parent().is_none() {
+            break;
+        }
+        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing boot-logo mirror: {} is a symlink or junction.",
+                ancestor.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn backup_existing_logo_pair(
@@ -437,7 +488,7 @@ fn backup_existing_logo_pair(
 }
 
 struct StageWriteResult {
-    target_path: PathBuf,
+    target_path: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -644,7 +695,29 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::BootLogoFormat;
+    use super::{ensure_no_reparse_points, BootLogoFormat};
+
+    #[test]
+    fn refuses_mirror_directories_reached_through_a_junction() {
+        let base = std::env::temp_dir().join(format!("aeroforge-junction-{}", std::process::id()));
+        let real = base.join("real");
+        let link = base.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap()
+            .status;
+        assert!(status.success(), "mklink /J failed");
+
+        assert!(ensure_no_reparse_points(&real).is_ok());
+        assert!(ensure_no_reparse_points(&link).is_err());
+
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn detects_jpeg_magic() {
