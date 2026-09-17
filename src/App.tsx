@@ -20,7 +20,8 @@ import { OverclockSlider } from './components/OverclockSlider'
 import { PresetPanel } from './components/PresetPanel'
 import { ProcessorStateControl } from './components/ProcessorStateControl'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
-import { ToastStack, type AppToast } from './components/ToastStack'
+import { ToastStack } from './components/ToastStack'
+import { useToasts } from './hooks/useToasts'
 import {
   applyAutoRefreshRate,
   applyBlueLightFilter,
@@ -1120,9 +1121,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState(
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
-  const [toasts, setToasts] = useState<AppToast[]>([])
-  const toastTimersRef = useRef<Record<string, number>>({})
-  const toastSequenceRef = useRef(0)
+  const { toasts, showToast, updateToast, dismissToast, dismissNewestToast } = useToasts()
   const [settingsActionPending, setSettingsActionPending] =
     useState<SettingsActionPending>(null)
   const settingsActionPendingRef = useRef<SettingsActionPending>(null)
@@ -1711,8 +1710,6 @@ function App() {
       if (stagedPersistenceTimerRef.current !== null) {
         window.clearTimeout(stagedPersistenceTimerRef.current)
       }
-      Object.values(toastTimersRef.current).forEach((timer) => window.clearTimeout(timer))
-      toastTimersRef.current = {}
     },
     [],
   )
@@ -2353,64 +2350,7 @@ function App() {
     controlApplyInFlightRef.current = Math.max(0, controlApplyInFlightRef.current - 1)
   }
 
-  function dismissToast(id: string) {
-    const timer = toastTimersRef.current[id]
-    if (timer !== undefined) {
-      window.clearTimeout(timer)
-      delete toastTimersRef.current[id]
-    }
-    setToasts((current) => current.filter((toast) => toast.id !== id))
-  }
-
-  function dismissNewestToast() {
-    setToasts((current) => {
-      if (current.length === 0) {
-        return current
-      }
-      const newest = current[current.length - 1]
-      const timer = toastTimersRef.current[newest.id]
-      if (timer !== undefined) {
-        window.clearTimeout(timer)
-        delete toastTimersRef.current[newest.id]
-      }
-      return current.slice(0, -1)
-    })
-  }
   dismissNewestToastRef.current = dismissNewestToast
-
-  function showToast(
-    tone: AppToast['tone'],
-    title: string,
-    detail: string,
-    durationMs = 4200,
-  ) {
-    const id = `toast-${Date.now().toString(36)}-${toastSequenceRef.current++}`
-    setToasts((current) => [...current.slice(-3), { id, tone, title, detail }])
-    if (durationMs > 0) {
-      toastTimersRef.current[id] = window.setTimeout(() => dismissToast(id), durationMs)
-    }
-    return id
-  }
-
-  function updateToast(
-    id: string,
-    tone: AppToast['tone'],
-    title: string,
-    detail: string,
-    durationMs = 4200,
-  ) {
-    const timer = toastTimersRef.current[id]
-    if (timer !== undefined) {
-      window.clearTimeout(timer)
-      delete toastTimersRef.current[id]
-    }
-    setToasts((current) =>
-      current.map((toast) => (toast.id === id ? { ...toast, tone, title, detail } : toast)),
-    )
-    if (durationMs > 0) {
-      toastTimersRef.current[id] = window.setTimeout(() => dismissToast(id), durationMs)
-    }
-  }
 
   async function refreshHardwareReadiness(force = false) {
     const now = Date.now()
