@@ -9,9 +9,12 @@ import type {
   FanCurveSet,
   FanProfileId,
   GpuTuningState,
+  OcPreset,
+  PersonalSettings,
   PowerProfileId,
   ProcessorStateSettings,
 } from './backend'
+import { sanitizePresetCollections } from './presetTransfer'
 
 export const SETTINGS_EXPORT_FORMAT = 'aeroforge-control-settings' as const
 export const SETTINGS_EXPORT_VERSION = 1 as const
@@ -25,7 +28,7 @@ export type PortableSettingsPayload = {
 }
 
 export type PortableSettingsParseResult =
-  | { ok: true; payload: PortableSettingsPayload }
+  | { ok: true; payload: PortableSettingsPayload; warnings: string[] }
   | { ok: false; error: string }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -87,6 +90,20 @@ function isGpuTuning(value: unknown): value is GpuTuningState {
   )
 }
 
+function isOcPreset(value: unknown): value is OcPreset {
+  if (!isObject(value)) {
+    return false
+  }
+  return (
+    typeof value.id === 'string' &&
+    typeof value.label === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.strap === 'string' &&
+    typeof value.isCustom === 'boolean' &&
+    isGpuTuning(value.settings)
+  )
+}
+
 function isControlSnapshot(value: unknown): value is ControlSnapshot {
   if (!isObject(value)) {
     return false
@@ -102,9 +119,47 @@ function isControlSnapshot(value: unknown): value is ControlSnapshot {
     Array.isArray(value.powerPresets) &&
     Array.isArray(value.quickPresets) &&
     Array.isArray(value.ocPresets) &&
+    typeof value.activeOcSlot === 'string' &&
+    (value.ocApplyState === 'staged' || value.ocApplyState === 'live') &&
+    typeof value.ocTuningLocked === 'boolean' &&
     typeof value.fanSyncLockEnabled === 'boolean' &&
     isObject(value.personalSettings)
   )
+}
+
+function bool(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+// Mirrors the backend's serde defaults so a hand-edited or older backup lands
+// on the same values the backend would have filled in for a missing field.
+function normalizePersonalSettings(value: Record<string, unknown>): PersonalSettings {
+  const bootArt = value.selectedBootArt
+  const channel = value.updateChannel
+  const restoreHz = value.autoRefreshRateRestoreHz
+  return {
+    smartChargingEnabled: bool(value.smartChargingEnabled, true),
+    usbPowerEnabled: bool(value.usbPowerEnabled, true),
+    processorStateControlEnabled: bool(value.processorStateControlEnabled, true),
+    nvidiaTelemetryEnabled: bool(value.nvidiaTelemetryEnabled, false),
+    keepUiPrewarmed: bool(value.keepUiPrewarmed, false),
+    blueLightFilterEnabled: bool(value.blueLightFilterEnabled, false),
+    autoRefreshRateOnBatteryEnabled: bool(value.autoRefreshRateOnBatteryEnabled, false),
+    autoRefreshRateRestoreHz:
+      typeof restoreHz === 'number' && Number.isInteger(restoreHz) && restoreHz > 0
+        ? restoreHz
+        : null,
+    selectedBootArt:
+      bootArt === 'ember' || bootArt === 'arc' || bootArt === 'slate' || bootArt === 'custom'
+        ? bootArt
+        : 'ember',
+    customBootFilename:
+      typeof value.customBootFilename === 'string' && value.customBootFilename.length > 0
+        ? value.customBootFilename
+        : 'custom-boot.png',
+    updateChannel: channel === 'stable' || channel === 'preview' ? channel : 'stable',
+    checkForUpdatesOnLaunch: bool(value.checkForUpdatesOnLaunch, true),
+  }
 }
 
 export function buildPortableSettings(
@@ -152,11 +207,25 @@ export function parsePortableSettings(raw: string): PortableSettingsParseResult 
     }
   }
 
-  if (!isControlSnapshot(parsed.controls)) {
+  const controls = parsed.controls
+  if (!isControlSnapshot(controls)) {
     return {
       ok: false,
       error: 'Settings file is missing a valid controls snapshot (profiles, curves, or presets).',
     }
+  }
+
+  // Anything that gets past here is committed straight into UI state and then
+  // saved; a malformed preset would make every later save fail silently.
+  const presets = sanitizePresetCollections(
+    controls.fanPresets,
+    controls.powerPresets,
+    controls.quickPresets,
+  )
+  const ocPresets = controls.ocPresets.filter(isOcPreset)
+  const warnings = [...presets.warnings]
+  if (ocPresets.length !== controls.ocPresets.length) {
+    warnings.push(`Skipped ${controls.ocPresets.length - ocPresets.length} invalid GPU preset(s).`)
   }
 
   return {
@@ -169,8 +238,16 @@ export function parsePortableSettings(raw: string): PortableSettingsParseResult 
           ? parsed.exportedAtUnix
           : Math.floor(Date.now() / 1000),
       appVersion: typeof parsed.appVersion === 'string' ? parsed.appVersion : null,
-      controls: parsed.controls,
+      controls: {
+        ...controls,
+        ocPresets,
+        fanPresets: presets.fanPresets,
+        powerPresets: presets.powerPresets,
+        quickPresets: presets.quickPresets,
+        personalSettings: normalizePersonalSettings(controls.personalSettings),
+      },
     },
+    warnings,
   }
 }
 

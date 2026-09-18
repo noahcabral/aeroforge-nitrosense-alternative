@@ -127,6 +127,9 @@ describe('parsePortableSettings', () => {
     ['gpuTuning', { coreClockMhz: 'fast' }],
     ['fanCurves', { cpu: [{ tempC: 30 }], gpu: [] }],
     ['fanPresets', 'not-an-array'],
+    ['ocPresets', null],
+    ['activeOcSlot', 3],
+    ['ocApplyState', 'pending'],
     ['personalSettings', null],
     ['fanSyncLockEnabled', 'yes'],
   ])('rejects a controls snapshot with a bad %s', (key, value) => {
@@ -134,6 +137,53 @@ describe('parsePortableSettings', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.error).toContain('controls snapshot')
+    }
+  })
+
+  it('drops malformed presets instead of letting them poison later saves', () => {
+    const result = parsePortableSettings(
+      withControls({
+        fanPresets: [
+          { id: 'ok', name: 'Quiet', profileId: 'auto', curves: controls.fanCurves },
+          { id: 5, profileId: 'nope' },
+        ],
+        powerPresets: [{ id: 'p', name: 'x', profileId: 'turbo', customBase: 'nope' }],
+        quickPresets: [{ id: 'q', name: 'Combo', fanPresetId: 'ok', powerPresetId: 'p' }],
+        ocPresets: [{ id: 'daily', isCustom: false }],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.payload.controls.fanPresets.map((preset) => preset.id)).toEqual(['ok'])
+      expect(result.payload.controls.powerPresets).toEqual([])
+      expect(result.payload.controls.quickPresets).toEqual([
+        { id: 'q', name: 'Combo', fanPresetId: 'ok', powerPresetId: null },
+      ])
+      expect(result.payload.controls.ocPresets).toEqual([])
+      expect(result.warnings).toHaveLength(3)
+    }
+  })
+
+  it('normalizes personal settings to the backend defaults', () => {
+    const result = parsePortableSettings(
+      withControls({
+        personalSettings: {
+          smartChargingEnabled: 'yes',
+          autoRefreshRateRestoreHz: '144',
+          selectedBootArt: 'neon',
+          updateChannel: 'nightly',
+          customBootFilename: '',
+          keepUiPrewarmed: true,
+        },
+      }),
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.payload.controls.personalSettings).toEqual({
+        ...controls.personalSettings,
+        keepUiPrewarmed: true,
+      })
+      expect(result.warnings).toEqual([])
     }
   })
 

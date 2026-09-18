@@ -213,32 +213,17 @@ export function buildPresetPack(input: {
   }
 }
 
-export function parsePresetPack(raw: string): ParsedPresetPack {
+/**
+ * Drops malformed presets and combos that point at nothing, so every importer
+ * (preset packs and full settings backups) hands the backend the same shape it
+ * would have produced itself.
+ */
+export function sanitizePresetCollections(
+  fanSource: unknown[],
+  powerSource: unknown[],
+  quickSource: unknown[],
+) {
   const warnings: string[] = []
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    throw new Error('Preset file is not valid JSON.')
-  }
-
-  if (!isObject(parsed)) {
-    throw new Error('Preset file root must be an object.')
-  }
-
-  if (parsed.kind !== PRESET_PACK_KIND) {
-    throw new Error('This file is not an AeroForge preset pack.')
-  }
-
-  const schemaVersion = Number(parsed.schemaVersion ?? 1)
-  if (!Number.isFinite(schemaVersion) || schemaVersion > PRESET_PACK_SCHEMA_VERSION) {
-    throw new Error(`Unsupported preset pack schema version: ${parsed.schemaVersion}`)
-  }
-
-  const fanSource = Array.isArray(parsed.fanPresets) ? parsed.fanPresets : []
-  const powerSource = Array.isArray(parsed.powerPresets) ? parsed.powerPresets : []
-  const quickSource = Array.isArray(parsed.quickPresets) ? parsed.quickPresets : []
-
   const fanPresets = fanSource
     .map((item, index) => sanitizeFanPreset(item, index))
     .filter((item): item is FanControlPreset => item !== null)
@@ -264,6 +249,36 @@ export function parsePresetPack(raw: string): ParsedPresetPack {
       `Skipped ${quickSource.length - quickPresets.length} combo preset(s) with missing references.`,
     )
   }
+
+  return { fanPresets, powerPresets, quickPresets, warnings }
+}
+
+export function parsePresetPack(raw: string): ParsedPresetPack {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('Preset file is not valid JSON.')
+  }
+
+  if (!isObject(parsed)) {
+    throw new Error('Preset file root must be an object.')
+  }
+
+  if (parsed.kind !== PRESET_PACK_KIND) {
+    throw new Error('This file is not an AeroForge preset pack.')
+  }
+
+  const schemaVersion = Number(parsed.schemaVersion ?? 1)
+  if (!Number.isFinite(schemaVersion) || schemaVersion > PRESET_PACK_SCHEMA_VERSION) {
+    throw new Error(`Unsupported preset pack schema version: ${parsed.schemaVersion}`)
+  }
+
+  const { fanPresets, powerPresets, quickPresets, warnings } = sanitizePresetCollections(
+    Array.isArray(parsed.fanPresets) ? parsed.fanPresets : [],
+    Array.isArray(parsed.powerPresets) ? parsed.powerPresets : [],
+    Array.isArray(parsed.quickPresets) ? parsed.quickPresets : [],
+  )
 
   if (fanPresets.length === 0 && powerPresets.length === 0 && quickPresets.length === 0) {
     throw new Error('Preset pack did not contain any usable presets.')

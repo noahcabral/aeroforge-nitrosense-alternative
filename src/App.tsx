@@ -3112,12 +3112,13 @@ function App() {
           parsed.payload.controls.personalSettings.checkForUpdatesOnLaunch,
       })
 
+      const warningSuffix = parsed.warnings.length > 0 ? ` ${parsed.warnings.join(' ')}` : ''
       showToast(
         'success',
         'Settings restored',
         parsed.payload.appVersion
-          ? `Imported backup from AeroForge ${parsed.payload.appVersion}. Re-apply power/fan modes if you want them live on hardware.`
-          : 'Imported backup. Re-apply power/fan modes if you want them live on hardware.',
+          ? `Imported backup from AeroForge ${parsed.payload.appVersion}. Re-apply power/fan modes if you want them live on hardware.${warningSuffix}`
+          : `Imported backup. Re-apply power/fan modes if you want them live on hardware.${warningSuffix}`,
       )
       pushDebugEvent('portable settings imported')
     } catch (error) {
