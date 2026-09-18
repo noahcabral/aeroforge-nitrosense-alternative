@@ -785,7 +785,7 @@ fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
         .unwrap_or_else(|| vec![0]);
     let parameters = [0u16];
 
-    let result = unsafe {
+    let result = super::process::with_sta_com(|| unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
@@ -794,7 +794,7 @@ fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
             directory.as_ptr(),
             SW_SHOWNORMAL,
         )
-    };
+    });
     let result_code = result as isize;
     if result_code <= 32 {
         return Err(io::Error::other(format!(

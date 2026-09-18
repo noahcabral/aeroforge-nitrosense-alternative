@@ -51,8 +51,37 @@ fn apply_hidden_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn apply_hidden_window(_command: &mut Command) {}
 
+/// Run `work` with COM initialized as an STA. ShellExecuteW wants one, and the
+/// blocking-thread pool the commands run on does not set it up.
+#[cfg(windows)]
+pub fn with_sta_com<T>(work: impl FnOnce() -> T) -> T {
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+
+    let init = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
+    let result = work();
+    // S_OK and S_FALSE both need balancing; RPC_E_CHANGED_MODE means the thread
+    // already has an MTA that is not ours to touch.
+    if init >= 0 {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn sta_com_nests_and_returns_the_result() {
+        assert_eq!(super::with_sta_com(|| super::with_sta_com(|| 7)), 7);
+    }
+
     #[test]
     fn system32_path_resolves_tools_under_the_windows_directory() {
         let reg = super::system32_path("reg");

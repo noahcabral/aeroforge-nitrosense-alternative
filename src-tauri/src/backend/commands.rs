@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::{
     blue_light, boot_logo, cpu_clock, display_refresh, hardware_readiness,
@@ -33,41 +33,61 @@ pub fn get_backend_contract(state: State<'_, BackendState>) -> BackendContract {
     state.contract()
 }
 
-#[tauri::command]
-pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
-    match service_pipe::fetch_service_status() {
-        Ok(status) => status,
-        Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
-    }
+/// Sync commands run on the main thread, so anything that waits on the service
+/// pipe, a child process, the network or a display change goes through here.
+async fn off_main<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("{what} worker failed: {error}"))
 }
 
 #[tauri::command]
-pub fn get_hardware_readiness_snapshot() -> HardwareReadinessSnapshot {
-    hardware_readiness::snapshot()
+pub async fn get_service_status() -> Result<ServiceStatus, String> {
+    off_main(
+        "Service status",
+        || match service_pipe::fetch_service_status() {
+            Ok(status) => status,
+            Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-pub fn repair_hardware_prerequisites() -> RepairLaunchResult {
-    hardware_readiness::launch_repair()
+pub async fn get_hardware_readiness_snapshot() -> Result<HardwareReadinessSnapshot, String> {
+    off_main("Hardware readiness", hardware_readiness::snapshot).await
 }
 
 #[tauri::command]
-pub fn start_hardware_service() -> ServiceStartResult {
-    hardware_readiness::start_installed_service()
+pub async fn repair_hardware_prerequisites() -> Result<RepairLaunchResult, String> {
+    off_main("Prerequisite repair", hardware_readiness::launch_repair).await
 }
 
 #[tauri::command]
-pub fn request_service_heal() -> ServiceHealResult {
-    hardware_readiness::request_service_heal()
+pub async fn start_hardware_service() -> Result<ServiceStartResult, String> {
+    off_main("Service start", hardware_readiness::start_installed_service).await
 }
 
 #[tauri::command]
-pub fn get_capability_snapshot(state: State<'_, BackendState>) -> CapabilitySnapshot {
+pub async fn request_service_heal() -> Result<ServiceHealResult, String> {
+    off_main("Service heal", hardware_readiness::request_service_heal).await
+}
+
+#[tauri::command]
+pub async fn get_capability_snapshot(
+    state: State<'_, BackendState>,
+) -> Result<CapabilitySnapshot, String> {
     let desktop = state.capabilities();
-    service_pipe::fetch_cached_capabilities()
-        .or_else(|_| service_pipe::fetch_capabilities())
-        .map(|service| merge_capabilities(desktop.clone(), service))
-        .unwrap_or(desktop)
+    off_main("Capability snapshot", move || {
+        service_pipe::fetch_cached_capabilities()
+            .or_else(|_| service_pipe::fetch_capabilities())
+            .map(|service| merge_capabilities(desktop.clone(), service))
+            .unwrap_or(desktop)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -76,14 +96,20 @@ pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
 }
 
 #[tauri::command]
-pub fn get_telemetry_snapshot(state: State<'_, BackendState>) -> TelemetrySnapshot {
-    let mut telemetry = service_pipe::fetch_cached_telemetry()
-        .or_else(|_| service_pipe::fetch_telemetry())
-        .unwrap_or_else(|_| state.telemetry());
+pub async fn get_telemetry_snapshot(
+    state: State<'_, BackendState>,
+) -> Result<TelemetrySnapshot, String> {
+    let fallback = state.telemetry();
+    off_main("Telemetry snapshot", move || {
+        let mut telemetry = service_pipe::fetch_cached_telemetry()
+            .or_else(|_| service_pipe::fetch_telemetry())
+            .unwrap_or(fallback);
 
-    refresh_cpu_clock_if_missing(&mut telemetry);
+        refresh_cpu_clock_if_missing(&mut telemetry);
 
-    telemetry
+        telemetry
+    })
+    .await
 }
 
 #[tauri::command]
@@ -134,28 +160,32 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 #[tauri::command]
-pub fn get_live_control_snapshot(
-    _state: State<'_, BackendState>,
-) -> Result<LiveControlSnapshot, String> {
-    service_pipe::fetch_live_controls().map_err(|error| error.to_string())
+pub async fn get_live_control_snapshot() -> Result<LiveControlSnapshot, String> {
+    off_main("Live control snapshot", service_pipe::fetch_live_controls)
+        .await?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn get_backend_bootstrap(state: State<'_, BackendState>) -> BackendBootstrap {
+pub async fn get_backend_bootstrap(
+    state: State<'_, BackendState>,
+) -> Result<BackendBootstrap, String> {
     let poll = get_backend_poll_snapshot(state.clone());
+    let capabilities = get_capability_snapshot(state.clone()).await?;
+    let hardware_readiness = get_hardware_readiness_snapshot().await?;
 
-    BackendBootstrap {
+    Ok(BackendBootstrap {
         shell: shell_status(),
         service: poll.service,
         contract: state.contract(),
-        capabilities: get_capability_snapshot(state.clone()),
-        hardware_readiness: get_hardware_readiness_snapshot(),
+        capabilities,
+        hardware_readiness,
         controls: state.controls(),
         telemetry: poll.telemetry,
         live_controls: poll.live_controls,
         persistence: state.persistence_status(),
         update_status: state.update_status(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -196,29 +226,42 @@ pub fn append_performance_log(
 }
 
 #[tauri::command]
-pub fn check_for_updates(
+pub async fn check_for_updates(
+    app: AppHandle,
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    updater::refresh_status(state.updater(), resolved_channel).map_err(|error| error.to_string())
+    off_main("Update check", move || {
+        updater::refresh_status(app.state::<BackendState>().updater(), resolved_channel)
+    })
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn stage_update_download(
+pub async fn stage_update_download(
+    app: AppHandle,
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    updater::stage_latest_update(state.updater(), resolved_channel)
-        .map_err(|error| error.to_string())
+    off_main("Update download", move || {
+        updater::stage_latest_update(app.state::<BackendState>().updater(), resolved_channel)
+    })
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn install_staged_update(state: State<'_, BackendState>) -> Result<UpdateStatus, String> {
-    updater::launch_staged_install(state.updater()).map_err(|error| error.to_string())
+pub async fn install_staged_update(app: AppHandle) -> Result<UpdateStatus, String> {
+    off_main("Update install", move || {
+        updater::launch_staged_install(app.state::<BackendState>().updater())
+    })
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -384,17 +427,17 @@ pub async fn apply_smart_charging(
 }
 
 #[tauri::command]
-pub fn apply_auto_refresh_rate(
+pub async fn apply_auto_refresh_rate(
     enabled: bool,
     on_battery: bool,
     state: State<'_, BackendState>,
 ) -> Result<super::models::DisplayRefreshApplyResult, String> {
     let mut controls = state.controls();
-    let applied = display_refresh::sync_auto_refresh_rate(
-        enabled,
-        on_battery,
-        controls.personal_settings.auto_refresh_rate_restore_hz,
-    )
+    let saved_restore_hz = controls.personal_settings.auto_refresh_rate_restore_hz;
+    let applied = off_main("Refresh rate apply", move || {
+        display_refresh::sync_auto_refresh_rate(enabled, on_battery, saved_restore_hz)
+    })
+    .await?
     .map_err(|error| error.to_string())?;
 
     controls
@@ -419,11 +462,14 @@ pub fn apply_auto_refresh_rate(
 }
 
 #[tauri::command]
-pub fn set_nvidia_telemetry_enabled(
+pub async fn set_nvidia_telemetry_enabled(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<NvidiaTelemetryApplyResult, String> {
-    let service_result = service_pipe::apply_telemetry_settings(enabled);
+    let service_result = off_main("Telemetry settings apply", move || {
+        service_pipe::apply_telemetry_settings(enabled)
+    })
+    .await?;
 
     let mut controls = state.controls();
     controls.personal_settings.nvidia_telemetry_enabled = enabled;
@@ -540,13 +586,17 @@ pub async fn apply_power_profile(
 }
 
 #[tauri::command]
-pub fn apply_gpu_tuning(
+pub async fn apply_gpu_tuning(
     app: AppHandle,
     tuning: GpuTuningState,
     active_oc_slot: String,
     state: State<'_, BackendState>,
 ) -> Result<super::models::GpuTuningApplyResult, String> {
-    let applied = service_pipe::apply_gpu_tuning(tuning).map_err(|error| error.to_string())?;
+    let applied = off_main("GPU tuning apply", move || {
+        service_pipe::apply_gpu_tuning(tuning)
+    })
+    .await?
+    .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_power_profile = PowerProfileId::Custom;
@@ -642,18 +692,22 @@ pub async fn cancel_fan_speed_calibration(
 }
 
 #[tauri::command]
-pub fn apply_boot_logo(
+pub async fn apply_boot_logo(
     file_name: String,
     image_base64: String,
     selected_boot_art: Option<String>,
     state: State<'_, BackendState>,
 ) -> Result<BootLogoApplyResult, String> {
-    let image_path =
-        boot_logo::save_uploaded_boot_logo(&state.config_root(), &file_name, &image_base64)
-            .map_err(|error| error.to_string())?;
-    let image_path_string = image_path.display().to_string();
-    let applied = service_pipe::apply_boot_logo(image_path_string, Some(file_name.clone()))
-        .map_err(|error| error.to_string())?;
+    let config_root = state.config_root();
+    let upload_name = file_name.clone();
+    let applied = off_main("Boot logo apply", move || {
+        let image_path =
+            boot_logo::save_uploaded_boot_logo(&config_root, &upload_name, &image_base64)
+                .map_err(|error| error.to_string())?;
+        service_pipe::apply_boot_logo(image_path.display().to_string(), Some(upload_name))
+            .map_err(|error| error.to_string())
+    })
+    .await??;
 
     let mut controls = state.controls();
     controls.personal_settings.selected_boot_art = selected_boot_art

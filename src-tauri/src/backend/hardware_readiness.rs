@@ -544,7 +544,7 @@ fn run_elevated_powershell(parameters: &str) -> Result<(), String> {
     let executable = wide(super::process::system32_path("powershell").as_os_str());
     let parameters = wide(OsStr::new(parameters));
 
-    let result = unsafe {
+    let result = super::process::with_sta_com(|| unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
@@ -553,7 +553,7 @@ fn run_elevated_powershell(parameters: &str) -> Result<(), String> {
             std::ptr::null(),
             SW_HIDE,
         )
-    };
+    });
 
     let result_code = result as isize;
     if result_code > 32 {
