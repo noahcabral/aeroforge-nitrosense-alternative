@@ -1918,9 +1918,18 @@ function App() {
 
     let mounted = true
     const unlisteners: Array<() => void> = []
+    // listen() resolves after cleanup on a fast unmount (StrictMode double-mount in dev);
+    // drop such a listener immediately instead of leaking it into a dead array.
+    const track = (unlisten: () => void) => {
+      if (mounted) {
+        unlisteners.push(unlisten)
+      } else {
+        unlisten()
+      }
+    }
 
     async function wireTrayEvents() {
-      unlisteners.push(
+      track(
         await listen<TrayControlEventPayload>('tray-control-updated', (event) => {
           if (!mounted) {
             return
@@ -1959,7 +1968,7 @@ function App() {
         }),
       )
 
-      unlisteners.push(
+      track(
         await listen<TrayControlErrorPayload>('tray-control-error', (event) => {
           if (!mounted) {
             return
@@ -1970,7 +1979,7 @@ function App() {
         }),
       )
 
-      unlisteners.push(
+      track(
         await listen('tray-window-will-hide', () => {
           flushStagedControlsPersist()
         }),
