@@ -351,7 +351,7 @@ pub fn apply_quiet_auto_fan_policy(
     let layer_statuses = vec![
         classify_behavior_sequence_status(&behavior_results),
         classify_speed_status(&speed_results),
-        classify_fan_verification_status(&verification_after.describe()),
+        classify_fan_verification_status(&verification_after),
     ];
 
     Ok(AppliedFanControlSnapshot {
@@ -698,6 +698,7 @@ fn apply_firmware_wmi_fan_control(
     let power_after = read_power_readback(paths);
     let power_detail = format_power_limit_delta(&power_before, &power_after);
 
+    let verification = build_fan_verification();
     let readback = Some(json!({
         "backend": "acer-gaming-wmi",
         "namespace": "ROOT\\WMI",
@@ -719,14 +720,14 @@ fn apply_firmware_wmi_fan_control(
                 "accepted": wmi_output_accepted(result),
             })
         }).collect::<Vec<_>>(),
-        "verification": build_fan_verification(),
+        "verification": verification,
         "nvidiaPower": {
             "before": power_before.clone(),
             "after": power_after.clone(),
         },
     }));
 
-    let verification = build_fan_verification_detail();
+    let verification_detail = verification.detail();
     let detail = format!(
         "{} {}",
         build_apply_detail(
@@ -735,7 +736,7 @@ fn apply_firmware_wmi_fan_control(
             behavior_input,
             cpu_speed_percent,
             gpu_speed_percent,
-            &verification,
+            &verification_detail,
         ),
         power_detail
     );
@@ -838,6 +839,7 @@ fn apply_custom_wmi_fan_control(
         speed_results.extend(reinforcement);
     }
 
+    let verification = build_fan_verification();
     let readback = Some(json!({
         "backend": "acer-gaming-wmi",
         "namespace": "ROOT\\WMI",
@@ -847,10 +849,10 @@ fn apply_custom_wmi_fan_control(
         "strategyReason": strategy.reason,
         "behavior": behavior_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
-        "verification": build_fan_verification(),
+        "verification": verification,
     }));
 
-    let verification = build_fan_verification_detail();
+    let verification_detail = verification.detail();
     let detail = build_custom_apply_detail(
         &profile_id,
         context,
@@ -858,7 +860,7 @@ fn apply_custom_wmi_fan_control(
         &behavior_results,
         cpu_speed_percent,
         gpu_speed_percent,
-        &verification,
+        &verification_detail,
     );
     let layer_statuses = vec![
         classify_behavior_sequence_status(&behavior_results),
@@ -1006,14 +1008,12 @@ fn classify_speed_status(results: &[super::acer_wmi::AcerWmiMethodResult]) -> Co
     ControlLayerStatus::applied("fan-speed-targets", "Fan Speed Targets", detail)
 }
 
-fn classify_fan_verification_status(detail: &str) -> ControlLayerStatus {
-    if detail
-        .to_ascii_lowercase()
-        .contains("verification is unavailable")
-    {
-        ControlLayerStatus::unavailable("fan-rpm-readback", "Fan RPM Readback", detail)
-    } else {
+fn classify_fan_verification_status(verification: &FanVerification) -> ControlLayerStatus {
+    let detail = verification.detail();
+    if verification.telemetry_available {
         ControlLayerStatus::applied("fan-rpm-readback", "Fan RPM Readback", detail)
+    } else {
+        ControlLayerStatus::unavailable("fan-rpm-readback", "Fan RPM Readback", detail)
     }
 }
 
@@ -1438,21 +1438,6 @@ fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentity {
     }
 }
 
-fn build_fan_verification_detail() -> String {
-    let verification = build_fan_verification();
-    if verification.telemetry_available {
-        format!(
-            "Immediate fan telemetry readback {}.",
-            verification.describe()
-        )
-    } else {
-        format!(
-            "Immediate fan telemetry verification is unavailable on this machine. {}",
-            verification.describe()
-        )
-    }
-}
-
 fn build_fan_verification() -> FanVerification {
     let mut attempts = Vec::new();
     for attempt in 0..3 {
@@ -1501,6 +1486,17 @@ impl FanVerification {
             cpu_temp_c: snapshot.cpu_temp_c,
             gpu_temp_c: snapshot.gpu_temp_c,
             system_temp_c: snapshot.system_temp_c,
+        }
+    }
+
+    fn detail(&self) -> String {
+        if self.telemetry_available {
+            format!("Immediate fan telemetry readback {}.", self.describe())
+        } else {
+            format!(
+                "Immediate fan telemetry verification is unavailable on this machine. {}",
+                self.describe()
+            )
         }
     }
 
@@ -1657,10 +1653,30 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_custom_curve_fan_percent, cool_fan_curve_set, interpolate_curve_speed,
-        sanitize_curve_points, FanCurvePoint,
+        clamp_custom_curve_fan_percent, classify_fan_verification_status, cool_fan_curve_set,
+        interpolate_curve_speed, sanitize_curve_points, FanCurvePoint, FanVerification,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
+    use crate::workers::control::models::ControlLayerState;
+
+    #[test]
+    fn fan_verification_status_tracks_telemetry_availability() {
+        let missing = FanVerification::default();
+        assert_eq!(
+            classify_fan_verification_status(&missing).state,
+            ControlLayerState::Unavailable
+        );
+
+        let present = FanVerification {
+            telemetry_available: true,
+            cpu_fan_rpm: Some(2400),
+            ..FanVerification::default()
+        };
+        assert_eq!(
+            classify_fan_verification_status(&present).state,
+            ControlLayerState::Applied
+        );
+    }
 
     #[test]
     fn cool_curve_matches_adaptive_targets() {

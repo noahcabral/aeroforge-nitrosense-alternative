@@ -78,7 +78,7 @@ pub struct FanCurveSet {
     pub gpu: Vec<FanCurvePoint>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlLayerState {
     Applied,
