@@ -27,13 +27,13 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: {
-      // Rust build output and packaging folders hold tens of thousands of files the
-      // UI never imports. Walking them stalls the dev server on slow filesystems.
+      // The Rust crates and packaging folders hold tens of thousands of files the
+      // UI never imports. Walking them stalls the dev server on slow filesystems,
+      // and a Rust edit mid-session can crash the watcher with EINVAL on cloud-synced
+      // mounts. Cargo watches the crates itself; Vite only needs src/ and public/.
       ignored: [
-        '**/aeroforge-service/target/**',
-        '**/src-tauri/target/**',
-        '**/src-tauri/target-*/**',
-        '**/src-tauri/gen/**',
+        '**/aeroforge-service/**',
+        '**/src-tauri/**',
         '**/portable/**',
         '**/third_party/**',
         '**/AeroForge-Debug-*/**',
