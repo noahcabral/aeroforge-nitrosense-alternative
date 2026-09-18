@@ -3,7 +3,10 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -155,10 +158,13 @@ pub fn write_log_line(
 }
 
 /// Write JSON/text snapshots atomically so readers never observe a partial file.
+/// Each call gets its own temp file so two writers of the same path never share one.
 pub fn write_text_atomically(
     path: &Path,
     content: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let parent = path.parent().ok_or("snapshot path has no parent directory")?;
     fs::create_dir_all(parent)?;
 
@@ -168,7 +174,7 @@ pub fn write_text_atomically(
             .and_then(|name| name.to_str())
             .unwrap_or("snapshot"),
         std::process::id(),
-        timestamp_string()
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
 
     {
@@ -197,21 +203,32 @@ fn replace_file(
 
     let source_w = wide(source);
     let target_w = wide(target);
-    let moved = unsafe {
-        MoveFileExW(
-            source_w.as_ptr(),
-            target_w.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-
-    if moved == 0 {
-        let error = std::io::Error::last_os_error();
-        let _ = fs::remove_file(source);
-        return Err(error.into());
+    // A replace loses briefly to another replace of the same target, or to a
+    // scanner/reader holding it open, as ACCESS_DENIED or SHARING_VIOLATION;
+    // both clear within milliseconds, so retry before giving up.
+    let mut error = None;
+    for attempt in 0..10 {
+        let moved = unsafe {
+            MoveFileExW(
+                source_w.as_ptr(),
+                target_w.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let last = std::io::Error::last_os_error();
+        let transient = matches!(last.raw_os_error(), Some(5 | 32));
+        error = Some(last);
+        if !transient || attempt == 9 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    Ok(())
+    let _ = fs::remove_file(source);
+    Err(error.expect("replace loop ran at least once").into())
 }
 
 #[cfg(not(windows))]
@@ -255,6 +272,31 @@ mod tests {
         fs::write(&log_path, vec![b'y'; LOG_ROTATE_BYTES as usize]).expect("seed again");
         write_log_line(&log_path, "INFO", "second").expect("write again");
         assert!(fs::read(&rotated).expect("rotated again").starts_with(b"y"));
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_never_leave_a_torn_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("snapshot.json");
+        let bodies: Vec<String> = (0..8u8)
+            .map(|writer| String::from_utf8(vec![b'a' + writer; 64 * 1024]).expect("ascii"))
+            .collect();
+
+        std::thread::scope(|scope| {
+            for body in &bodies {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        write_text_atomically(&path, body).expect("write");
+                    }
+                });
+            }
+        });
+
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            bodies.contains(&content),
+            "final file is a torn mix of writers"
+        );
     }
 
     #[test]

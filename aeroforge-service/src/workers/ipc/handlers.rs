@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::Mutex};
 
 use serde_json::{json, Value};
 
@@ -128,6 +128,10 @@ fn serialize_applied(what: &str, applied: impl serde::Serialize) -> Value {
     })
 }
 
+// Clients are handled concurrently, so the first-use check and the token write
+// happen under one lock: two first clients can never both see "no token yet".
+static TOKEN_LOCK: Mutex<()> = Mutex::new(());
+
 fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Result<(), String> {
     let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(
@@ -138,12 +142,15 @@ fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Res
         return Err("Hardware write denied: IPC write token shape was invalid.".into());
     }
 
+    let _guard = TOKEN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let token_path = paths.state_dir.join("ipc-write-token.txt");
     if let Ok(existing) = fs::read_to_string(&token_path) {
         let existing = existing.trim();
         // Reclaim when the on-disk token is missing shape (corrupt install / partial wipe).
         if existing.is_empty() || !is_valid_write_token(existing) {
-            write_token_file(paths, &token_path, token)?;
+            write_token_file(&token_path, token)?;
             return Ok(());
         }
         if constant_time_eq(existing.as_bytes(), token.as_bytes()) {
@@ -155,35 +162,12 @@ fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Res
         );
     }
 
-    write_token_file(paths, &token_path, token)?;
+    write_token_file(&token_path, token)?;
     Ok(())
 }
 
-fn write_token_file(
-    paths: &ServicePaths,
-    token_path: &std::path::Path,
-    token: &str,
-) -> Result<(), String> {
-    fs::create_dir_all(&paths.state_dir).map_err(|error| error.to_string())?;
-    let temp_path = paths
-        .state_dir
-        .join(format!("ipc-write-token.{}.tmp", std::process::id()));
-    fs::write(&temp_path, token).map_err(|error| error.to_string())?;
-    if let Err(error) = fs::rename(&temp_path, token_path) {
-        let _ = fs::remove_file(&temp_path);
-        // Another client may have created the token between our read and write.
-        if let Ok(existing) = fs::read_to_string(token_path) {
-            if constant_time_eq(existing.trim().as_bytes(), token.as_bytes()) {
-                return Ok(());
-            }
-            return Err(
-                "Hardware write denied: IPC write token did not match this service installation. Repair or reinstall AeroForge if the desktop and service tokens are out of sync."
-                    .into(),
-            );
-        }
-        return Err(error.to_string());
-    }
-    Ok(())
+fn write_token_file(token_path: &Path, token: &str) -> Result<(), String> {
+    crate::paths::write_text_atomically(token_path, token).map_err(|error| error.to_string())
 }
 
 fn is_valid_write_token(token: &str) -> bool {
