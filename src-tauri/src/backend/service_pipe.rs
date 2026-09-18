@@ -319,8 +319,12 @@ pub fn fetch_cached_telemetry(
 
 pub fn fetch_cached_live_controls(
 ) -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    // The control snapshot is rewritten on apply, not on a timer, so its age
+    // says nothing about the service's health; the caller already gates on a
+    // fresh supervisor. An age check here blanked layer statuses, fan
+    // readback and the quiet-auto thermal warning 20 s after every apply.
     let path = control_file_path();
-    let (raw, updated_at_unix) = read_fresh_cached_snapshot(&path)?;
+    let (raw, updated_at_unix) = (fs::read_to_string(&path)?, file_modified_unix(&path)?);
     let mut snapshot = serde_json::from_str::<LiveControlSnapshot>(&raw)?;
     snapshot.cache_updated_at_unix = Some(updated_at_unix);
     Ok(snapshot)
