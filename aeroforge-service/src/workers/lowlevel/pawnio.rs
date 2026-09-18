@@ -1,9 +1,4 @@
-use std::{
-    env,
-    ffi::CString,
-    path::{Path, PathBuf},
-    ptr::null_mut,
-};
+use std::{env, ffi::CString, path::PathBuf, ptr::null_mut};
 
 use libloading::Library;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -260,7 +255,7 @@ fn resolve_dll_path(
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(value) = env::var(PAWNIO_DLL_ENV) {
         let path = PathBuf::from(value.trim());
-        if is_existing_file(&path) {
+        if path.is_file() {
             return Ok(path);
         }
 
@@ -272,7 +267,7 @@ fn resolve_dll_path(
     }
 
     for path in pawnio_dll_candidates(paths) {
-        if is_existing_file(&path) {
+        if path.is_file() {
             return Ok(path);
         }
     }
@@ -288,7 +283,7 @@ fn resolve_module_path(
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(value) = env::var(PAWNIO_MODULE_ENV) {
         let path = PathBuf::from(value.trim());
-        if is_existing_file(&path) {
+        if path.is_file() {
             return Ok(path);
         }
         return Err(format!(
@@ -299,22 +294,15 @@ fn resolve_module_path(
     }
 
     let path = service_driver_dir(paths).join(PAWNIO_DEFAULT_MODULE_NAME);
-    if is_existing_file(&path) {
+    if path.is_file() {
         Ok(path)
     } else {
         Err(format!(
             "PawnIO is enabled, but no RAPL module was found. Set {PAWNIO_MODULE_ENV} or place {PAWNIO_DEFAULT_MODULE_NAME} under {}.",
-            path.parent()
-                .map(Path::display)
-                .map(|display| display.to_string())
-                .unwrap_or_else(|| service_driver_dir(paths).display().to_string())
+            service_driver_dir(paths).display()
         )
         .into())
     }
-}
-
-fn is_existing_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn pawnio_dll_candidates(paths: &ServicePaths) -> Vec<PathBuf> {
@@ -342,11 +330,7 @@ fn pawnio_dll_candidates(paths: &ServicePaths) -> Vec<PathBuf> {
 }
 
 fn service_driver_dir(paths: &ServicePaths) -> PathBuf {
-    paths
-        .state_dir
-        .parent()
-        .map(|root| root.join("drivers"))
-        .unwrap_or_else(|| paths.state_dir.join("drivers"))
+    paths.service_root().join("drivers")
 }
 
 fn hresult_to_result(

@@ -20,7 +20,7 @@ use super::{
     cache::{refresh_cached_value, RefreshState},
     models::GpuSnapshot,
 };
-use crate::paths::{write_log_line, ServicePaths};
+use crate::paths::{system32_path, write_log_line, ServicePaths};
 
 // NVML constants
 
@@ -353,7 +353,7 @@ fn query_nvml_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send
 }
 
 fn load_nvml_api() -> Option<NvmlApi> {
-    let library = unsafe { Library::new(r"C:\Windows\System32\nvml.dll").ok()? };
+    let library = unsafe { Library::new(system32_path("nvml.dll")).ok()? };
 
     unsafe {
         let init_v2: NvmlInitV2 = **library.get::<Symbol<NvmlInitV2>>(b"nvmlInit_v2\0").ok()?;

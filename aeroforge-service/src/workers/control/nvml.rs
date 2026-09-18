@@ -5,14 +5,11 @@ use std::{
 
 use libloading::Library;
 
-use crate::paths::{write_log_line, ServicePaths};
+use crate::paths::{system32_path, write_log_line, ServicePaths};
 
 use super::models::GpuTuningState;
 
 const NVML_SUCCESS: i32 = 0;
-const NVML_ERROR_NOT_SUPPORTED: i32 = 3;
-const NVML_ERROR_NO_PERMISSION: i32 = 4;
-const NVML_ERROR_GPU_IS_LOST: i32 = 15;
 
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const NVML_CLOCK_MEM: u32 = 2;
@@ -95,7 +92,7 @@ pub fn apply_gpu_tuning(paths: &ServicePaths, tuning: &GpuTuningState) -> NvmlGp
 
 impl NvmlApi {
     fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let library = unsafe { Library::new(r"C:\Windows\System32\nvml.dll") }?;
+        let library = unsafe { Library::new(system32_path("nvml.dll")) }?;
 
         unsafe {
             Ok(Self {
@@ -132,7 +129,6 @@ impl NvmlApi {
                 device,
                 &gpu_name,
                 "core",
-                "coreClock",
                 NVML_CLOCK_GRAPHICS,
                 i32::from(tuning.core_clock_mhz),
             )?;
@@ -141,7 +137,6 @@ impl NvmlApi {
                 device,
                 &gpu_name,
                 "memory",
-                "memoryClock",
                 NVML_CLOCK_MEM,
                 i32::from(tuning.memory_clock_mhz),
             )?;
@@ -199,14 +194,12 @@ impl NvmlApi {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_domain(
         &self,
         log_path: &Path,
         device: NvmlDevice,
         gpu_name: &str,
         domain_label: &str,
-        field_name: &'static str,
         clock_type: u32,
         requested: i32,
     ) -> Result<DomainResult, Box<dyn std::error::Error + Send + Sync>> {
@@ -272,13 +265,11 @@ impl NvmlApi {
         );
         write_log_line(log_path, "WARN", &detail)?;
 
+        // A rejected write leaves the domain unsupported for this apply whatever
+        // the status code; the code itself is already in the detail.
         Ok(DomainResult {
             applied_mhz: None,
-            unsupported: matches!(
-                set_status,
-                NVML_ERROR_NOT_SUPPORTED | NVML_ERROR_NO_PERMISSION | NVML_ERROR_GPU_IS_LOST
-            ) || field_name == "coreClock"
-                || field_name == "memoryClock",
+            unsupported: true,
             detail,
         })
     }
