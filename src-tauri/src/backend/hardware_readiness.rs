@@ -506,39 +506,11 @@ fn shell_execute_elevated_powershell(
     script_path: &Path,
     service_source: &Path,
 ) -> Result<(), String> {
-    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
-    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE};
-
-    fn wide(value: &OsStr) -> Vec<u16> {
-        value.encode_wide().chain(Some(0)).collect()
-    }
-
-    let operation = wide(OsStr::new("runas"));
-    let executable = wide(OsStr::new("powershell.exe"));
-    let parameters = format!(
+    run_elevated_powershell(&format!(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File {} -RepairPrerequisites -ServiceSource {}",
         quote_arg(script_path),
         quote_arg(service_source)
-    );
-    let parameters = wide(OsStr::new(&parameters));
-
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            executable.as_ptr(),
-            parameters.as_ptr(),
-            std::ptr::null(),
-            SW_HIDE,
-        )
-    };
-
-    let result_code = result as isize;
-    if result_code > 32 {
-        Ok(())
-    } else {
-        Err(format!("ShellExecuteW returned {result_code}."))
-    }
+    ))
 }
 
 #[cfg(not(windows))]
@@ -551,6 +523,16 @@ fn shell_execute_elevated_powershell(
 
 #[cfg(windows)]
 fn shell_execute_elevated_service_start() -> Result<(), String> {
+    run_elevated_powershell(
+        "-NoProfile -ExecutionPolicy Bypass -Command \"Start-Service -Name AeroForgeService\"",
+    )
+}
+
+/// Elevate Windows PowerShell by absolute path: a bare "powershell.exe" would let
+/// ShellExecute pick one up from the (user-writable, in portable installs) app
+/// directory and hand it the UAC-approved token.
+#[cfg(windows)]
+fn run_elevated_powershell(parameters: &str) -> Result<(), String> {
     use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
     use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_HIDE};
 
@@ -558,11 +540,12 @@ fn shell_execute_elevated_service_start() -> Result<(), String> {
         value.encode_wide().chain(Some(0)).collect()
     }
 
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let executable =
+        Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
     let operation = wide(OsStr::new("runas"));
-    let executable = wide(OsStr::new("powershell.exe"));
-    let parameters = wide(OsStr::new(
-        "-NoProfile -ExecutionPolicy Bypass -Command \"Start-Service -Name AeroForgeService\"",
-    ));
+    let executable = wide(executable.as_os_str());
+    let parameters = wide(OsStr::new(parameters));
 
     let result = unsafe {
         ShellExecuteW(
