@@ -871,9 +871,11 @@ fn apply_custom_wmi_fan_control(
         write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
     }
 
+    // Only Custom owns the persisted curve set; Cool must not overwrite the user's saved curves.
+    let curves = matches!(profile_id, FanProfileId::Custom).then_some(curves);
     Ok(AppliedFanControlSnapshot {
         profile_id,
-        curves: Some(curves),
+        curves,
         cpu_speed_percent,
         gpu_speed_percent,
         layer_statuses,
