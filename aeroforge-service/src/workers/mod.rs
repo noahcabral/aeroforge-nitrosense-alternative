@@ -153,12 +153,13 @@ fn spawn_worker(
     event_tx: WorkerEventSender,
 ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let name = registration.name;
-    write_log_line(&paths.service_log(), "INFO", &format!("Starting {name}."))?;
-    write_log_line(
+    // Best effort: an unwritable log must not keep a hardware worker from starting.
+    let _ = write_log_line(&paths.service_log(), "INFO", &format!("Starting {name}."));
+    let _ = write_log_line(
         &paths.component_log(name),
         "INFO",
         &format!("Starting {name}."),
-    )?;
+    );
 
     Ok(thread::Builder::new().name(name.into()).spawn(move || {
         let mut restart_count = 0u64;
@@ -250,11 +251,11 @@ fn spawn_supervisor(
     stop_flag: Arc<AtomicBool>,
     event_rx: Receiver<WorkerEvent>,
 ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
-    write_log_line(
+    let _ = write_log_line(
         &paths.service_log(),
         "INFO",
         "Starting supervisor snapshot loop.",
-    )?;
+    );
 
     Ok(thread::Builder::new()
         .name("supervisor-worker".into())
