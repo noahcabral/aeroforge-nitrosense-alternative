@@ -179,7 +179,7 @@ pub fn append_performance_log(
         return Ok(path.display().to_string());
     }
 
-    rotate_performance_log_if_needed(&path).map_err(|error| error.to_string())?;
+    super::log_file::rotate_if_needed(&path).map_err(|error| error.to_string())?;
 
     let mut file = OpenOptions::new()
         .create(true)
@@ -686,20 +686,4 @@ fn performance_log_path(state: &BackendState) -> io::Result<PathBuf> {
     let log_dir = state.config_root().join("logs");
     fs::create_dir_all(&log_dir)?;
     Ok(log_dir.join("performance.jsonl"))
-}
-
-fn rotate_performance_log_if_needed(path: &PathBuf) -> io::Result<()> {
-    const MAX_PERFORMANCE_LOG_BYTES: u64 = 2 * 1024 * 1024;
-
-    let Ok(metadata) = fs::metadata(path) else {
-        return Ok(());
-    };
-
-    if metadata.len() < MAX_PERFORMANCE_LOG_BYTES {
-        return Ok(());
-    }
-
-    let archived_path = path.with_extension("jsonl.old");
-    let _ = fs::remove_file(&archived_path);
-    fs::rename(path, archived_path)
 }

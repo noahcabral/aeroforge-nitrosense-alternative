@@ -4,6 +4,7 @@ pub mod commands;
 pub mod cpu_clock;
 pub mod display_refresh;
 pub mod hardware_readiness;
+pub mod log_file;
 pub mod models;
 pub mod nitro_guard;
 pub mod nitro_key;

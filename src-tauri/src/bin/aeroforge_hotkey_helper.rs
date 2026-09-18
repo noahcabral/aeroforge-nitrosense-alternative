@@ -3,9 +3,7 @@
 
 use std::{
     collections::HashSet,
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
+    env, fs,
     mem::size_of,
     path::{Path, PathBuf},
     process::Command,
@@ -19,6 +17,7 @@ use std::{
 
 use aeroforge_control_lib::backend::{
     commands::show_update_notification,
+    log_file,
     models::UpdateChannelId,
     single_instance::{find_existing_main_window, is_app_process_running},
     updater::{refresh_status, UpdaterStore},
@@ -884,20 +883,7 @@ fn accept_debounced_press() -> bool {
 }
 
 fn write_log(path: &Path, message: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", timestamp_seconds());
-    }
-}
-
-fn timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    log_file::append_line(path, message);
 }
 
 fn to_wide(value: &str) -> Vec<u16> {
