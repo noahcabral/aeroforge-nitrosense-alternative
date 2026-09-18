@@ -37,6 +37,10 @@ const QUIET_AUTO_RPM_HIGH_TOLERANCE: u16 = 220;
 const QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C: u8 = 120;
 const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
 const FAN_SPEED_CALIBRATION_CANCEL_POLL_MS: u64 = 250;
+/// Calibration holds the fans at fixed (including 0%) speeds for 20 s a step; abort and
+/// restore the profile instead of letting a loaded machine cook through the low steps.
+const FAN_SPEED_CALIBRATION_ABORT_TEMP_C: u8 = 95;
+const FAN_SPEED_CALIBRATION_THERMAL_POLL_MS: u64 = 2000;
 
 pub fn apply_fan_profile(
     paths: &ServicePaths,
@@ -455,7 +459,7 @@ fn run_fan_speed_calibration_steps(
 
         apply_calibration_speed_target(paths, strategy, percent)?;
 
-        if cancel_requested() || !settle_fan_speed_calibration(cancel_requested) {
+        if cancel_requested() || !settle_fan_speed_calibration(paths, percent, cancel_requested)? {
             return Ok(CalibrationStop::Canceled(Some(percent)));
         }
 
@@ -571,12 +575,28 @@ fn reject_failed_calibration_speed_results(
     Ok(())
 }
 
-fn settle_fan_speed_calibration(cancel_requested: &dyn Fn() -> bool) -> bool {
+/// Ok(false) means canceled; Err means the machine overheated at this step.
+fn settle_fan_speed_calibration(
+    paths: &ServicePaths,
+    percent: u8,
+    cancel_requested: &dyn Fn() -> bool,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let total_ms = FAN_SPEED_CALIBRATION_SETTLE_SECS.saturating_mul(1000);
     let mut waited_ms = 0;
     while waited_ms < total_ms {
         if cancel_requested() {
-            return false;
+            return Ok(false);
+        }
+        // The telemetry worker refreshes its snapshot every 333 ms; reading that file is
+        // far cheaper than another WMI round trip per poll.
+        if waited_ms % FAN_SPEED_CALIBRATION_THERMAL_POLL_MS == 0 {
+            if let Some((sensor, temp_c)) = calibration_overheat(&read_current_temperatures(paths))
+            {
+                return Err(io::Error::other(format!(
+                    "Fan speed calibration aborted at {percent}%: {sensor} reached {temp_c}C (limit {FAN_SPEED_CALIBRATION_ABORT_TEMP_C}C). Let the machine cool or close the load, then run it again."
+                ))
+                .into());
+            }
         }
 
         let remaining_ms = total_ms.saturating_sub(waited_ms);
@@ -585,7 +605,22 @@ fn settle_fan_speed_calibration(cancel_requested: &dyn Fn() -> bool) -> bool {
         waited_ms = waited_ms.saturating_add(sleep_ms);
     }
 
-    !cancel_requested()
+    Ok(!cancel_requested())
+}
+
+fn calibration_overheat(temperatures: &CurrentTemperatures) -> Option<(&'static str, u8)> {
+    let mut hottest = None;
+    consider_temperature(
+        &mut hottest,
+        "CPU",
+        plausible_temp_c(temperatures.cpu_temp_c),
+    );
+    consider_temperature(
+        &mut hottest,
+        "GPU",
+        plausible_temp_c(temperatures.gpu_temp_c),
+    );
+    hottest.filter(|(_, temp_c)| *temp_c >= FAN_SPEED_CALIBRATION_ABORT_TEMP_C)
 }
 
 fn finish_canceled_calibration(
@@ -1678,10 +1713,10 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_custom_curve_fan_percent, classify_fan_verification_status, cool_fan_curve_set,
-        hottest_temperature, interpolate_curve_speed, quiet_auto_target_rpm, sanitize_curve_points,
-        CurrentTemperatures, FanCurvePoint, FanVerification, QUIET_AUTO_ELEVATED_RPM,
-        QUIET_AUTO_IDLE_RPM,
+        calibration_overheat, clamp_custom_curve_fan_percent, classify_fan_verification_status,
+        cool_fan_curve_set, hottest_temperature, interpolate_curve_speed, quiet_auto_target_rpm,
+        sanitize_curve_points, CurrentTemperatures, FanCurvePoint, FanVerification,
+        FAN_SPEED_CALIBRATION_ABORT_TEMP_C, QUIET_AUTO_ELEVATED_RPM, QUIET_AUTO_IDLE_RPM,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
     use crate::workers::control::models::ControlLayerState;
@@ -1724,6 +1759,30 @@ mod tests {
             hottest_temperature(&verification, &temperatures),
             Some(("CPU", 83))
         );
+    }
+
+    #[test]
+    fn calibration_overheat_trips_on_hottest_plausible_sensor() {
+        let cool = CurrentTemperatures {
+            cpu_temp_c: Some(FAN_SPEED_CALIBRATION_ABORT_TEMP_C - 1),
+            gpu_temp_c: Some(0),
+        };
+        assert_eq!(calibration_overheat(&cool), None);
+
+        let hot = CurrentTemperatures {
+            cpu_temp_c: Some(70),
+            gpu_temp_c: Some(FAN_SPEED_CALIBRATION_ABORT_TEMP_C),
+        };
+        assert_eq!(
+            calibration_overheat(&hot),
+            Some(("GPU", FAN_SPEED_CALIBRATION_ABORT_TEMP_C))
+        );
+
+        let sentinel = CurrentTemperatures {
+            cpu_temp_c: Some(255),
+            gpu_temp_c: None,
+        };
+        assert_eq!(calibration_overheat(&sentinel), None);
     }
 
     #[test]

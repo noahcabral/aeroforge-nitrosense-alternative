@@ -179,7 +179,7 @@ Current fan control path:
 - `SetGamingFanSpeed` receives per-fan target inputs for CPU and GPU fan percentages
 - when Custom or Cool is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
 - Quiet Auto: with the BatteryGuard power profile and Auto fan profile both active, the service runs a closed-loop fan policy from the calibration table every 5 seconds and raises a thermal warning (surfaced as a Windows notification) when the CPU or GPU runs hot; if no temperature can be read it holds the last target rather than dropping to idle
-- fan speed calibration steps every 5% target, waits for RPM to settle, and writes the percent-to-RPM table into the service config; the previous fan profile is restored afterwards, on cancel, or if a step fails
+- fan speed calibration steps every 5% target, waits for RPM to settle, and writes the percent-to-RPM table into the service config; the previous fan profile is restored afterwards, on cancel, or if a step fails; a step is aborted if the CPU or GPU reaches 95 °C while the fans are held at the test speed
 - RPM movement is verified separately through direct Acer sensor telemetry rather than trusting the write call alone
 - no NitroSense websocket, AcerAgentService PSSDK socket, or PredatorSense pipe dependency is used for AeroForge fan writes
 - service component logs under `%ProgramData%\AeroForge\Service\logs` rotate to `<name>.log.1` at 4 MB, so the periodic fan workers cannot grow them without bound
