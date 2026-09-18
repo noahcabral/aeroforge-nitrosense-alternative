@@ -388,18 +388,61 @@ pub fn run_fan_speed_calibration(
     state::persist_fan_speed_calibration(paths, calibration.clone())?;
 
     let strategy = select_custom_fan_strategy(paths);
+    match run_fan_speed_calibration_steps(paths, &strategy, &mut calibration, cancel_requested) {
+        Ok(CalibrationStop::Completed) => {}
+        Ok(CalibrationStop::Canceled(percent)) => {
+            return finish_canceled_calibration(paths, &initial_snapshot, calibration, percent);
+        }
+        Err(error) => {
+            // Never leave the fans latched at a calibration step; restore before surfacing the failure.
+            if let Err(restore_error) =
+                restore_fan_profile_after_calibration(paths, &initial_snapshot)
+            {
+                let _ = write_log_line(
+                    &paths.component_log("control-fan"),
+                    "ERROR",
+                    &format!(
+                        "Fan profile restore after calibration failure also failed: {restore_error}"
+                    ),
+                );
+            }
+            return Err(error);
+        }
+    }
+
+    let restore_detail = restore_fan_profile_after_calibration(paths, &initial_snapshot)?;
+    let completed_at = unix_timestamp();
+    calibration.running = false;
+    calibration.current_percent = None;
+    calibration.updated_at_unix = Some(completed_at);
+    calibration.completed_at_unix = Some(completed_at);
+    calibration.last_error = None;
+    calibration.status = format!(
+        "Fan speed calibration complete: recorded {} points. {restore_detail}",
+        calibration.points.len()
+    );
+    state::persist_fan_speed_calibration(paths, calibration.clone())?;
+    Ok(calibration)
+}
+
+enum CalibrationStop {
+    Completed,
+    Canceled(Option<u8>),
+}
+
+fn run_fan_speed_calibration_steps(
+    paths: &ServicePaths,
+    strategy: &CustomFanStrategy,
+    calibration: &mut FanSpeedCalibrationSnapshot,
+    cancel_requested: &dyn Fn() -> bool,
+) -> Result<CalibrationStop, Box<dyn std::error::Error + Send + Sync>> {
     if cancel_requested() {
-        return finish_canceled_calibration(paths, &initial_snapshot, calibration, None);
+        return Ok(CalibrationStop::Canceled(None));
     }
 
     for percent in (0u8..=100).step_by(5) {
         if cancel_requested() {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
+            return Ok(CalibrationStop::Canceled(Some(percent)));
         }
 
         calibration.current_percent = Some(percent);
@@ -407,24 +450,10 @@ pub fn run_fan_speed_calibration(
         calibration.status = format!("Testing {percent}% fan speed with firmware latch.");
         state::persist_fan_speed_calibration(paths, calibration.clone())?;
 
-        apply_calibration_speed_target(paths, &strategy, percent)?;
+        apply_calibration_speed_target(paths, strategy, percent)?;
 
-        if cancel_requested() {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
-        }
-
-        if !settle_fan_speed_calibration(cancel_requested) {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
+        if cancel_requested() || !settle_fan_speed_calibration(cancel_requested) {
+            return Ok(CalibrationStop::Canceled(Some(percent)));
         }
 
         let verification = build_fan_verification();
@@ -443,19 +472,7 @@ pub fn run_fan_speed_calibration(
         state::persist_fan_speed_calibration(paths, calibration.clone())?;
     }
 
-    let restore_detail = restore_fan_profile_after_calibration(paths, &initial_snapshot)?;
-    let completed_at = unix_timestamp();
-    calibration.running = false;
-    calibration.current_percent = None;
-    calibration.updated_at_unix = Some(completed_at);
-    calibration.completed_at_unix = Some(completed_at);
-    calibration.last_error = None;
-    calibration.status = format!(
-        "Fan speed calibration complete: recorded {} points. {restore_detail}",
-        calibration.points.len()
-    );
-    state::persist_fan_speed_calibration(paths, calibration.clone())?;
-    Ok(calibration)
+    Ok(CalibrationStop::Completed)
 }
 
 fn apply_calibration_speed_target(

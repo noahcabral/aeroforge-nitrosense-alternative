@@ -290,7 +290,10 @@ pub fn start_fan_speed_calibration(
         }
         result
     };
-    release_on_error(state::persist_fan_speed_calibration(paths, calibration.clone()))?;
+    release_on_error(state::persist_fan_speed_calibration(
+        paths,
+        calibration.clone(),
+    ))?;
 
     let job_paths = paths.clone();
     let spawned = thread::Builder::new()
