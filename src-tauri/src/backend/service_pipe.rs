@@ -4,6 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,7 +17,7 @@ use super::models::{
     LiveControlSnapshot, PowerProfileId, ProcessorStateSettings, ServiceStatus,
     ServiceWorkerStatus, TelemetrySnapshot,
 };
-use super::process::hidden_command;
+use super::{process::hidden_command, state::write_text_atomically};
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
@@ -500,7 +501,15 @@ fn request_blocking(
     }
 }
 
+// Applies run on parallel threads, so the first-launch "no token yet, mint
+// one" path is serialized: two minted tokens would leave one of them denied
+// by the service's first-use pin for good.
+static WRITE_TOKEN_LOCK: Mutex<()> = Mutex::new(());
+
 fn load_or_create_write_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let _guard = WRITE_TOKEN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = desktop_write_token_path();
     if let Ok(existing) = fs::read_to_string(&path) {
         let token = existing.trim().to_string();
@@ -509,11 +518,11 @@ fn load_or_create_write_token() -> Result<String, Box<dyn std::error::Error + Se
         }
     }
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let token = generate_write_token()?;
-    write_token_atomically(&path, &token)?;
+    write_text_atomically(&path, &token)?;
+    // Best-effort: lock the token down to the current user so other local
+    // accounts cannot read the pipe write secret from a shared machine profile.
+    let _ = restrict_token_file_acl(&path);
     Ok(token)
 }
 
@@ -523,22 +532,6 @@ fn desktop_write_token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\Default\AppData\Roaming"))
         .join(APP_CONFIG_DIR)
         .join(IPC_WRITE_TOKEN_FILE)
-}
-
-fn write_token_atomically(
-    path: &Path,
-    token: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let temp = path.with_extension("tmp");
-    fs::write(&temp, token)?;
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temp, path)?;
-    // Best-effort: lock the token down to the current user so other local
-    // accounts cannot read the pipe write secret from a shared machine profile.
-    let _ = restrict_token_file_acl(path);
-    Ok(())
 }
 
 fn restrict_token_file_acl(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
