@@ -1,3 +1,4 @@
+mod acer_hid_device;
 mod capability;
 mod control;
 mod ipc;
