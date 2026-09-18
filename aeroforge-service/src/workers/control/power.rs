@@ -63,31 +63,40 @@ pub fn apply_power_profile(
         ),
     )?;
 
+    // Every powercfg spawn costs ~100 ms, so only the AC/DC values that differ
+    // from the live scheme are written, and the scheme is re-activated and
+    // re-read only when something changed.
+    let mut readback = read_processor_state_readback()?;
     if processor_state_control_enabled {
-        apply_scheme_value(
-            "setacvalueindex",
-            PROCTHROTTLEMIN,
-            processor_state.min_percent,
-        )?;
-        apply_scheme_value(
-            "setacvalueindex",
-            PROCTHROTTLEMAX,
-            processor_state.max_percent,
-        )?;
-        apply_scheme_value(
-            "setdcvalueindex",
-            PROCTHROTTLEMIN,
-            processor_state.min_percent,
-        )?;
-        apply_scheme_value(
-            "setdcvalueindex",
-            PROCTHROTTLEMAX,
-            processor_state.max_percent,
-        )?;
-        run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+        let mut written = false;
+        for (action, current) in [
+            ("setacvalueindex", &readback.ac),
+            ("setdcvalueindex", &readback.dc),
+        ] {
+            for (setting, requested, live) in [
+                (
+                    PROCTHROTTLEMIN,
+                    processor_state.min_percent,
+                    current.min_percent,
+                ),
+                (
+                    PROCTHROTTLEMAX,
+                    processor_state.max_percent,
+                    current.max_percent,
+                ),
+            ] {
+                if requested != live {
+                    apply_scheme_value(action, setting, requested)?;
+                    written = true;
+                }
+            }
+        }
+        if written {
+            run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+            readback = read_processor_state_readback()?;
+        }
     }
 
-    let readback = read_processor_state_readback()?;
     let drift_detected = processor_state_control_enabled
         && (readback.ac.min_percent != processor_state.min_percent
             || readback.ac.max_percent != processor_state.max_percent
@@ -96,8 +105,14 @@ pub fn apply_power_profile(
     let cpu_power_limit_detail =
         rapl_power::apply_profile_package_limit(paths, &profile_id, custom_base_profile.as_ref());
 
-    thread::sleep(Duration::from_millis(500));
-    let power_after = nvidia_power::read_power_readback(paths);
+    // A failed pre-apply readback already decides the delta message, so the
+    // settle wait and second nvidia-smi spawn would buy nothing.
+    let power_after = if power_before.error.is_some() {
+        power_before.clone()
+    } else {
+        thread::sleep(Duration::from_millis(500));
+        nvidia_power::read_power_readback(paths)
+    };
     let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
 
     let processor_detail = if processor_state_control_enabled {
