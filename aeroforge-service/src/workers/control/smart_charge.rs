@@ -536,15 +536,9 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
 
     let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            tmp_path.to_str().unwrap(),
-            "-Status",
-            &requested_health_status.to_string(),
-        ])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&tmp_path)
+        .args(["-Status", &requested_health_status.to_string()])
         .output()?;
 
     // Clean up temp file
