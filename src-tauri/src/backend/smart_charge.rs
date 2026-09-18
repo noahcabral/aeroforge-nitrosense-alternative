@@ -58,9 +58,11 @@ pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPaylo
 
 fn apply_battery_control_direct(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
     let requested_health_status = if enabled { 1u8 } else { 0u8 };
-    let script = r#"
-$status = [byte]$args[0]
-$battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
+    // `-Command` appends extra arguments to the script text instead of binding
+    // them to $args (which left $status at 0), so splice the value in directly.
+    let script = format!(
+        "$status = [byte]{requested_health_status}\n{}",
+        r#"$battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
 function Emit-AeroForgeResult {
@@ -342,7 +344,8 @@ foreach ($attempt in $functionDataAttempts) {
 }
 
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
-"#;
+"#
+    );
 
     let output = hidden_command("powershell")
         .args([
@@ -350,8 +353,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
-            &requested_health_status.to_string(),
+            &script,
         ])
         .output()?;
 
