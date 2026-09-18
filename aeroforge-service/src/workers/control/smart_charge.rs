@@ -258,10 +258,12 @@ $result | ConvertTo-Json -Depth 8 -Compress
 fn apply_battery_control_health_status(
     requested_health_status: u8,
 ) -> Result<BatteryControlApplyOutput, Box<dyn std::error::Error + Send + Sync>> {
-    let script = r#"
-# made by faxcon
-param([byte]$status)
-
+    // Same splice as the snapshot read: `-Command` gets the status as the
+    // first line, so no script file has to be dropped in SYSTEM's temp dir.
+    let script = format!(
+        "$status = [byte]{requested_health_status}
+{}",
+        r#"# made by faxcon
 $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
@@ -515,26 +517,19 @@ foreach ($attempt in $functionDataAttempts) {
 }
 
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
-"#;
-
-    use std::io::Write;
-    let mut tmp_file = tempfile::Builder::new()
-        .suffix(".ps1")
-        .tempfile()
-        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
-    write!(tmp_file, "{}", script)
-        .map_err(|e| io::Error::other(format!("Failed to write temp script: {}", e)))?;
-    let tmp_path = tmp_file.into_temp_path();
+"#
+    );
 
     let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(&tmp_path)
-        .args(["-Status", &requested_health_status.to_string()])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
         .output()?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&tmp_path);
 
     if !output.status.success() {
         let detail = command_failure_detail("PowerShell", &output);
