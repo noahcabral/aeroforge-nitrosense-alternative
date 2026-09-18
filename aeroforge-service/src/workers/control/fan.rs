@@ -1142,8 +1142,8 @@ fn quiet_auto_target_rpm(
     match hottest {
         Some((_, temp_c)) if temp_c >= QUIET_AUTO_ELEVATE_TEMP_C => QUIET_AUTO_ELEVATED_RPM,
         Some((_, temp_c)) if temp_c <= QUIET_AUTO_IDLE_RESUME_TEMP_C => QUIET_AUTO_IDLE_RPM,
-        Some(_) => previous_target_rpm.unwrap_or(QUIET_AUTO_IDLE_RPM),
-        None => QUIET_AUTO_IDLE_RPM,
+        // Blind (no readback) holds the last target: dropping to idle while hot is unsafe.
+        Some(_) | None => previous_target_rpm.unwrap_or(QUIET_AUTO_IDLE_RPM),
     }
 }
 
@@ -1246,7 +1246,8 @@ fn quiet_auto_context(
     let thermal_context = hottest
         .map(|(sensor, temp_c)| format!("Hottest sensor {sensor} {temp_c}C."))
         .unwrap_or_else(|| {
-            "No current Acer temperature readback was available; using quiet idle target.".into()
+            "No current Acer temperature readback was available; holding the previous target."
+                .into()
         });
 
     format!(
@@ -1673,10 +1674,28 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 mod tests {
     use super::{
         clamp_custom_curve_fan_percent, classify_fan_verification_status, cool_fan_curve_set,
-        interpolate_curve_speed, sanitize_curve_points, FanCurvePoint, FanVerification,
+        interpolate_curve_speed, quiet_auto_target_rpm, sanitize_curve_points, FanCurvePoint,
+        FanVerification, QUIET_AUTO_ELEVATED_RPM, QUIET_AUTO_IDLE_RPM,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
     use crate::workers::control::models::ControlLayerState;
+
+    #[test]
+    fn quiet_auto_target_holds_previous_when_readback_is_missing() {
+        assert_eq!(quiet_auto_target_rpm(None, None), QUIET_AUTO_IDLE_RPM);
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), None),
+            QUIET_AUTO_ELEVATED_RPM
+        );
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), Some(("cpu", 78))),
+            QUIET_AUTO_ELEVATED_RPM
+        );
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), Some(("cpu", 70))),
+            QUIET_AUTO_IDLE_RPM
+        );
+    }
 
     #[test]
     fn fan_verification_status_tracks_telemetry_availability() {
