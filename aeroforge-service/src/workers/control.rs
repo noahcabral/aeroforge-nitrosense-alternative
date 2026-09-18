@@ -282,10 +282,18 @@ pub fn start_fan_speed_calibration(
         points: Vec::new(),
         last_error: None,
     };
-    state::persist_fan_speed_calibration(paths, calibration.clone())?;
+    // Until the worker thread owns the flag, any early failure must release it or every
+    // later fan apply is rejected as "calibration is running" until the service restarts.
+    let release_on_error = |result: Result<(), Box<dyn std::error::Error + Send + Sync>>| {
+        if result.is_err() {
+            FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
+        }
+        result
+    };
+    release_on_error(state::persist_fan_speed_calibration(paths, calibration.clone()))?;
 
     let job_paths = paths.clone();
-    thread::Builder::new()
+    let spawned = thread::Builder::new()
         .name("aeroforge-fan-calibration".into())
         .spawn(move || {
             let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -324,7 +332,8 @@ pub fn start_fan_speed_calibration(
 
             FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
             FAN_CALIBRATION_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-        })?;
+        });
+    release_on_error(spawned.map(|_| ()).map_err(Into::into))?;
 
     Ok(calibration)
 }
@@ -773,7 +782,28 @@ fn default_processor_state_for_profile(
 
 #[cfg(test)]
 mod tests {
-    use super::{adaptive_fan_target_refresh_needed, fan_profile_refreshable, FanProfileId};
+    use super::{
+        adaptive_fan_target_refresh_needed, fan_profile_refreshable, start_fan_speed_calibration,
+        FanProfileId, FAN_CALIBRATION_RUNNING,
+    };
+    use crate::paths::ServicePaths;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn calibration_start_releases_running_flag_when_persist_fails() {
+        // state_dir nested under a regular file cannot be created, so the queued snapshot
+        // persist fails before the worker thread exists.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let blocker = temp.path().join("blocker");
+        std::fs::write(&blocker, b"").expect("blocker file");
+        let paths = ServicePaths {
+            logs_dir: temp.path().join("logs"),
+            state_dir: blocker.join("state"),
+        };
+
+        assert!(start_fan_speed_calibration(&paths).is_err());
+        assert!(!FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn adaptive_fan_refresh_includes_custom_and_cool() {
