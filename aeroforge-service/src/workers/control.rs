@@ -336,7 +336,19 @@ pub fn start_fan_speed_calibration(
             FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
             FAN_CALIBRATION_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         });
-    release_on_error(spawned.map(|_| ()).map_err(Into::into))?;
+    if let Err(error) = spawned {
+        FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
+        // The queued snapshot already says running; leave a terminal one so the UI does
+        // not show a phantom calibration until the user cancels it.
+        let mut failed = calibration;
+        failed.running = false;
+        failed.updated_at_unix = Some(unix_timestamp());
+        failed.completed_at_unix = Some(unix_timestamp());
+        failed.status = format!("Fan speed calibration failed. {error}");
+        failed.last_error = Some(error.to_string());
+        let _ = state::persist_fan_speed_calibration(paths, failed);
+        return Err(error.into());
+    }
 
     Ok(calibration)
 }

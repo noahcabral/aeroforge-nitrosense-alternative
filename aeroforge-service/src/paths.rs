@@ -3,6 +3,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 #[derive(Clone, Debug)]
@@ -112,6 +113,9 @@ pub fn system32_command(tool: &str) -> std::process::Command {
 /// Component logs are append-only and the periodic fan workers write several lines a
 /// minute, so keep one rotated generation instead of growing without bound.
 const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+/// Serializes the size check and rename: two workers rotating the same log at once would
+/// rename a fresh, near-empty file over the generation that was just rotated out.
+static LOG_ROTATE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn write_log_line(
     log_path: &Path,
@@ -119,6 +123,9 @@ pub fn write_log_line(
     message: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let line = format!("{} [{}] {}\n", timestamp_string(), level, message);
+    let _rotate_guard = LOG_ROTATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if fs::metadata(log_path)
         .map(|metadata| metadata.len() >= LOG_ROTATE_BYTES)
         .unwrap_or(false)
