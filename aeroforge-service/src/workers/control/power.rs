@@ -768,10 +768,15 @@ fn apply_scheme_value(
 }
 
 fn run_powercfg(arguments: &[&str]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let output = run_powercfg_output(arguments)?;
+    run_powercfg_output(arguments).map(drop)
+}
 
+fn run_powercfg_output(
+    arguments: &[&str],
+) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+    let output = system32_command("powercfg").args(arguments).output()?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -785,12 +790,6 @@ fn run_powercfg(arguments: &[&str]) -> Result<(), Box<dyn std::error::Error + Se
     };
 
     Err(format!("powercfg {} failed: {}", arguments.join(" "), detail).into())
-}
-
-fn run_powercfg_output(
-    arguments: &[&str],
-) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(system32_command("powercfg").args(arguments).output()?)
 }
 
 fn read_processor_state_readback(
@@ -832,19 +831,6 @@ fn query_scheme_values(
 
 fn query_scheme_output(setting: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("powercfg exited with status {}", output.status)
-        };
-        return Err(format!("powercfg /q {} failed: {}", setting, detail).into());
-    }
-
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
