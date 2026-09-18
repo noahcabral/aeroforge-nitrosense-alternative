@@ -110,15 +110,17 @@ pub fn run() {
                 )?;
             }
 
+            // A prewarmed instance becomes the user's real instance once activated, so it
+            // still runs the startup reconcile (gamma ramp, smart charge, telemetry); it only
+            // skips showing the window.
             if let Some(window) = app.get_webview_window("main") {
                 if prewarm_mode {
                     let _ = window.hide();
-                    return Ok(());
+                } else {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
                 }
-
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
             }
             tauri::async_runtime::spawn_blocking(move || {
                 run_startup_reconcile(
