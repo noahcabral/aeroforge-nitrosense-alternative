@@ -795,39 +795,42 @@ fn run_powercfg_output(
 
 fn read_processor_state_readback(
 ) -> Result<ProcessorStateReadback, Box<dyn std::error::Error + Send + Sync>> {
+    // One powercfg /q per setting answers both AC and DC; each spawn costs ~100 ms.
+    let (min_ac, min_dc) = query_scheme_values(PROCTHROTTLEMIN)?;
+    let (max_ac, max_dc) = query_scheme_values(PROCTHROTTLEMAX)?;
     Ok(ProcessorStateReadback {
         ac: ProcessorStateSettings {
-            min_percent: query_scheme_value(
-                PROCTHROTTLEMIN,
-                "Current AC Power Setting Index",
-                PowercfgCurrentIndex::Ac,
-            )?,
-            max_percent: query_scheme_value(
-                PROCTHROTTLEMAX,
-                "Current AC Power Setting Index",
-                PowercfgCurrentIndex::Ac,
-            )?,
+            min_percent: min_ac,
+            max_percent: max_ac,
         },
         dc: ProcessorStateSettings {
-            min_percent: query_scheme_value(
-                PROCTHROTTLEMIN,
-                "Current DC Power Setting Index",
-                PowercfgCurrentIndex::Dc,
-            )?,
-            max_percent: query_scheme_value(
-                PROCTHROTTLEMAX,
-                "Current DC Power Setting Index",
-                PowercfgCurrentIndex::Dc,
-            )?,
+            min_percent: min_dc,
+            max_percent: max_dc,
         },
     })
 }
 
-fn query_scheme_value(
+fn query_scheme_values(
     setting: &str,
-    label: &str,
-    current_index: PowercfgCurrentIndex,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(u8, u8), Box<dyn std::error::Error + Send + Sync>> {
+    let stdout = query_scheme_output(setting)?;
+    Ok((
+        parse_scheme_value(
+            &stdout,
+            setting,
+            "Current AC Power Setting Index",
+            PowercfgCurrentIndex::Ac,
+        )?,
+        parse_scheme_value(
+            &stdout,
+            setting,
+            "Current DC Power Setting Index",
+            PowercfgCurrentIndex::Dc,
+        )?,
+    ))
+}
+
+fn query_scheme_output(setting: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -842,12 +845,20 @@ fn query_scheme_value(
         return Err(format!("powercfg /q {} failed: {}", setting, detail).into());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(value) = parse_labeled_powercfg_value(&stdout, setting, label)? {
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_scheme_value(
+    stdout: &str,
+    setting: &str,
+    label: &str,
+    current_index: PowercfgCurrentIndex,
+) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(value) = parse_labeled_powercfg_value(stdout, setting, label)? {
         return Ok(value);
     }
 
-    if let Some(value) = parse_scoped_powercfg_value(&stdout, setting, current_index)? {
+    if let Some(value) = parse_scoped_powercfg_value(stdout, setting, current_index)? {
         return Ok(value);
     }
 
