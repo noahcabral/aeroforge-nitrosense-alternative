@@ -147,7 +147,7 @@ fn write_logo_to_esp(
     ));
 
     remove_file_if_exists(&temp_path)?;
-    let backup_dir = backup_existing_logos(paths, &target_dir)?;
+    let backup_dir = backup_existing_logo_pair(paths, &target_dir, "efi")?;
 
     write_bytes_synced(&staged.bytes, &temp_path)?;
     let temp_size = fs::metadata(&temp_path)?.len();
@@ -188,45 +188,6 @@ fn write_logo_to_esp(
         acer_programdata_target_path: acer_programdata_stage.target_path,
         acer_recovery_target_path: acer_recovery_stage.target_path,
     })
-}
-
-fn backup_existing_logos(
-    paths: &ServicePaths,
-    target_dir: &Path,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
-    let existing = ["AcerLogo.jpg", "AcerLogo.gif"]
-        .into_iter()
-        .map(|name| target_dir.join(name))
-        .filter(|path| match fs::metadata(path) {
-            Ok(metadata) => metadata.is_file(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(_) => true,
-        })
-        .collect::<Vec<_>>();
-
-    if existing.is_empty() {
-        return Ok(None);
-    }
-
-    let backup_dir = paths
-        .state_dir
-        .join("boot-logo-backups")
-        .join(unix_timestamp().to_string());
-    fs::create_dir_all(&backup_dir)?;
-
-    for source in existing {
-        if !fs::metadata(&source)?.is_file() {
-            return Err(format!(
-                "Refusing to back up non-file boot-logo path: {}",
-                source.display()
-            )
-            .into());
-        }
-        let destination = backup_dir.join(source.file_name().ok_or("Invalid boot-logo file name")?);
-        copy_file_synced(&source, &destination)?;
-    }
-
-    Ok(Some(backup_dir))
 }
 
 fn rollback_from_backup(target_dir: &Path, backup_dir: Option<&Path>) -> Result<(), io::Error> {
