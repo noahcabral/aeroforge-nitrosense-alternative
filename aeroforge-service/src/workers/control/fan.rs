@@ -35,7 +35,7 @@ const QUIET_AUTO_RPM_HIGH_TOLERANCE: u16 = 220;
 /// Firmware reports 0 for an idle/absent sensor (dGPU powered down, first reads after
 /// resume) and sentinels above this for "unsupported"; neither is a temperature.
 const QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C: u8 = 120;
-const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
+pub(super) const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
 const FAN_SPEED_CALIBRATION_CANCEL_POLL_MS: u64 = 250;
 /// Calibration holds the fans at fixed (including 0%) speeds for 20 s a step; abort and
 /// restore the profile instead of letting a loaded machine cook through the low steps.

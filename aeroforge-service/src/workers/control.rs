@@ -278,7 +278,7 @@ pub fn start_fan_speed_calibration(
         updated_at_unix: Some(now),
         completed_at_unix: None,
         current_percent: None,
-        settle_seconds: 20,
+        settle_seconds: fan::FAN_SPEED_CALIBRATION_SETTLE_SECS,
         points: Vec::new(),
         last_error: None,
     };
@@ -356,23 +356,13 @@ pub fn start_fan_speed_calibration(
 pub fn cancel_fan_speed_calibration(
     paths: &ServicePaths,
 ) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let mut snapshot = state::load_snapshot(paths)?;
     if !FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
-        if snapshot.fan_speed_calibration.running {
-            let now = unix_timestamp();
-            snapshot.fan_speed_calibration.running = false;
-            snapshot.fan_speed_calibration.current_percent = None;
-            snapshot.fan_speed_calibration.updated_at_unix = Some(now);
-            snapshot.fan_speed_calibration.completed_at_unix = Some(now);
-            snapshot.fan_speed_calibration.status =
-                "Fan speed calibration was not running; cleared stale running state.".into();
-            state::persist_fan_speed_calibration(paths, snapshot.fan_speed_calibration.clone())?;
-        }
-        return Ok(snapshot.fan_speed_calibration);
+        return clear_stale_fan_speed_calibration(paths);
     }
 
     FAN_CALIBRATION_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
 
+    let mut snapshot = state::load_snapshot(paths)?;
     let now = unix_timestamp();
     snapshot.fan_speed_calibration.updated_at_unix = Some(now);
     snapshot.fan_speed_calibration.status =
@@ -389,12 +379,38 @@ pub fn cancel_fan_speed_calibration(
     Ok(snapshot.fan_speed_calibration)
 }
 
+/// A service that died mid-calibration leaves `running = true` in the snapshot,
+/// which the UI shows as "Running" with no thread behind it.
+fn clear_stale_fan_speed_calibration(
+    paths: &ServicePaths,
+) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let mut calibration = state::load_snapshot(paths)?.fan_speed_calibration;
+    if calibration.running {
+        let now = unix_timestamp();
+        calibration.running = false;
+        calibration.current_percent = None;
+        calibration.updated_at_unix = Some(now);
+        calibration.completed_at_unix = Some(now);
+        calibration.status =
+            "Fan speed calibration was not running; cleared stale running state.".into();
+        state::persist_fan_speed_calibration(paths, calibration.clone())?;
+    }
+    Ok(calibration)
+}
+
 fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state::persist_default_snapshot(&paths)?;
+    if let Err(error) = clear_stale_fan_speed_calibration(&paths) {
+        let _ = write_log_line(
+            &paths.component_log("control-fan"),
+            "WARN",
+            &format!("Could not clear stale fan calibration state: {error}"),
+        );
+    }
     if let Err(error) = restore_startup_state(&paths) {
         let _ = write_log_line(
             &paths.component_log("control-worker"),
@@ -798,8 +814,9 @@ fn default_processor_state_for_profile(
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_fan_target_refresh_needed, fan_profile_refreshable, start_fan_speed_calibration,
-        FanProfileId, FAN_CALIBRATION_RUNNING,
+        adaptive_fan_target_refresh_needed, clear_stale_fan_speed_calibration,
+        fan_profile_refreshable, start_fan_speed_calibration, state, FanProfileId,
+        FanSpeedCalibrationSnapshot, FAN_CALIBRATION_RUNNING,
     };
     use crate::paths::ServicePaths;
     use std::sync::atomic::Ordering;
@@ -818,6 +835,33 @@ mod tests {
 
         assert!(start_fan_speed_calibration(&paths).is_err());
         assert!(!FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_running_calibration_is_cleared_when_no_thread_owns_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = ServicePaths {
+            logs_dir: temp.path().join("logs"),
+            state_dir: temp.path().join("state"),
+        };
+        std::fs::create_dir_all(&paths.state_dir).expect("state dir");
+        state::persist_default_snapshot(&paths).expect("default snapshot");
+        state::persist_fan_speed_calibration(
+            &paths,
+            FanSpeedCalibrationSnapshot {
+                running: true,
+                current_percent: Some(40),
+                ..FanSpeedCalibrationSnapshot::default()
+            },
+        )
+        .expect("stale snapshot");
+
+        let cleared = clear_stale_fan_speed_calibration(&paths).expect("clear");
+        assert!(!cleared.running);
+        assert_eq!(cleared.current_percent, None);
+        assert!(cleared.completed_at_unix.is_some());
+        let reloaded = state::load_snapshot(&paths).expect("reload");
+        assert!(!reloaded.fan_speed_calibration.running);
     }
 
     #[test]
