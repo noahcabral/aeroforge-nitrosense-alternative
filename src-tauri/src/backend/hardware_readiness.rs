@@ -540,11 +540,8 @@ fn run_elevated_powershell(parameters: &str) -> Result<(), String> {
         value.encode_wide().chain(Some(0)).collect()
     }
 
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    let executable =
-        Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
     let operation = wide(OsStr::new("runas"));
-    let executable = wide(executable.as_os_str());
+    let executable = wide(super::process::system32_path("powershell").as_os_str());
     let parameters = wide(OsStr::new(parameters));
 
     let result = unsafe {

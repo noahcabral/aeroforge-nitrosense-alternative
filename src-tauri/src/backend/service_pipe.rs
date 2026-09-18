@@ -3,9 +3,7 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::windows::process::CommandExt,
     path::{Path, PathBuf},
-    process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +16,7 @@ use super::models::{
     LiveControlSnapshot, PowerProfileId, ProcessorStateSettings, ServiceStatus,
     ServiceWorkerStatus, TelemetrySnapshot,
 };
+use super::process::hidden_command;
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
@@ -26,7 +25,6 @@ const IPC_WRITE_TOKEN_FILE: &str = "ipc-write-token.txt";
 const FRESH_SUPERVISOR_MAX_AGE_SECONDS: u64 = 15;
 const FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS: u64 = 15;
 const FRESH_CACHED_SNAPSHOT_MAX_AGE_SECONDS: u64 = 20;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CRITICAL_WORKERS: &[&str] = &["control-worker", "ipc-worker"];
 
 fn default_true() -> bool {
@@ -546,8 +544,7 @@ fn write_token_atomically(
 fn restrict_token_file_acl(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let username = env::var("USERNAME").unwrap_or_else(|_| "Users".into());
     let grant = format!("{username}:F");
-    let output = Command::new("icacls")
-        .creation_flags(CREATE_NO_WINDOW)
+    let output = hidden_command("icacls")
         .args([
             path.as_os_str(),
             OsStr::new("/inheritance:r"),
@@ -802,10 +799,7 @@ fn wait_for_service_state(
 fn sc_output<const N: usize>(
     args: [&str; N],
 ) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(Command::new("sc.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(args)
-        .output()?)
+    Ok(hidden_command("sc.exe").args(args).output()?)
 }
 
 fn service_state_dir() -> PathBuf {

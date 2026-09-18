@@ -1,9 +1,8 @@
 use std::{
     ffi::OsStr,
     fs, io,
-    os::windows::{ffi::OsStrExt, process::CommandExt},
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Command,
     sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +17,7 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use super::models::{UpdateChannelId, UpdateStatus};
+use super::process::hidden_command;
 use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -27,7 +27,6 @@ const UPDATE_STATE_FILE: &str = "update-state.json";
 const UPDATES_DIR_NAME: &str = "updates";
 const SETUP_ASSET_PREFIX: &str = "AeroForge-Control-Setup-";
 const PORTABLE_ASSET_PREFIX: &str = "AeroForge-Control-Portable-";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct UpdaterStore {
     status: RwLock<UpdateStatus>,
@@ -249,8 +248,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .ok_or_else(|| io::Error::other("Could not resolve the current executable file name."))?
         .to_string();
 
-    Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
+    hidden_command("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")

@@ -1,8 +1,6 @@
 use std::{
     fs, io,
-    os::windows::process::CommandExt,
     path::Path,
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,13 +13,14 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 
+use super::process::hidden_command;
+
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const CARE_CENTER_URL: &str = "wss://127.0.0.1:4343/";
 const CARE_CENTER_AUTH_DATA: &str = "OO24T5iPpUKxfxjPZW4ddo3uGeIJXC+ZbJPzCNGMBenvnZ7J9xQjpykAdgAL1a9HocmZsOHxisitF9B0t7msCayFnVDZA79rADTRjUNWQaLEQA6wSpLrLo/Fu/gHH7BM";
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\CC\settings.json";
 const CARE_CENTER_TIMEOUT: Duration = Duration::from_secs(5);
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
 pub struct SmartChargeApplyPayload {
@@ -345,8 +344,7 @@ foreach ($attempt in $functionDataAttempts) {
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
 "#;
 
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
+    let output = hidden_command("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

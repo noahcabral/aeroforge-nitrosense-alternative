@@ -1,8 +1,6 @@
 use std::{
     fs, io,
-    os::windows::process::CommandExt,
     path::{Path, PathBuf},
-    process::Command,
     sync::RwLock,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,9 +11,9 @@ use super::models::{
     OcPreset, PersistenceStatus, PersonalSettings, PowerProfileId, ProcessorStateSettings,
     ShellStatus, TelemetrySnapshot, UpdateChannelId, UpdateStatus,
 };
+use super::process::hidden_command;
 use super::updater::UpdaterStore;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ANV15_51_GPU_MEMORY_OFFSETS: [(&str, i16); 3] = [
     ("PCI\\VEN_10DE&DEV_25AC&SUBSYS_171E1025", 0),
     ("PCI\\VEN_10DE&DEV_25AD&SUBSYS_171E1025", 200),
@@ -688,8 +686,7 @@ fn detected_model_is_anv15_51() -> bool {
 }
 
 fn query_registry_value(key: &str, value_name: &str) -> Option<String> {
-    let output = Command::new("reg")
-        .creation_flags(CREATE_NO_WINDOW)
+    let output = hidden_command("reg")
         .args(["query", key, "/v", value_name])
         .output()
         .ok()?;
@@ -703,8 +700,7 @@ fn query_registry_value(key: &str, value_name: &str) -> Option<String> {
 }
 
 fn query_registry_tree(key: &str) -> Option<String> {
-    let output = Command::new("reg")
-        .creation_flags(CREATE_NO_WINDOW)
+    let output = hidden_command("reg")
         .args(["query", key, "/s", "/f", "VEN_10DE"])
         .output()
         .ok()?;
