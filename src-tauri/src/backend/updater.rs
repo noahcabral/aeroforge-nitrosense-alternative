@@ -60,15 +60,14 @@ impl UpdaterStore {
 
     pub fn save_status(&self, status: UpdateStatus) -> Result<UpdateStatus, DynError> {
         let runtime_status = apply_runtime_fields(status);
+        // Held across the file write so concurrent saves reach disk in the
+        // same order they reach memory.
+        let mut guard = self.status.write().expect("updater status lock poisoned");
         super::state::write_text_atomically(
             &self.status_file,
             &serde_json::to_string_pretty(&runtime_status)?,
         )?;
-
-        {
-            let mut guard = self.status.write().expect("updater status lock poisoned");
-            *guard = runtime_status.clone();
-        }
+        *guard = runtime_status.clone();
 
         Ok(runtime_status)
     }

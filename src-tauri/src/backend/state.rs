@@ -1,7 +1,10 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        RwLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -43,8 +46,11 @@ impl BackendState {
         let updater = UpdaterStore::load(&config_root)?;
 
         let (controls, initialized_from_disk) = load_controls(&config_file, &default_controls)?;
+        if !initialized_from_disk {
+            persist_controls(&config_file, &controls)?;
+        }
 
-        let state = Self {
+        Ok(Self {
             contract,
             capabilities,
             default_controls,
@@ -53,13 +59,7 @@ impl BackendState {
             config_file,
             updater,
             initialized_from_disk,
-        };
-
-        if !state.initialized_from_disk {
-            state.persist_controls()?;
-        }
-
-        Ok(state)
+        })
     }
 
     pub fn contract(&self) -> BackendContract {
@@ -110,16 +110,15 @@ impl BackendState {
         &self,
         snapshot: ControlSnapshot,
     ) -> Result<ControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        {
-            let mut controls = self
-                .controls
-                .write()
-                .expect("backend controls lock poisoned");
-            *controls = snapshot.clone();
-        }
-
-        self.persist_controls()?;
-        Ok(snapshot)
+        // The lock stays held across the file write so concurrent saves reach
+        // disk in the same order they reached memory.
+        let mut controls = self
+            .controls
+            .write()
+            .expect("backend controls lock poisoned");
+        *controls = snapshot;
+        persist_controls(&self.config_file, &controls)?;
+        Ok(controls.clone())
     }
 
     pub fn reset_controls(
@@ -127,15 +126,19 @@ impl BackendState {
     ) -> Result<ControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
         self.save_controls(self.default_controls.clone())
     }
+}
 
-    fn persist_controls(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let serialized = serde_json::to_string_pretty(&self.controls())?;
-        write_text_atomically(&self.config_file, &serialized)
-    }
+fn persist_controls(
+    config_file: &Path,
+    controls: &ControlSnapshot,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    write_text_atomically(config_file, &serde_json::to_string_pretty(controls)?)
 }
 
 /// Write via a sibling temp file plus rename so a crash or power loss mid-write
 /// can never leave a truncated file behind (rename replaces in place on NTFS).
+/// Each call gets its own temp file so two writers of the same path never
+/// share one.
 pub(crate) fn write_text_atomically(
     path: &Path,
     content: &str,
@@ -146,7 +149,12 @@ pub(crate) fn write_text_atomically(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config");
-    let temp_path = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let temp_path = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
     let result = (|| {
         let mut file = fs::File::create(&temp_path)?;
         io::Write::write_all(&mut file, content.as_bytes())?;
@@ -758,6 +766,33 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_never_leave_a_torn_file() {
+        let dir =
+            std::env::temp_dir().join(format!("aeroforge-atomic-race-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.json");
+        let bodies: Vec<String> = (0..8).map(|n| format!("{n}").repeat(64 * 1024)).collect();
+
+        std::thread::scope(|scope| {
+            for body in &bodies {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        write_text_atomically(&path, body).unwrap();
+                    }
+                });
+            }
+        });
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            bodies.contains(&written),
+            "file was torn: {} bytes",
+            written.len()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
