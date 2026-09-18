@@ -119,9 +119,11 @@ fn log_battery_control_snapshot(paths: &ServicePaths, phase: &str, requested_hea
 fn read_battery_control_snapshot(
     requested_health_status: u8,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let script = r#"
-$requested = [int]$args[0]
-$result = [ordered]@{
+    // `-Command` appends extra arguments to the script text instead of binding
+    // them to $args, so the requested status is spliced in as the first line.
+    let script = format!(
+        "$requested = {requested_health_status}\n{}",
+        r#"$result = [ordered]@{
   requestedHealthStatus = $requested
   isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   classes = @()
@@ -230,7 +232,8 @@ if ($instances.Count -gt 0) {
 }
 
 $result | ConvertTo-Json -Depth 8 -Compress
-"#;
+"#
+    );
 
     let output = system32_command("powershell")
         .creation_flags(CREATE_NO_WINDOW)
@@ -239,8 +242,7 @@ $result | ConvertTo-Json -Depth 8 -Compress
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
-            &requested_health_status.to_string(),
+            &script,
         ])
         .output()?;
 
