@@ -597,37 +597,21 @@ unsafe extern "system" fn raw_input_window_proc(
 }
 
 fn handle_raw_input(lparam: LPARAM) {
-    let mut raw_size = 0u32;
-    let header_size = size_of::<RAWINPUTHEADER>() as u32;
-    let first_result = unsafe {
-        GetRawInputData(
-            lparam as _,
-            RID_INPUT,
-            std::ptr::null_mut(),
-            &mut raw_size,
-            header_size,
-        )
-    };
-    if first_result == u32::MAX || raw_size == 0 {
-        return;
-    }
-
-    let mut buffer = vec![0u8; raw_size as usize];
+    // Keyboard reports always fit a RAWINPUT; a HID report that does not is
+    // rejected by the size check and would be ignored below anyway. Reading
+    // into the struct itself also keeps the read aligned, unlike a byte buffer.
+    let mut raw_input = unsafe { std::mem::zeroed::<RAWINPUT>() };
+    let mut raw_size = size_of::<RAWINPUT>() as u32;
     let read_result = unsafe {
         GetRawInputData(
             lparam as _,
             RID_INPUT,
-            buffer.as_mut_ptr().cast(),
+            (&mut raw_input as *mut RAWINPUT).cast(),
             &mut raw_size,
-            header_size,
+            size_of::<RAWINPUTHEADER>() as u32,
         )
     };
-    if read_result == u32::MAX {
-        return;
-    }
-
-    let raw_input = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
-    if raw_input.header.dwType != RIM_TYPEKEYBOARD {
+    if read_result == u32::MAX || raw_input.header.dwType != RIM_TYPEKEYBOARD {
         return;
     }
 
