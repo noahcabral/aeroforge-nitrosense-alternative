@@ -115,7 +115,7 @@ Function VerifyAeroForgeCleanForInstall
   FileWrite $9 "  $$children = @(Get-ChildItem -LiteralPath $$InstallDir -Force -ErrorAction SilentlyContinue)$\r$\n"
   FileWrite $9 "  if ($$children.Count -gt 0) { [void]$$issues.Add('Install directory is not empty: ' + $$InstallDir) }$\r$\n"
   FileWrite $9 "}$\r$\n"
-  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $_ }; exit 20 }$\r$\n"
+  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $$_ }; exit 20 }$\r$\n"
   FileWrite $9 "exit 0$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\VerifyAeroForgeClean.ps1" "$INSTDIR"' $8
@@ -473,7 +473,7 @@ Function un.VerifyAeroForgeRemoved
   FileWrite $9 "foreach ($$path in @((Join-Path $$serviceRoot 'bin\aeroforge-service.exe'), (Join-Path $$serviceRoot 'drivers\IntelMSR.bin'), (Join-Path $$serviceRoot 'state'))) {$\r$\n"
   FileWrite $9 "  if (Test-Path -LiteralPath $$path) { [void]$$issues.Add('Service runtime residue remains: ' + $$path) }$\r$\n"
   FileWrite $9 "}$\r$\n"
-  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $_ }; exit 20 }$\r$\n"
+  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $$_ }; exit 20 }$\r$\n"
   FileWrite $9 "exit 0$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\VerifyAeroForgeRemoved.ps1" "$INSTDIR"' $8
