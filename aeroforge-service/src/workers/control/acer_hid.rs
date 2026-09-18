@@ -257,15 +257,12 @@ fn try_system_usage_device_path(
         return Ok(None);
     }
 
-    let handle = open_hid_handle(&path, 0)?;
+    let handle = HidHandle(open_hid_handle(&path, 0)?);
     let mut attributes = HIDD_ATTRIBUTES {
         Size: size_of::<HIDD_ATTRIBUTES>() as u32,
         ..unsafe { zeroed() }
     };
-    let attributes_ok = unsafe { HidD_GetAttributes(handle, &mut attributes) };
-    unsafe {
-        CloseHandle(handle);
-    }
+    let attributes_ok = unsafe { HidD_GetAttributes(handle.0, &mut attributes) };
 
     if !attributes_ok || attributes.VendorID != ACER_VENDOR_ID {
         return Ok(None);
