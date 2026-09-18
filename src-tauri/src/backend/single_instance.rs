@@ -66,8 +66,9 @@ fn activate_existing_instance_windows(show_window: bool) -> bool {
     }
 }
 
+/// Shared with the hotkey helper, which searches for the app from its own process.
 #[cfg(windows)]
-fn find_existing_main_window(app_exe: &Path, current_pid: u32) -> Option<HWND> {
+pub fn find_existing_main_window(app_exe: &Path, current_pid: u32) -> Option<HWND> {
     let mut context = WindowSearchContext {
         app_exe: app_exe.to_path_buf(),
         current_pid,
@@ -118,7 +119,7 @@ unsafe extern "system" fn enum_windows_for_existing_app(hwnd: HWND, lparam: LPAR
 }
 
 #[cfg(windows)]
-fn is_app_process_running(app_exe: &Path, current_pid: u32) -> bool {
+pub fn is_app_process_running(app_exe: &Path, current_pid: u32) -> bool {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return false;
