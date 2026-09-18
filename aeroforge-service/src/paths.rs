@@ -109,12 +109,23 @@ pub fn system32_command(tool: &str) -> std::process::Command {
     std::process::Command::new(system32_path(&relative))
 }
 
+/// Component logs are append-only and the periodic fan workers write several lines a
+/// minute, so keep one rotated generation instead of growing without bound.
+const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
 pub fn write_log_line(
     log_path: &Path,
     level: &str,
     message: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let line = format!("{} [{}] {}\n", timestamp_string(), level, message);
+    if fs::metadata(log_path)
+        .map(|metadata| metadata.len() >= LOG_ROTATE_BYTES)
+        .unwrap_or(false)
+    {
+        // ponytail: single .1 generation; add numbered rotation if support ever needs more history.
+        let _ = fs::rename(log_path, log_path.with_extension("log.1"));
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -205,6 +216,26 @@ fn timestamp_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_log_line_rotates_once_the_cap_is_reached() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("control-fan.log");
+        fs::write(&log_path, vec![b'x'; LOG_ROTATE_BYTES as usize]).expect("seed log");
+
+        write_log_line(&log_path, "INFO", "after rotation").expect("write");
+
+        let rotated = temp.path().join("control-fan.log.1");
+        assert_eq!(fs::metadata(&rotated).expect("rotated").len(), LOG_ROTATE_BYTES);
+        let fresh = fs::read_to_string(&log_path).expect("fresh log");
+        assert!(fresh.ends_with("[INFO] after rotation\n"));
+        assert!(fresh.len() < 128);
+
+        // A second rotation replaces the previous generation rather than failing.
+        fs::write(&log_path, vec![b'y'; LOG_ROTATE_BYTES as usize]).expect("seed again");
+        write_log_line(&log_path, "INFO", "second").expect("write again");
+        assert!(fs::read(&rotated).expect("rotated again").starts_with(b"y"));
+    }
 
     #[test]
     fn every_system_tool_the_service_launches_exists_at_its_absolute_path() {
