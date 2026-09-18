@@ -16,221 +16,116 @@ pub fn process_request(
     pipe_path: &str,
 ) -> PipeResponse {
     match request {
-        PipeRequest::GetServiceStatus => match build_service_status(paths, pipe_path) {
-            Ok(payload) => PipeResponse::Ok { payload },
-            Err(error) => PipeResponse::Error {
-                message: error.to_string(),
-            },
-        },
+        PipeRequest::GetServiceStatus => respond(build_service_status(paths, pipe_path)),
         PipeRequest::GetCapabilities => {
-            match read_snapshot(paths.worker_snapshot("capabilities")) {
-                Ok(payload) => PipeResponse::Ok { payload },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
+            respond(read_snapshot(paths.worker_snapshot("capabilities")))
         }
-        PipeRequest::GetControlSnapshot => match read_snapshot(paths.worker_snapshot("control")) {
-            Ok(payload) => PipeResponse::Ok { payload },
-            Err(error) => PipeResponse::Error {
-                message: error.to_string(),
-            },
-        },
+        PipeRequest::GetControlSnapshot => respond(read_snapshot(paths.worker_snapshot("control"))),
         PipeRequest::GetTelemetrySnapshot => {
-            match read_snapshot(paths.worker_snapshot("telemetry")) {
-                Ok(payload) => PipeResponse::Ok { payload },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
+            respond(read_snapshot(paths.worker_snapshot("telemetry")))
         }
         PipeRequest::RestoreStartupState { write_token } => {
-            match require_write_authorization(paths, write_token.as_deref()).and_then(|_| {
-                control::restore_startup_state(paths).map_err(|error| error.to_string())
-            }) {
-                Ok(()) => PipeResponse::Ok {
-                    payload: json!({
+            authorized_write(paths, write_token, || {
+                control::restore_startup_state(paths).map(|()| {
+                    json!({
                         "detail": "Restored saved AeroForge power and fan state on manual app launch."
-                    }),
-                },
-                Err(error) => PipeResponse::Error { message: error },
-            }
+                    })
+                })
+            })
         }
         PipeRequest::ApplyPowerProfile {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_power_profile(paths, payload) {
-                Ok(applied) => PipeResponse::Ok {
-                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Applied power profile but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_power_profile(paths, payload)
+                .map(|applied| serialize_applied("power profile", applied))
+        }),
         PipeRequest::ApplyGpuTuning {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_gpu_tuning(paths, payload) {
-            Ok(applied) => PipeResponse::Ok {
-                payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                    json!({
-                        "detail": format!("Applied GPU tuning but failed to serialize response: {error}")
-                    })
-                }),
-            },
-            Err(error) => PipeResponse::Error {
-                message: error.to_string(),
-            },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_gpu_tuning(paths, payload)
+                .map(|applied| serialize_applied("GPU tuning", applied))
+        }),
         PipeRequest::ApplyFanProfile {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_fan_profile(paths, payload) {
-            Ok(applied) => PipeResponse::Ok {
-                payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                    json!({
-                        "detail": format!("Applied fan profile but failed to serialize response: {error}")
-                    })
-                }),
-            },
-            Err(error) => PipeResponse::Error {
-                message: error.to_string(),
-            },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_fan_profile(paths, payload)
+                .map(|applied| serialize_applied("fan profile", applied))
+        }),
         PipeRequest::ApplyCustomFanCurves {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_custom_fan_curves(paths, payload) {
-                Ok(applied) => PipeResponse::Ok {
-                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Applied custom fan curves but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_custom_fan_curves(paths, payload)
+                .map(|applied| serialize_applied("custom fan curves", applied))
+        }),
         PipeRequest::CancelFanSpeedCalibration { write_token } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::cancel_fan_speed_calibration(paths) {
-                Ok(calibration) => PipeResponse::Ok {
-                    payload: serde_json::to_value(calibration).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Canceled fan speed calibration but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
+            authorized_write(paths, write_token, || {
+                control::cancel_fan_speed_calibration(paths)
+                    .map(|calibration| serialize_applied("fan speed calibration", calibration))
+            })
         }
         PipeRequest::StartFanSpeedCalibration { write_token } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::start_fan_speed_calibration(paths) {
-                Ok(calibration) => PipeResponse::Ok {
-                    payload: serde_json::to_value(calibration).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Started fan speed calibration but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
+            authorized_write(paths, write_token, || {
+                control::start_fan_speed_calibration(paths)
+                    .map(|calibration| serialize_applied("fan speed calibration", calibration))
+            })
         }
         PipeRequest::ApplyBootLogo {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_boot_logo(paths, payload) {
-            Ok(applied) => PipeResponse::Ok {
-                payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                    json!({
-                        "detail": format!("Applied boot logo but failed to serialize response: {error}")
-                    })
-                }),
-            },
-            Err(error) => PipeResponse::Error {
-                message: error.to_string(),
-            },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_boot_logo(paths, payload)
+                .map(|applied| serialize_applied("boot logo", applied))
+        }),
         PipeRequest::ApplySmartCharging {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_smart_charging(paths, payload) {
-                Ok(applied) => PipeResponse::Ok {
-                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Applied smart charging but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_smart_charging(paths, payload)
+                .map(|applied| serialize_applied("smart charging", applied))
+        }),
         PipeRequest::ApplyTelemetrySettings {
             payload,
             write_token,
-        } => {
-            if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
-                return PipeResponse::Error { message };
-            }
-            match control::apply_telemetry_settings(paths, payload) {
-                Ok(applied) => PipeResponse::Ok {
-                    payload: serde_json::to_value(applied).unwrap_or_else(|error| {
-                        json!({
-                            "detail": format!("Applied telemetry settings but failed to serialize response: {error}")
-                        })
-                    }),
-                },
-                Err(error) => PipeResponse::Error {
-                    message: error.to_string(),
-                },
-            }
-        }
+        } => authorized_write(paths, write_token, || {
+            control::apply_telemetry_settings(paths, payload)
+                .map(|applied| serialize_applied("telemetry settings", applied))
+        }),
     }
+}
+
+fn respond(result: Result<Value, Box<dyn std::error::Error + Send + Sync>>) -> PipeResponse {
+    match result {
+        Ok(payload) => PipeResponse::Ok { payload },
+        Err(error) => PipeResponse::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+/// Every hardware write is gated on the TOFU token before the handler runs.
+fn authorized_write(
+    paths: &ServicePaths,
+    write_token: Option<String>,
+    apply: impl FnOnce() -> Result<Value, Box<dyn std::error::Error + Send + Sync>>,
+) -> PipeResponse {
+    if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
+        return PipeResponse::Error { message };
+    }
+    respond(apply())
+}
+
+/// The hardware change already happened by the time we serialize, so a serde
+/// failure is reported as a detail rather than turned into an error response.
+fn serialize_applied(what: &str, applied: impl serde::Serialize) -> Value {
+    serde_json::to_value(applied).unwrap_or_else(|error| {
+        json!({
+            "detail": format!("Applied {what} but failed to serialize response: {error}")
+        })
+    })
 }
 
 fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Result<(), String> {
@@ -270,7 +165,9 @@ fn write_token_file(
     token: &str,
 ) -> Result<(), String> {
     fs::create_dir_all(&paths.state_dir).map_err(|error| error.to_string())?;
-    let temp_path = paths.state_dir.join(format!("ipc-write-token.{}.tmp", std::process::id()));
+    let temp_path = paths
+        .state_dir
+        .join(format!("ipc-write-token.{}.tmp", std::process::id()));
     fs::write(&temp_path, token).map_err(|error| error.to_string())?;
     if let Err(error) = fs::rename(&temp_path, token_path) {
         let _ = fs::remove_file(&temp_path);
@@ -384,7 +281,32 @@ fn read_snapshot(
 
 #[cfg(test)]
 mod tests {
-    use super::is_valid_write_token;
+    use super::{is_valid_write_token, process_request};
+    use crate::{
+        paths::ServicePaths,
+        workers::ipc::models::{PipeRequest, PipeResponse},
+    };
+
+    #[test]
+    fn writes_without_a_token_are_denied_before_touching_hardware() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = ServicePaths {
+            logs_dir: temp.path().join("logs"),
+            state_dir: temp.path().join("state"),
+        };
+        let response = process_request(
+            PipeRequest::RestoreStartupState { write_token: None },
+            &paths,
+            "pipe",
+        );
+        match response {
+            PipeResponse::Error { message } => {
+                assert!(message.contains("did not provide"), "{message}")
+            }
+            PipeResponse::Ok { .. } => panic!("write must be denied without a token"),
+        }
+        assert!(!paths.state_dir.join("ipc-write-token.txt").exists());
+    }
 
     #[test]
     fn write_authorization_accepts_only_hex_tokens() {
