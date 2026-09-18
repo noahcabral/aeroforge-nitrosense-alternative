@@ -4041,8 +4041,9 @@ function App() {
     }
 
     quietAutoThermalNotificationKeyRef.current = notificationKey
+    // Keep the key on failure: notification errors are usually persistent (disabled in
+    // Windows), and resetting would retry on every temperature tick while the warning holds.
     void showThermalWarningNotification(sensorLabel, quietAutoThermalWarningTempC).catch((error) => {
-      quietAutoThermalNotificationKeyRef.current = null
       pushTransportDebugEventRef.current(
         `windows thermal warning notification failed: ${describeError(error)}`,
       )
