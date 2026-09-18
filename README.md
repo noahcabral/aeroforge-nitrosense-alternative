@@ -169,6 +169,7 @@ Current shape:
 - a supervisor snapshot at `ProgramData\\AeroForge\\Service\\state\\supervisor.json`
 - local IPC over `\\.\pipe\AeroForgeService` instead of localhost ports
 - no dependency on Acer localhost services or other vendor IPC
+- the desktop app gives up on a pipe request after 60 seconds and reports the stuck service instead of leaving the UI waiting
 
 Current fan control path:
 
