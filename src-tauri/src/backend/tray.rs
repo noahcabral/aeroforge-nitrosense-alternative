@@ -273,25 +273,40 @@ fn handle_menu_event(app: AppHandle, id: String) {
 
 async fn apply_menu_action(app: &AppHandle, id: &str) -> Result<(ControlSnapshot, String), String> {
     match id {
-        ID_FAN_AUTO => apply_tray_fan_profile(app, FanProfileId::Auto),
-        ID_FAN_COOL => apply_tray_fan_profile(app, FanProfileId::Cool),
-        ID_FAN_MAX => apply_tray_fan_profile(app, FanProfileId::Max),
-        ID_POWER_QUIET => apply_tray_power_profile(app, PowerProfileId::BatteryGuard),
-        ID_POWER_BALANCED => apply_tray_power_profile(app, PowerProfileId::Balanced),
-        ID_POWER_PERFORMANCE => apply_tray_power_profile(app, PowerProfileId::Performance),
-        ID_POWER_TURBO => apply_tray_power_profile(app, PowerProfileId::Turbo),
+        ID_FAN_AUTO => apply_tray_fan_profile(app, FanProfileId::Auto).await,
+        ID_FAN_COOL => apply_tray_fan_profile(app, FanProfileId::Cool).await,
+        ID_FAN_MAX => apply_tray_fan_profile(app, FanProfileId::Max).await,
+        ID_POWER_QUIET => apply_tray_power_profile(app, PowerProfileId::BatteryGuard).await,
+        ID_POWER_BALANCED => apply_tray_power_profile(app, PowerProfileId::Balanced).await,
+        ID_POWER_PERFORMANCE => apply_tray_power_profile(app, PowerProfileId::Performance).await,
+        ID_POWER_TURBO => apply_tray_power_profile(app, PowerProfileId::Turbo).await,
         ID_CHARGE_OPTIMIZED => apply_tray_smart_charging(app, true).await,
         ID_CHARGE_FULL => apply_tray_smart_charging(app, false).await,
-        ID_RESTORE_BALANCED_AUTO => restore_balanced_auto(app),
+        ID_RESTORE_BALANCED_AUTO => restore_balanced_auto(app).await,
         _ => Err(format!("Unknown tray action '{id}'.")),
     }
 }
 
-fn apply_tray_fan_profile(
+/// Service pipe calls block for up to the pipe timeout, so keep them off the
+/// async runtime's worker threads (matches the `commands` handlers).
+async fn off_runtime<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> Result<T, Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("{what} worker failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn apply_tray_fan_profile(
     app: &AppHandle,
     profile_id: FanProfileId,
 ) -> Result<(ControlSnapshot, String), String> {
-    let applied = service_pipe::apply_fan_profile(profile_id).map_err(|error| error.to_string())?;
+    let applied = off_runtime("Fan profile apply", move || {
+        service_pipe::apply_fan_profile(profile_id)
+    })
+    .await?;
     let mut controls = app.state::<BackendState>().controls();
     controls.active_fan_profile = applied.profile_id;
     let controls = app
@@ -309,7 +324,7 @@ fn apply_tray_fan_profile(
     Ok((controls, detail))
 }
 
-fn apply_tray_power_profile(
+async fn apply_tray_power_profile(
     app: &AppHandle,
     profile_id: PowerProfileId,
 ) -> Result<(ControlSnapshot, String), String> {
@@ -319,13 +334,15 @@ fn apply_tray_power_profile(
         .personal_settings
         .processor_state_control_enabled;
     let processor_state = default_processor_state_for_profile(&profile_id);
-    let applied = service_pipe::apply_power_profile(
-        profile_id,
-        processor_state,
-        None,
-        processor_state_control_enabled,
-    )
-    .map_err(|error| error.to_string())?;
+    let applied = off_runtime("Power profile apply", move || {
+        service_pipe::apply_power_profile(
+            profile_id,
+            processor_state,
+            None,
+            processor_state_control_enabled,
+        )
+    })
+    .await?;
 
     let mut controls = app.state::<BackendState>().controls();
     controls.active_power_profile = applied.profile_id;
@@ -342,7 +359,11 @@ async fn apply_tray_smart_charging(
     app: &AppHandle,
     enabled: bool,
 ) -> Result<(ControlSnapshot, String), String> {
-    let applied = match service_pipe::apply_smart_charging(enabled) {
+    let applied = match off_runtime("Smart charging apply", move || {
+        service_pipe::apply_smart_charging(enabled)
+    })
+    .await
+    {
         Ok(applied) => (applied.enabled, applied.detail),
         Err(service_error) => {
             let desktop = smart_charge::sync_saved_state(enabled)
@@ -365,9 +386,9 @@ async fn apply_tray_smart_charging(
     Ok((controls, applied.1))
 }
 
-fn restore_balanced_auto(app: &AppHandle) -> Result<(ControlSnapshot, String), String> {
-    let (_, power_detail) = apply_tray_power_profile(app, PowerProfileId::Balanced)?;
-    let (controls, fan_detail) = apply_tray_fan_profile(app, FanProfileId::Auto)?;
+async fn restore_balanced_auto(app: &AppHandle) -> Result<(ControlSnapshot, String), String> {
+    let (_, power_detail) = apply_tray_power_profile(app, PowerProfileId::Balanced).await?;
+    let (controls, fan_detail) = apply_tray_fan_profile(app, FanProfileId::Auto).await?;
     Ok((
         controls,
         format!("Restored Balanced power and Auto fans. {power_detail} {fan_detail}"),
