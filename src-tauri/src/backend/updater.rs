@@ -60,9 +60,9 @@ impl UpdaterStore {
 
     pub fn save_status(&self, status: UpdateStatus) -> Result<UpdateStatus, DynError> {
         let runtime_status = apply_runtime_fields(status);
-        fs::write(
+        super::state::write_text_atomically(
             &self.status_file,
-            serde_json::to_string_pretty(&runtime_status)?,
+            &serde_json::to_string_pretty(&runtime_status)?,
         )?;
 
         {
@@ -102,6 +102,15 @@ pub fn stage_latest_update(
         io::Error::other("No installable update asset is available for the selected channel.")
     })?;
     let checksum_asset = resolved.sha256_asset;
+    // Release metadata is remote input; the asset name only ever becomes a bare
+    // file name under the staging directory.
+    if Path::new(&candidate.name).file_name() != Some(OsStr::new(&candidate.name)) {
+        return Err(io::Error::other(format!(
+            "Refusing update asset with a path-like name: {}",
+            candidate.name
+        ))
+        .into());
+    }
 
     let stage_root = store.updates_dir().join(
         resolved
