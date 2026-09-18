@@ -454,7 +454,34 @@ pub fn apply_telemetry_settings(
     )?)
 }
 
+/// Longest a single service request may take before the UI gets an error instead
+/// of a spinner. Applies (fan, power, boot logo) finish in seconds; only a wedged
+/// handler (stalled WMI/driver call) ever reaches this.
+const PIPE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    // A named pipe opened as a File has no read timeout, so run the blocking
+    // exchange on its own thread and give up waiting for it. A wedged thread is
+    // released when the service answers or restarts (the pipe breaks on both).
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::Builder::new()
+        .name("aeroforge-pipe-request".into())
+        .spawn(move || {
+            let _ = tx.send(request_blocking(command));
+        })?;
+    match rx.recv_timeout(PIPE_REQUEST_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "AeroForge service did not answer within {}s. It may be stuck; restarting the AeroForge service clears it.",
+            PIPE_REQUEST_TIMEOUT.as_secs()
+        )
+        .into()),
+    }
+}
+
+fn request_blocking(
+    command: PipeRequest,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let mut pipe = open_pipe_with_retry()?;
     let serialized = serde_json::to_string(&command)?;
     pipe.write_all(serialized.as_bytes())?;
