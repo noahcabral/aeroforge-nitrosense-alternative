@@ -1,4 +1,4 @@
-use crate::paths::{ServicePaths, system32_command};
+use crate::paths::{command_failure_detail, system32_command, ServicePaths};
 use serde::Serialize;
 use std::{env, fs};
 
@@ -46,7 +46,7 @@ pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
     if !output.status.success() {
         return NvidiaPowerReadback {
             source: "nvidia-smi",
-            error: Some(command_error_detail(&output)),
+            error: Some(command_failure_detail("nvidia-smi", &output)),
             ..Default::default()
         };
     }
@@ -167,20 +167,6 @@ fn parse_nvidia_telemetry_enabled(raw: &str) -> Option<bool> {
                 .get("nvidiaTelemetryEnabled")
                 .and_then(|value| value.as_bool())
         })
-}
-
-fn command_error_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-
-    format!("nvidia-smi exited with status {}", output.status)
 }
 
 #[cfg(test)]

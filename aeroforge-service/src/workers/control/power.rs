@@ -1,5 +1,5 @@
 use regex::Regex;
-use crate::paths::system32_command;
+use crate::paths::{command_failure_detail, system32_command};
 use std::{env, sync::OnceLock, thread, time::Duration};
 
 use crate::{
@@ -779,17 +779,12 @@ fn run_powercfg_output(
         return Ok(output);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("powercfg exited with status {}", output.status)
-    };
-
-    Err(format!("powercfg {} failed: {}", arguments.join(" "), detail).into())
+    Err(format!(
+        "powercfg {} failed: {}",
+        arguments.join(" "),
+        command_failure_detail("powercfg", &output)
+    )
+    .into())
 }
 
 fn read_processor_state_readback(

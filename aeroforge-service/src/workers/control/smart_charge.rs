@@ -1,5 +1,5 @@
 use std::{io, os::windows::process::CommandExt};
-use crate::paths::system32_command;
+use crate::paths::{command_failure_detail, system32_command};
 
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -247,15 +247,7 @@ $result | ConvertTo-Json -Depth 8 -Compress
         .output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(io::Error::other(detail).into());
     }
 
@@ -545,15 +537,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     let _ = std::fs::remove_file(&tmp_path);
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(
             io::Error::other(format!("BatteryControl service apply failed: {detail}")).into(),
         );

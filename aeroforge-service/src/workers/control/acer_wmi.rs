@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::paths::system32_command;
+use crate::paths::{command_failure_detail, system32_command};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -323,15 +323,7 @@ if ($null -ne $result.gmOutput) {
         .output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(format!(
             "{method} failed through native COM ({com_error}) and hidden CIM fallback ({detail})"
         )
@@ -404,15 +396,7 @@ foreach ($item in @(
         .output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(format!(
             "AcerGamingFunction GetGamingSysInfo did not return any firmware sensor values through native COM ({}). Hidden CIM fallback failed: {detail}",
             com_errors.join(" | ")

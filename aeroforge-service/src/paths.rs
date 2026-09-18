@@ -110,6 +110,19 @@ pub fn system32_command(tool: &str) -> std::process::Command {
     std::process::Command::new(system32_path(&relative))
 }
 
+/// What a failed tool actually said: stderr, else stdout, else its exit status.
+pub fn command_failure_detail(tool: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    format!("{tool} exited with status {}", output.status)
+}
+
 /// Component logs are append-only and the periodic fan workers write several lines a
 /// minute, so keep one rotated generation instead of growing without bound.
 const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
