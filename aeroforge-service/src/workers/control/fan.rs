@@ -32,6 +32,9 @@ const QUIET_AUTO_ELEVATED_MAX_PERCENT: u8 = 35;
 const QUIET_AUTO_ELEVATED_DEFAULT_PERCENT: u8 = 8;
 const QUIET_AUTO_RPM_LOW_TOLERANCE: u16 = 120;
 const QUIET_AUTO_RPM_HIGH_TOLERANCE: u16 = 220;
+/// Firmware reports 0 for an idle/absent sensor (dGPU powered down, first reads after
+/// resume) and sentinels above this for "unsupported"; neither is a temperature.
+const QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C: u8 = 120;
 const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
 const FAN_SPEED_CALIBRATION_CANCEL_POLL_MS: u64 = 250;
 
@@ -1302,25 +1305,27 @@ fn hottest_temperature(
     consider_temperature(
         &mut hottest,
         "CPU",
-        verification
-            .cpu_temp_c
-            .and_then(u16_to_u8)
-            .or(temperatures.cpu_temp_c),
+        plausible_temp_c(verification.cpu_temp_c.and_then(u16_to_u8))
+            .or(plausible_temp_c(temperatures.cpu_temp_c)),
     );
     consider_temperature(
         &mut hottest,
         "GPU",
-        verification
-            .gpu_temp_c
-            .and_then(u16_to_u8)
-            .or(temperatures.gpu_temp_c),
+        plausible_temp_c(verification.gpu_temp_c.and_then(u16_to_u8))
+            .or(plausible_temp_c(temperatures.gpu_temp_c)),
     );
     consider_temperature(
         &mut hottest,
         "System",
-        verification.system_temp_c.and_then(u16_to_u8),
+        plausible_temp_c(verification.system_temp_c.and_then(u16_to_u8)),
     );
     hottest
+}
+
+/// A 0 or sentinel reading counts as blind (and falls through to the next source), so a
+/// glitch cannot drop a hot machine to the idle target.
+fn plausible_temp_c(temp_c: Option<u8>) -> Option<u8> {
+    temp_c.filter(|temp_c| (1..=QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C).contains(temp_c))
 }
 
 fn consider_temperature(
@@ -1674,8 +1679,9 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 mod tests {
     use super::{
         clamp_custom_curve_fan_percent, classify_fan_verification_status, cool_fan_curve_set,
-        interpolate_curve_speed, quiet_auto_target_rpm, sanitize_curve_points, FanCurvePoint,
-        FanVerification, QUIET_AUTO_ELEVATED_RPM, QUIET_AUTO_IDLE_RPM,
+        hottest_temperature, interpolate_curve_speed, quiet_auto_target_rpm, sanitize_curve_points,
+        CurrentTemperatures, FanCurvePoint, FanVerification, QUIET_AUTO_ELEVATED_RPM,
+        QUIET_AUTO_IDLE_RPM,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
     use crate::workers::control::models::ControlLayerState;
@@ -1694,6 +1700,29 @@ mod tests {
         assert_eq!(
             quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), Some(("cpu", 70))),
             QUIET_AUTO_IDLE_RPM
+        );
+    }
+
+    #[test]
+    fn hottest_temperature_ignores_zero_and_sentinel_readings() {
+        let verification = FanVerification {
+            telemetry_available: true,
+            cpu_temp_c: Some(0),
+            gpu_temp_c: Some(255),
+            system_temp_c: Some(0),
+            ..FanVerification::default()
+        };
+        let temperatures = CurrentTemperatures::default();
+        assert_eq!(hottest_temperature(&verification, &temperatures), None);
+
+        // A blind firmware read falls through to the telemetry snapshot.
+        let temperatures = CurrentTemperatures {
+            cpu_temp_c: Some(83),
+            gpu_temp_c: Some(0),
+        };
+        assert_eq!(
+            hottest_temperature(&verification, &temperatures),
+            Some(("CPU", 83))
         );
     }
 
