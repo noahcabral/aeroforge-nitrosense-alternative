@@ -132,13 +132,21 @@ pub fn read_firmware_sensor_snapshot(
     }
 
     let mut errors = Vec::new();
-    let supported_sensors = read_sysinfo_raw_com(0x0000, &mut errors);
-    let battery_status = read_sysinfo_raw_com(0x0002, &mut errors);
-    let cpu_temp = read_sysinfo_raw_com(0x0101, &mut errors);
-    let cpu_fan = read_sysinfo_raw_com(0x0201, &mut errors);
-    let system_temp = read_sysinfo_raw_com(0x0301, &mut errors);
-    let gpu_fan = read_sysinfo_raw_com(0x0601, &mut errors);
-    let gpu_temp = read_sysinfo_raw_com(0x0A01, &mut errors);
+    let session = GamingFunctionSession::open()
+        .map_err(|error| errors.push(error.to_string()))
+        .ok();
+    let mut read = |input: u32| {
+        session
+            .as_ref()
+            .and_then(|session| read_sysinfo_raw_com(session, input, &mut errors))
+    };
+    let supported_sensors = read(0x0000);
+    let battery_status = read(0x0002);
+    let cpu_temp = read(0x0101);
+    let cpu_fan = read(0x0201);
+    let system_temp = read(0x0301);
+    let gpu_fan = read(0x0601);
+    let gpu_temp = read(0x0A01);
 
     if [
         supported_sensors,
@@ -257,30 +265,60 @@ fn invoke_acer_gaming_u64_method_com(
     method: &'static str,
     input: u64,
 ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
-    let _com = ComApartment::initialize()?;
+    GamingFunctionSession::open()?.invoke_u64(method, input)
+}
 
-    let locator = WbemLocator::create()?;
-    let services = locator.connect(ACER_WMI_NAMESPACE)?;
-    let class_object = services.get_object(ACER_GAMING_CLASS)?;
-    let input_signature = class_object.get_method_input_signature(method)?;
-    let input_instance = input_signature.spawn_instance()?;
-    input_instance.put_u64(GM_INPUT, input)?;
+/// One WMI connection to AcerGamingFunction, reused across method calls so a
+/// telemetry tick reads all of its sensors without reconnecting for each one.
+/// Fields drop in declaration order: every COM object is released before the
+/// apartment is uninitialized.
+struct GamingFunctionSession {
+    class_object: WbemClassObject,
+    services: WbemServices,
+    _locator: WbemLocator,
+    _com: ComApartment,
+}
 
-    let execution =
-        services.exec_method(ACER_GAMING_OBJECT_PATH, method, input_instance.as_ptr())?;
-    let output = execution
-        .output
-        .as_ref()
-        .map(|params| params.try_get_u64(GM_OUTPUT))
-        .transpose()?
-        .flatten();
+impl GamingFunctionSession {
+    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let com = ComApartment::initialize()?;
+        let locator = WbemLocator::create()?;
+        let services = locator.connect(ACER_WMI_NAMESPACE)?;
+        let class_object = services.get_object(ACER_GAMING_CLASS)?;
+        Ok(Self {
+            class_object,
+            services,
+            _locator: locator,
+            _com: com,
+        })
+    }
 
-    Ok(AcerWmiMethodResult {
-        method,
-        input,
-        hresult: execution.hresult,
-        output,
-    })
+    fn invoke_u64(
+        &self,
+        method: &'static str,
+        input: u64,
+    ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+        let input_signature = self.class_object.get_method_input_signature(method)?;
+        let input_instance = input_signature.spawn_instance()?;
+        input_instance.put_u64(GM_INPUT, input)?;
+
+        let execution =
+            self.services
+                .exec_method(ACER_GAMING_OBJECT_PATH, method, input_instance.as_ptr())?;
+        let output = execution
+            .output
+            .as_ref()
+            .map(|params| params.try_get_u64(GM_OUTPUT))
+            .transpose()?
+            .flatten();
+
+        Ok(AcerWmiMethodResult {
+            method,
+            input,
+            hresult: execution.hresult,
+            output,
+        })
+    }
 }
 
 fn invoke_acer_gaming_u64_method_cim(
@@ -339,8 +377,12 @@ if ($null -ne $result.gmOutput) {
     })
 }
 
-fn read_sysinfo_raw_com(input: u32, errors: &mut Vec<String>) -> Option<u64> {
-    match invoke_acer_gaming_u64_method_com("GetGamingSysInfo", u64::from(input)) {
+fn read_sysinfo_raw_com(
+    session: &GamingFunctionSession,
+    input: u32,
+    errors: &mut Vec<String>,
+) -> Option<u64> {
+    match session.invoke_u64("GetGamingSysInfo", u64::from(input)) {
         Ok(result) => result.output,
         Err(error) => {
             errors.push(format!("0x{input:X}: {error}"));
