@@ -66,6 +66,7 @@ const BACKGROUND_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const BACKGROUND_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UI_PREWARM_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const UI_PREWARM_INTERVAL: Duration = Duration::from_secs(30);
+const UI_PREWARM_MAX_BACKOFF_EXPONENT: u32 = 5;
 
 static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
 static APP_EXE: OnceLock<PathBuf> = OnceLock::new();
@@ -177,30 +178,74 @@ fn spawn_ui_prewarm_worker(log_path: &Path, app_exe: &Path) {
     let app_exe = app_exe.to_path_buf();
     thread::spawn(move || {
         sleep(UI_PREWARM_INITIAL_DELAY);
+        let mut launched_last_tick = false;
+        let mut failed_launches = 0u32;
         loop {
-            if let Err(error) = reconcile_ui_prewarm(&log_path, &app_exe) {
-                write_log(&log_path, &format!("UI prewarm check failed: {error}"));
+            let launched = match reconcile_ui_prewarm(&log_path, &app_exe) {
+                Ok(launched) => launched,
+                Err(error) => {
+                    write_log(&log_path, &format!("UI prewarm check failed: {error}"));
+                    true
+                }
+            };
+            // A prewarm that is gone again by the next tick died at startup (missing WebView2,
+            // crash): back off instead of relaunching a broken install every 30 seconds forever.
+            failed_launches = if launched && launched_last_tick {
+                failed_launches + 1
+            } else if launched {
+                failed_launches
+            } else {
+                0
+            };
+            launched_last_tick = launched;
+            let backoff = UI_PREWARM_INTERVAL
+                * 2u32.pow(failed_launches.min(UI_PREWARM_MAX_BACKOFF_EXPONENT));
+            if failed_launches > 0 {
+                write_log(
+                    &log_path,
+                    &format!(
+                        "UI prewarm exited before the next check ({failed_launches} in a row); next attempt in {}s",
+                        backoff.as_secs()
+                    ),
+                );
             }
-            sleep(UI_PREWARM_INTERVAL);
+            sleep(backoff);
         }
     });
 }
 
+#[cfg(test)]
+mod prewarm_backoff_tests {
+    use super::{UI_PREWARM_INTERVAL, UI_PREWARM_MAX_BACKOFF_EXPONENT};
+
+    #[test]
+    fn backoff_caps_at_max_exponent() {
+        let backoff = |failed: u32| {
+            UI_PREWARM_INTERVAL * 2u32.pow(failed.min(UI_PREWARM_MAX_BACKOFF_EXPONENT))
+        };
+        assert_eq!(backoff(0), UI_PREWARM_INTERVAL);
+        assert_eq!(backoff(1), UI_PREWARM_INTERVAL * 2);
+        assert_eq!(backoff(5), UI_PREWARM_INTERVAL * 32);
+        assert_eq!(backoff(40), UI_PREWARM_INTERVAL * 32);
+    }
+}
+
+/// Returns whether a hidden UI instance was launched on this tick.
 fn reconcile_ui_prewarm(
     log_path: &Path,
     app_exe: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
         return Err("could not resolve AeroForge config root".into());
     };
 
     let settings = load_helper_settings(&config_root);
     if !settings.keep_ui_prewarmed {
-        return Ok(());
+        return Ok(false);
     }
 
     if is_app_process_running(app_exe) {
-        return Ok(());
+        return Ok(false);
     }
 
     match Command::new(app_exe).arg("--prewarm").spawn() {
@@ -213,7 +258,7 @@ fn reconcile_ui_prewarm(
                     child.id()
                 ),
             );
-            Ok(())
+            Ok(true)
         }
         Err(error) => Err(format!("failed to launch hidden UI prewarm: {error}").into()),
     }
