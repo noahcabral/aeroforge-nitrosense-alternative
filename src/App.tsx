@@ -4377,6 +4377,7 @@ function App() {
         setStatusMessage(result.status)
       } catch (error) {
         setStatusMessage(`Fan speed calibration cancel failed: ${describeError(error)}`)
+        showToast('error', 'Calibration cancel failed', describeError(error))
       } finally {
         setSettingsActionPending((current) =>
           current === 'fan-calibration-cancel' ? null : current,
@@ -4394,6 +4395,7 @@ function App() {
       setStatusMessage(result.status)
     } catch (error) {
       setStatusMessage(`Fan speed calibration failed to start: ${describeError(error)}`)
+      showToast('error', 'Calibration failed to start', describeError(error))
     } finally {
       setSettingsActionPending((current) => (current === 'fan-calibration' ? null : current))
     }
