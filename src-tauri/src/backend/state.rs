@@ -9,10 +9,10 @@ use std::{
 };
 
 use super::models::{
-    ApplyState, BackendContract, BootArtId, CapabilitySnapshot, CommandDescriptor, ControlSnapshot,
-    CustomPowerBaseId, FanCurvePoint, FanCurveSet, FanProfileId, FeatureSupport, GpuTuningState,
-    OcPreset, PersistenceStatus, PersonalSettings, PowerProfileId, ProcessorStateSettings,
-    ShellStatus, TelemetrySnapshot, UpdateChannelId, UpdateStatus,
+    ApplyState, BootArtId, CapabilitySnapshot, ControlSnapshot, CustomPowerBaseId, FanCurvePoint,
+    FanCurveSet, FanProfileId, FeatureSupport, GpuTuningState, OcPreset, PersistenceStatus,
+    PersonalSettings, PowerProfileId, ProcessorStateSettings, ShellStatus, TelemetrySnapshot,
+    UpdateChannelId, UpdateStatus,
 };
 use super::process::hidden_command;
 use super::updater::UpdaterStore;
@@ -24,9 +24,7 @@ const ANV15_51_GPU_MEMORY_OFFSETS: [(&str, i16); 3] = [
 ];
 
 pub struct BackendState {
-    contract: BackendContract,
     capabilities: CapabilitySnapshot,
-    default_controls: ControlSnapshot,
     controls: RwLock<ControlSnapshot>,
     telemetry: RwLock<TelemetrySnapshot>,
     config_file: PathBuf,
@@ -39,7 +37,6 @@ impl BackendState {
         fs::create_dir_all(&config_root)?;
         let config_file = config_root.join("control-state.json");
 
-        let contract = build_contract();
         let capabilities = build_capabilities();
         let default_controls = build_default_controls();
         let telemetry = build_default_telemetry();
@@ -51,19 +48,13 @@ impl BackendState {
         }
 
         Ok(Self {
-            contract,
             capabilities,
-            default_controls,
             controls: RwLock::new(controls),
             telemetry: RwLock::new(telemetry),
             config_file,
             updater,
             initialized_from_disk,
         })
-    }
-
-    pub fn contract(&self) -> BackendContract {
-        self.contract.clone()
     }
 
     pub fn capabilities(&self) -> CapabilitySnapshot {
@@ -119,12 +110,6 @@ impl BackendState {
         *controls = snapshot;
         persist_controls(&self.config_file, &controls)?;
         Ok(controls.clone())
-    }
-
-    pub fn reset_controls(
-        &self,
-    ) -> Result<ControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        self.save_controls(self.default_controls.clone())
     }
 }
 
@@ -264,184 +249,6 @@ fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Er
     let backup_name = format!("{file_name}.{reason}.{stamp}.bak");
     let backup_path = path.with_file_name(backup_name);
     fs::rename(path, backup_path)
-}
-
-fn build_contract() -> BackendContract {
-    BackendContract {
-        schema_version: "0.2.0".into(),
-        commands: vec![
-            CommandDescriptor {
-                command: "runtime_shell".into(),
-                stage: "implemented".into(),
-                purpose: "Return shell and backend version information.".into(),
-            },
-            CommandDescriptor {
-                command: "get_backend_contract".into(),
-                stage: "implemented".into(),
-                purpose: "Return the command schema exposed by the desktop backend.".into(),
-            },
-            CommandDescriptor {
-                command: "get_service_status".into(),
-                stage: "implemented".into(),
-                purpose: "Return whether the AeroForge Windows service is reachable over the named pipe.".into(),
-            },
-            CommandDescriptor {
-                command: "get_hardware_readiness_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Report service, WMI, and Acer hardware readiness without depending on WMI being healthy.".into(),
-            },
-            CommandDescriptor {
-                command: "repair_hardware_prerequisites".into(),
-                stage: "implemented".into(),
-                purpose: "Launch the elevated AeroForge repair helper to reinstall the service and enable/start WMI.".into(),
-            },
-            CommandDescriptor {
-                command: "start_hardware_service".into(),
-                stage: "implemented".into(),
-                purpose: "Start an installed AeroForgeService without running the full repair/reinstall flow.".into(),
-            },
-            CommandDescriptor {
-                command: "request_service_heal".into(),
-                stage: "implemented".into(),
-                purpose: "Run the hidden AeroForge Service Healer scheduled task to start the service and WMI without a UAC prompt.".into(),
-            },
-            CommandDescriptor {
-                command: "get_capability_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Describe supported hardware control paths, preferring the AeroForge service when reachable.".into(),
-            },
-            CommandDescriptor {
-                command: "get_control_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Return the staged control state mirrored by the frontend today.".into(),
-            },
-            CommandDescriptor {
-                command: "get_telemetry_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Return the current telemetry snapshot, preferring the AeroForge service when reachable.".into(),
-            },
-            CommandDescriptor {
-                command: "get_backend_poll_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Return fast cached service, telemetry, and live-control snapshots for routine UI refresh without a named-pipe round trip.".into(),
-            },
-            CommandDescriptor {
-                command: "get_backend_bootstrap".into(),
-                stage: "implemented".into(),
-                purpose: "Return a single payload with shell, contract, capabilities, controls, and telemetry.".into(),
-            },
-            CommandDescriptor {
-                command: "get_persistence_status".into(),
-                stage: "implemented".into(),
-                purpose: "Return where AeroForge stores its app-owned control state.".into(),
-            },
-            CommandDescriptor {
-                command: "get_update_status".into(),
-                stage: "implemented".into(),
-                purpose: "Return the cached GitHub updater state and any staged update asset details.".into(),
-            },
-            CommandDescriptor {
-                command: "append_performance_log".into(),
-                stage: "implemented".into(),
-                purpose: "Append batched desktop UI performance events to AeroForge's local JSONL diagnostics log.".into(),
-            },
-            CommandDescriptor {
-                command: "check_for_updates".into(),
-                stage: "implemented".into(),
-                purpose: "Query the published GitHub release feed for the latest build metadata.".into(),
-            },
-            CommandDescriptor {
-                command: "stage_update_download".into(),
-                stage: "implemented".into(),
-                purpose: "Download the latest setup EXE or portable ZIP into AeroForge's local staging directory.".into(),
-            },
-            CommandDescriptor {
-                command: "install_staged_update".into(),
-                stage: "implemented".into(),
-                purpose: "Launch the portable update handoff script for a previously staged ZIP build.".into(),
-            },
-            CommandDescriptor {
-                command: "show_update_notification".into(),
-                stage: "implemented".into(),
-                purpose: "Show a Windows notification when a newer AeroForge release is available.".into(),
-            },
-            CommandDescriptor {
-                command: "save_control_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Persist AeroForge-owned control state to disk.".into(),
-            },
-            CommandDescriptor {
-                command: "reset_control_snapshot".into(),
-                stage: "implemented".into(),
-                purpose: "Restore AeroForge-owned control state to backend defaults.".into(),
-            },
-            CommandDescriptor {
-                command: "detect_capabilities".into(),
-                stage: "planned".into(),
-                purpose: "Probe real system support and privilege requirements.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_power_profile".into(),
-                stage: "implemented".into(),
-                purpose: "Apply a power profile through the AeroForge service and persist the staged processor policy.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_fan_profile".into(),
-                stage: "implemented".into(),
-                purpose: "Apply Auto, Cool, Max, or Custom cooling behavior through the AeroForge service.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_custom_fan_curves".into(),
-                stage: "implemented".into(),
-                purpose: "Validate CPU and GPU fan curves and write current-temperature targets through the AeroForge service.".into(),
-            },
-            CommandDescriptor {
-                command: "start_fan_speed_calibration".into(),
-                stage: "implemented".into(),
-                purpose: "Start a background fan percent-to-RPM calibration pass and persist the recorded table in service state.".into(),
-            },
-            CommandDescriptor {
-                command: "cancel_fan_speed_calibration".into(),
-                stage: "implemented".into(),
-                purpose: "Request cancellation of the active fan calibration pass and restore the previous fan mode.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_smart_charging".into(),
-                stage: "implemented".into(),
-                purpose: "Apply Acer battery-health charging mode and persist the staged smart-charge state.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_auto_refresh_rate".into(),
-                stage: "implemented".into(),
-                purpose: "Switch the primary display to 60 Hz while on battery and restore the captured refresh rate on AC or disable.".into(),
-            },
-            CommandDescriptor {
-                command: "set_nvidia_telemetry_enabled".into(),
-                stage: "implemented".into(),
-                purpose: "Enable or disable NVIDIA clock, power, and limit polling in the AeroForge service.".into(),
-            },
-            CommandDescriptor {
-                command: "set_charge_behavior".into(),
-                stage: "planned".into(),
-                purpose: "Control smart charging, USB power, and related battery behaviors.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_blue_light_filter".into(),
-                stage: "implemented".into(),
-                purpose: "Apply the Acer-style blue light gamma ramp and persist the staged eye-care state.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_gpu_tuning".into(),
-                stage: "implemented".into(),
-                purpose: "Apply GPU clock tuning through the AeroForge service and persist the staged tuning state.".into(),
-            },
-            CommandDescriptor {
-                command: "apply_boot_logo".into(),
-                stage: "implemented".into(),
-                purpose: "Apply a custom boot logo through the AeroForge service using a direct EFI System Partition write with backup and verification.".into(),
-            },
-        ],
-    }
 }
 
 fn build_capabilities() -> CapabilitySnapshot {

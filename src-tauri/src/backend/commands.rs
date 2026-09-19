@@ -10,28 +10,17 @@ use tauri::{AppHandle, Manager, State};
 use super::{
     blue_light, boot_logo, cpu_clock, display_refresh, hardware_readiness,
     models::{
-        ApplyState, BackendBootstrap, BackendContract, BackendPollSnapshot, BackendPollTimings,
+        ApplyState, BackendBootstrap, BackendPollSnapshot, BackendPollTimings,
         BlueLightApplyResult, BootLogoApplyResult, CapabilitySnapshot, ControlSnapshot,
         CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, HardwareReadinessSnapshot,
-        LiveControlSnapshot, NvidiaTelemetryApplyResult, PerformanceLogEvent, PersistenceStatus,
-        PowerProfileId, ProcessorStateSettings, RepairLaunchResult, ServiceHealResult,
-        ServiceStartResult, ServiceStatus, ShellStatus, SmartChargeApplyResult, TelemetrySnapshot,
-        UpdateChannelId, UpdateStatus,
+        LiveControlSnapshot, NvidiaTelemetryApplyResult, PerformanceLogEvent, PowerProfileId,
+        ProcessorStateSettings, RepairLaunchResult, ServiceHealResult, ServiceStartResult,
+        ServiceStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId, UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
     tray, updater,
 };
-
-#[tauri::command]
-pub fn runtime_shell() -> ShellStatus {
-    shell_status()
-}
-
-#[tauri::command]
-pub fn get_backend_contract(state: State<'_, BackendState>) -> BackendContract {
-    state.contract()
-}
 
 /// Sync commands run on the main thread, so anything that waits on the service
 /// pipe, a child process, the network or a display change goes through here.
@@ -177,7 +166,6 @@ pub async fn get_backend_bootstrap(
     Ok(BackendBootstrap {
         shell: shell_status(),
         service: poll.service,
-        contract: state.contract(),
         capabilities,
         hardware_readiness,
         controls: state.controls(),
@@ -186,16 +174,6 @@ pub async fn get_backend_bootstrap(
         persistence: state.persistence_status(),
         update_status: state.update_status(),
     })
-}
-
-#[tauri::command]
-pub fn get_persistence_status(state: State<'_, BackendState>) -> PersistenceStatus {
-    state.persistence_status()
-}
-
-#[tauri::command]
-pub fn get_update_status(state: State<'_, BackendState>) -> UpdateStatus {
-    state.update_status()
 }
 
 #[tauri::command]
@@ -516,16 +494,6 @@ pub fn save_control_snapshot(
     let controls = state
         .save_controls(snapshot)
         .map_err(|error| error.to_string())?;
-    tray::refresh(&app, &controls);
-    Ok(controls)
-}
-
-#[tauri::command]
-pub fn reset_control_snapshot(
-    app: AppHandle,
-    state: State<'_, BackendState>,
-) -> Result<ControlSnapshot, String> {
-    let controls = state.reset_controls().map_err(|error| error.to_string())?;
     tray::refresh(&app, &controls);
     Ok(controls)
 }

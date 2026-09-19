@@ -20,8 +20,6 @@ pub fn run() {
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            commands::runtime_shell,
-            commands::get_backend_contract,
             commands::get_service_status,
             commands::get_hardware_readiness_snapshot,
             commands::repair_hardware_prerequisites,
@@ -33,8 +31,6 @@ pub fn run() {
             commands::get_telemetry_snapshot,
             commands::get_backend_poll_snapshot,
             commands::get_backend_bootstrap,
-            commands::get_persistence_status,
-            commands::get_update_status,
             commands::check_for_updates,
             commands::stage_update_download,
             commands::install_staged_update,
@@ -46,7 +42,6 @@ pub fn run() {
             commands::apply_auto_refresh_rate,
             commands::set_nvidia_telemetry_enabled,
             commands::save_control_snapshot,
-            commands::reset_control_snapshot,
             commands::apply_power_profile,
             commands::apply_gpu_tuning,
             commands::apply_fan_profile,

@@ -34,21 +34,6 @@ pub struct ServiceStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CommandDescriptor {
-    pub command: String,
-    pub stage: String,
-    pub purpose: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackendContract {
-    pub schema_version: String,
-    pub commands: Vec<CommandDescriptor>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PerformanceLogEvent {
     pub session_id: String,
     pub event_type: String,
@@ -686,7 +671,6 @@ pub struct NvidiaTelemetryApplyResult {
 pub struct BackendBootstrap {
     pub shell: ShellStatus,
     pub service: ServiceStatus,
-    pub contract: BackendContract,
     pub capabilities: CapabilitySnapshot,
     pub hardware_readiness: HardwareReadinessSnapshot,
     pub controls: ControlSnapshot,

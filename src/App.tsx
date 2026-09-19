@@ -2413,26 +2413,22 @@ function App() {
     }
   }, [displayedAcPluggedIn, displayedBatteryLifeRemainingSec])
 
+  // Keyed on "counting or not" so the interval survives each tick instead of
+  // being torn down and recreated every second.
+  const runtimeEstimateCountingDown = runtimeEstimateCountdownSec > 0
   useEffect(() => {
-    if (runtimeEstimateCountdownSec <= 0) {
+    if (!runtimeEstimateCountingDown) {
       return
     }
 
     const timer = window.setInterval(() => {
-      setRuntimeEstimateCountdownSec((current) => {
-        if (current <= 1) {
-          window.clearInterval(timer)
-          return 0
-        }
-
-        return current - 1
-      })
+      setRuntimeEstimateCountdownSec((current) => Math.max(0, current - 1))
     }, 1000)
 
     return () => {
       window.clearInterval(timer)
     }
-  }, [runtimeEstimateCountdownSec])
+  }, [runtimeEstimateCountingDown])
 
   useEffect(() => {
     if (!draggingPoint) {

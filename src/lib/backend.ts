@@ -26,17 +26,6 @@ export type ServiceStatus = {
   detail: string
 }
 
-export type CommandDescriptor = {
-  command: string
-  stage: string
-  purpose: string
-}
-
-export type BackendContract = {
-  schemaVersion: string
-  commands: CommandDescriptor[]
-}
-
 export type FeatureSupport = {
   available: boolean
   writable: boolean
@@ -398,7 +387,6 @@ export type NvidiaTelemetryApplyResult = {
 export type BackendBootstrap = {
   shell: ShellStatus
   service: ServiceStatus
-  contract: BackendContract
   capabilities: CapabilitySnapshot
   hardwareReadiness: HardwareReadinessSnapshot
   controls: ControlSnapshot
@@ -445,10 +433,6 @@ export type PerformanceLogEvent = {
   payload: Record<string, unknown>
 }
 
-export async function getRuntimeShell() {
-  return invoke<ShellStatus>('runtime_shell')
-}
-
 export async function getBackendBootstrap() {
   return invoke<BackendBootstrap>('get_backend_bootstrap')
 }
@@ -487,14 +471,6 @@ export async function getControlSnapshot() {
 
 export async function getLiveControlSnapshot() {
   return invoke<LiveControlSnapshot>('get_live_control_snapshot')
-}
-
-export async function getPersistenceStatus() {
-  return invoke<PersistenceStatus>('get_persistence_status')
-}
-
-export async function getUpdateStatus() {
-  return invoke<UpdateStatus>('get_update_status')
 }
 
 export async function appendPerformanceLog(events: PerformanceLogEvent[]) {
@@ -539,10 +515,6 @@ export async function setNvidiaTelemetryEnabled(enabled: boolean) {
 
 export async function saveControlSnapshot(snapshot: ControlSnapshot) {
   return invoke<ControlSnapshot>('save_control_snapshot', { snapshot })
-}
-
-export async function resetControlSnapshot() {
-  return invoke<ControlSnapshot>('reset_control_snapshot')
 }
 
 export async function applyPowerProfile(
