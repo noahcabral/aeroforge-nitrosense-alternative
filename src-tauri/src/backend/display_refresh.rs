@@ -32,44 +32,63 @@ pub fn sync_auto_refresh_rate(
     let current_hz = current_refresh_rate_hz()?;
 
     if !enabled {
-        return sync_disabled(on_battery, current_hz, saved_restore_hz);
+        return restore_saved_rate(
+            false,
+            on_battery,
+            current_hz,
+            saved_restore_hz,
+            "Auto 60 Hz on battery disabled.",
+            "No refresh-rate restore was needed.",
+        );
     }
 
     if on_battery {
         return sync_on_battery(current_hz, saved_restore_hz);
     }
 
-    sync_on_ac(current_hz, saved_restore_hz)
+    restore_saved_rate(
+        true,
+        false,
+        current_hz,
+        saved_restore_hz,
+        "AC power detected.",
+        "Auto 60 Hz is armed for the next battery session.",
+    )
 }
 
-fn sync_disabled(
+/// "Disabled" and "back on AC" mean the same thing for the panel: put the saved
+/// rate back if one is pending, otherwise leave the display alone.
+fn restore_saved_rate(
+    enabled: bool,
     on_battery: bool,
     current_hz: u32,
     saved_restore_hz: Option<u32>,
+    reason: &str,
+    idle_detail: &str,
 ) -> Result<AutoRefreshRatePayload, DynError> {
     if let Some(restore_hz) = saved_restore_hz.filter(|hz| *hz > BATTERY_REFRESH_HZ) {
         if current_hz != restore_hz {
             set_refresh_rate_hz(restore_hz)?;
             return Ok(payload(
-                false,
+                enabled,
                 on_battery,
                 current_hz,
                 Some(restore_hz),
                 None,
                 format!(
-                    "Auto 60 Hz on battery disabled. Restored the display refresh rate from {current_hz} Hz to {restore_hz} Hz."
+                    "{reason} Restored the display refresh rate from {current_hz} Hz to {restore_hz} Hz."
                 ),
             ));
         }
     }
 
     Ok(payload(
-        false,
+        enabled,
         on_battery,
         current_hz,
         None,
         None,
-        "Auto 60 Hz on battery disabled. No refresh-rate restore was needed.".into(),
+        format!("{reason} {idle_detail}"),
     ))
 }
 
@@ -115,36 +134,6 @@ fn sync_on_battery(
         format!(
             "Switched the display from {current_hz} Hz to 60 Hz for battery mode. AeroForge will restore {restore_hz} Hz when AC power returns."
         ),
-    ))
-}
-
-fn sync_on_ac(
-    current_hz: u32,
-    saved_restore_hz: Option<u32>,
-) -> Result<AutoRefreshRatePayload, DynError> {
-    if let Some(restore_hz) = saved_restore_hz.filter(|hz| *hz > BATTERY_REFRESH_HZ) {
-        if current_hz != restore_hz {
-            set_refresh_rate_hz(restore_hz)?;
-            return Ok(payload(
-                true,
-                false,
-                current_hz,
-                Some(restore_hz),
-                None,
-                format!(
-                    "AC power detected. Restored the display refresh rate from {current_hz} Hz to {restore_hz} Hz."
-                ),
-            ));
-        }
-    }
-
-    Ok(payload(
-        true,
-        false,
-        current_hz,
-        None,
-        None,
-        "AC power detected. Auto 60 Hz is armed for the next battery session.".into(),
     ))
 }
 
