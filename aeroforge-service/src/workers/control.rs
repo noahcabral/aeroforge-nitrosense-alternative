@@ -33,6 +33,8 @@ pub use models::{
     ApplyTelemetrySettingsRequest, FanProfileId, FanSpeedCalibrationSnapshot,
 };
 
+type DynError = Box<dyn std::error::Error + Send + Sync>;
+
 const WORKER_NAME: &str = "control-worker";
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const ADAPTIVE_FAN_REFRESH_INTERVAL_SECS: u64 = 5;
@@ -58,36 +60,26 @@ pub fn apply_power_profile(
     paths: &ServicePaths,
     request: ApplyPowerProfileRequest,
 ) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    match power::apply_power_profile(paths, request) {
-        Ok(applied) => {
-            state::persist_apply_success(paths, &applied)?;
-            Ok(applied)
-        }
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = write_log_line(&paths.component_log("control-power"), "ERROR", &detail);
-            let _ = state::persist_apply_error(paths, &detail);
-            Err(error)
-        }
-    }
+    record_apply(
+        paths,
+        "control-power",
+        power::apply_power_profile(paths, request),
+        state::persist_apply_success,
+        state::persist_apply_error,
+    )
 }
 
 pub fn apply_gpu_tuning(
     paths: &ServicePaths,
     request: ApplyGpuTuningRequest,
 ) -> Result<AppliedGpuTuningSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    match gpu_tuning::apply_gpu_tuning(paths, request) {
-        Ok(applied) => {
-            state::persist_gpu_tuning_apply_success(paths, &applied)?;
-            Ok(applied)
-        }
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = write_log_line(&paths.component_log("control-gpu-tuning"), "ERROR", &detail);
-            let _ = state::persist_gpu_tuning_apply_error(paths, &detail);
-            Err(error)
-        }
-    }
+    record_apply(
+        paths,
+        "control-gpu-tuning",
+        gpu_tuning::apply_gpu_tuning(paths, request),
+        state::persist_gpu_tuning_apply_success,
+        state::persist_gpu_tuning_apply_error,
+    )
 }
 
 pub fn apply_fan_profile(
@@ -128,50 +120,26 @@ pub fn apply_fan_profile(
             Some(models::PowerProfileId::BatteryGuard)
         )
     {
-        match fan::apply_quiet_auto_fan_policy(paths, &snapshot, false) {
-            Ok(applied) => {
-                state::persist_fan_apply_success(paths, &applied)?;
-                return Ok(applied);
-            }
-            Err(error) => {
-                let detail = error.to_string();
-                let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
-                let _ = state::persist_fan_apply_error(paths, &detail);
-                return Err(error);
-            }
-        }
+        return record_fan_apply(
+            paths,
+            fan::apply_quiet_auto_fan_policy(paths, &snapshot, false),
+        );
     }
 
-    match fan::apply_fan_profile(paths, request) {
-        Ok(applied) => {
-            state::persist_fan_apply_success(paths, &applied)?;
-            Ok(applied)
-        }
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
-            let _ = state::persist_fan_apply_error(paths, &detail);
-            Err(error)
-        }
-    }
+    record_fan_apply(paths, fan::apply_fan_profile(paths, request))
 }
 
 pub fn apply_boot_logo(
     paths: &ServicePaths,
     request: ApplyBootLogoRequest,
 ) -> Result<AppliedBootLogoSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    match boot_logo::apply_boot_logo(paths, request) {
-        Ok(applied) => {
-            state::persist_boot_logo_apply_success(paths, &applied)?;
-            Ok(applied)
-        }
-        Err(error) => {
-            let detail = error.to_string();
-            let _ = write_log_line(&paths.component_log("control-boot-logo"), "ERROR", &detail);
-            let _ = state::persist_boot_logo_apply_error(paths, &detail);
-            Err(error)
-        }
-    }
+    record_apply(
+        paths,
+        "control-boot-logo",
+        boot_logo::apply_boot_logo(paths, request),
+        state::persist_boot_logo_apply_success,
+        state::persist_boot_logo_apply_error,
+    )
 }
 
 pub fn apply_smart_charging(
@@ -243,15 +211,40 @@ fn apply_custom_fan_curves_unlocked(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
 ) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    match fan::apply_custom_fan_curves(paths, request) {
+    record_fan_apply(paths, fan::apply_custom_fan_curves(paths, request))
+}
+
+fn record_fan_apply(
+    paths: &ServicePaths,
+    result: Result<AppliedFanControlSnapshot, DynError>,
+) -> Result<AppliedFanControlSnapshot, DynError> {
+    record_apply(
+        paths,
+        "control-fan",
+        result,
+        state::persist_fan_apply_success,
+        state::persist_fan_apply_error,
+    )
+}
+
+/// Every request-driven apply records its outcome the same way: the success
+/// snapshot is persisted, a failure is logged and persisted as the last error.
+fn record_apply<T>(
+    paths: &ServicePaths,
+    component: &str,
+    result: Result<T, DynError>,
+    persist_success: fn(&ServicePaths, &T) -> Result<(), DynError>,
+    persist_error: fn(&ServicePaths, &str) -> Result<(), DynError>,
+) -> Result<T, DynError> {
+    match result {
         Ok(applied) => {
-            state::persist_fan_apply_success(paths, &applied)?;
+            persist_success(paths, &applied)?;
             Ok(applied)
         }
         Err(error) => {
             let detail = error.to_string();
-            let _ = write_log_line(&paths.component_log("control-fan"), "ERROR", &detail);
-            let _ = state::persist_fan_apply_error(paths, &detail);
+            let _ = write_log_line(&paths.component_log(component), "ERROR", &detail);
+            let _ = persist_error(paths, &detail);
             Err(error)
         }
     }
