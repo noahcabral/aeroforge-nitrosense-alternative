@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::paths::{command_failure_detail, system32_command};
+use crate::paths::{command_failure_detail, powershell_command};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -345,16 +345,9 @@ if ($null -ne $result.gmOutput) {
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = system32_command("powershell")
+    let output = powershell_command(script)
         .env("AEROFORGE_CIM_METHOD", method)
         .env("AEROFORGE_CIM_INPUT", input.to_string())
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
         .output()?;
 
     if !output.status.success() {
@@ -423,15 +416,7 @@ foreach ($item in @(
 } | ConvertTo-Json -Depth 4 -Compress
 "#;
 
-    let output = system32_command("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .output()?;
+    let output = powershell_command(script).output()?;
 
     if !output.status.success() {
         let detail = command_failure_detail("PowerShell", &output);

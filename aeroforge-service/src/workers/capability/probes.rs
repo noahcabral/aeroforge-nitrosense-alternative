@@ -1,4 +1,4 @@
-use crate::paths::{system32_command, system32_path};
+use crate::paths::{powershell_command, system32_path};
 
 use crate::workers::control::acer_wmi;
 
@@ -49,15 +49,7 @@ if ($instance) {
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = system32_command("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .output();
+    let output = powershell_command(script).output();
 
     let Ok(output) = output else {
         return BatteryControlProbe::default();

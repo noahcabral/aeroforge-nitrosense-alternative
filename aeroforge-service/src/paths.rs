@@ -119,6 +119,19 @@ pub fn system32_command(tool: &str) -> std::process::Command {
     command
 }
 
+/// A hidden Windows PowerShell running one inline script.
+pub fn powershell_command(script: &str) -> std::process::Command {
+    let mut command = system32_command("powershell");
+    command.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    command
+}
+
 /// What a failed tool actually said: stderr, else stdout, else its exit status.
 pub fn command_failure_detail(tool: &str, output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

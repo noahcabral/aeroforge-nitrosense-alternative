@@ -98,9 +98,7 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = crate::paths::system32_command("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()?;
+    let output = crate::paths::powershell_command(script).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

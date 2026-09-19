@@ -1,5 +1,5 @@
 use std::io;
-use crate::paths::{command_failure_detail, system32_command};
+use crate::paths::{command_failure_detail, powershell_command};
 
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -234,15 +234,7 @@ $result | ConvertTo-Json -Depth 8 -Compress
 "#
     );
 
-    let output = system32_command("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output()?;
+    let output = powershell_command(&script).output()?;
 
     if !output.status.success() {
         let detail = command_failure_detail("PowerShell", &output);
@@ -518,15 +510,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
 "#
     );
 
-    let output = system32_command("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output()?;
+    let output = powershell_command(&script).output()?;
 
     if !output.status.success() {
         let detail = command_failure_detail("PowerShell", &output);
