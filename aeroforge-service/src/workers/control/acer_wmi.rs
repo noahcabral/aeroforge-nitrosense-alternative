@@ -1,6 +1,5 @@
 use std::{
     ffi::c_void,
-    os::windows::process::CommandExt,
     ptr::null_mut,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -51,7 +50,6 @@ const ACER_GAMING_OBJECT_PATH: &str =
     "AcerGamingFunction.InstanceName=\"ACPI\\\\PNP0C14\\\\APGe_0\"";
 const GM_INPUT: &str = "gmInput";
 const GM_OUTPUT: &str = "gmOutput";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static SYSINFO_CIM_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 pub const GAMING_PROFILE_BALANCED: u64 = 0x0000_0001;
@@ -348,7 +346,6 @@ if ($null -ne $result.gmOutput) {
 "#;
 
     let output = system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .env("AEROFORGE_CIM_METHOD", method)
         .env("AEROFORGE_CIM_INPUT", input.to_string())
         .args([
@@ -427,7 +424,6 @@ foreach ($item in @(
 "#;
 
     let output = system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

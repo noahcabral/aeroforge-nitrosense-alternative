@@ -1,5 +1,4 @@
 use std::{
-    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -11,7 +10,6 @@ use super::{
 use crate::paths::ServicePaths;
 
 static HARDWARE_IDENTITY_CACHE: OnceLock<Arc<Mutex<HardwareIdentityCache>>> = OnceLock::new();
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct HardwareIdentityCache {
     last_refresh: Option<Instant>,
@@ -101,7 +99,6 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 "#;
 
     let output = crate::paths::system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;
 

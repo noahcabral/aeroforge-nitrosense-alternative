@@ -2,6 +2,7 @@ use std::{
     env, fs,
     fs::OpenOptions,
     io::Write,
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -101,8 +102,11 @@ pub fn system32_path(file_name: &str) -> PathBuf {
     PathBuf::from(root).join("System32").join(file_name)
 }
 
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Launch a system tool by absolute path. `Command::new("powercfg")` would let
 /// CreateProcess search the (user-writable) application directory first.
+/// Every child runs windowless; the service has no desktop to show one on.
 pub fn system32_command(tool: &str) -> std::process::Command {
     // Windows PowerShell is the one tool that does not live directly in System32.
     let relative = if tool == "powershell" {
@@ -110,7 +114,9 @@ pub fn system32_command(tool: &str) -> std::process::Command {
     } else {
         format!("{tool}.exe")
     };
-    std::process::Command::new(system32_path(&relative))
+    let mut command = std::process::Command::new(system32_path(&relative));
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 /// What a failed tool actually said: stderr, else stdout, else its exit status.

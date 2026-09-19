@@ -1,4 +1,4 @@
-use std::{io, os::windows::process::CommandExt};
+use std::io;
 use crate::paths::{command_failure_detail, system32_command};
 
 use serde::{de::DeserializeOwned, Deserialize};
@@ -9,7 +9,6 @@ use crate::{
     workers::unix_timestamp,
 };
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
 #[derive(Debug, Deserialize)]
@@ -236,7 +235,6 @@ $result | ConvertTo-Json -Depth 8 -Compress
     );
 
     let output = system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -521,7 +519,6 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     );
 
     let output = system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

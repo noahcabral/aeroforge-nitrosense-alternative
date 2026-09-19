@@ -1,5 +1,4 @@
 use std::{
-    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -14,7 +13,6 @@ use crate::workers::control::acer_wmi;
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
 // made by faxcon
 static THERMAL_ZONE_CACHE: OnceLock<Arc<Mutex<ThermalZoneCache>>> = OnceLock::new();
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct ThermalZoneCache {
     last_refresh: Option<Instant>,
@@ -194,7 +192,6 @@ $result | ConvertTo-Json -Compress
 "#;
 
     let output = crate::paths::system32_command("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", script])
         .output()?;
 
