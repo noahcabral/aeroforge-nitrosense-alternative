@@ -12,7 +12,7 @@ use super::{
         AcerControlReadiness, HardwareReadinessSnapshot, RepairLaunchResult, ServiceHealResult,
         WindowsServiceReadiness, WmiReadiness,
     },
-    process::{hidden_command, hidden_powershell},
+    process::{combined_output_text, hidden_command, hidden_powershell},
 };
 
 const AEROFORGE_SERVICE: &str = "AeroForgeService";
@@ -264,8 +264,7 @@ fn run_tool(program: &str, args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;
-    Ok(String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr))
+    Ok(combined_output_text(&output))
 }
 
 fn healer_task_available() -> bool {

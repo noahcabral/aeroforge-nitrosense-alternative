@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 #[cfg(windows)]
@@ -39,6 +39,11 @@ pub fn hidden_powershell() -> Command {
         "Hidden",
     ]);
     command
+}
+
+/// sc.exe and schtasks.exe report failures on either stream; read both.
+pub fn combined_output_text(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr)
 }
 
 #[cfg(windows)]

@@ -18,7 +18,9 @@ use super::models::{
     ServiceWorkerStatus, TelemetrySnapshot,
 };
 use super::{
-    now_unix, process::hidden_command, smart_charge::SmartChargeApplyPayload,
+    now_unix,
+    process::{combined_output_text, hidden_command},
+    smart_charge::SmartChargeApplyPayload,
     state::write_text_atomically,
 };
 
@@ -694,8 +696,7 @@ fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
 
 fn query_service_state() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     let output = sc_output(["query", SERVICE_NAME])?;
-    let text = String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr);
+    let text = combined_output_text(&output);
     if text.contains("does not exist") || text.contains("1060") {
         return Ok(None);
     }
@@ -720,8 +721,7 @@ fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr);
+    let text = combined_output_text(&output);
     if text.contains("1056") || text.contains("already been started") {
         return Ok(());
     }
@@ -735,8 +735,7 @@ fn stop_service_best_effort() -> Result<(), Box<dyn std::error::Error + Send + S
         return Ok(());
     }
 
-    let text = String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr);
+    let text = combined_output_text(&output);
     if text.contains("1062") || text.contains("has not been started") {
         return Ok(());
     }
