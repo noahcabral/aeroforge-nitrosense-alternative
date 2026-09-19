@@ -115,43 +115,21 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
     }
 
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
+    let field = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
     Ok(HardwareIdentitySnapshot {
-        cpu_name: parsed
-            .get("cpuName")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        cpu_brand: parsed
-            .get("cpuBrand")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        gpu_name: parsed
-            .get("gpuName")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        gpu_brand: parsed
-            .get("gpuBrand")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        system_vendor: parsed
-            .get("systemVendor")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        system_model: parsed
-            .get("systemModel")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+        cpu_name: field("cpuName"),
+        cpu_brand: field("cpuBrand"),
+        gpu_name: field("gpuName"),
+        gpu_brand: field("gpuBrand"),
+        system_vendor: field("systemVendor"),
+        system_model: field("systemModel"),
     })
 }
 
