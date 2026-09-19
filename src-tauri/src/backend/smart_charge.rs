@@ -6,6 +6,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector as NativeTlsConnector;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -23,6 +24,8 @@ const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\CC\settings.json";
 const CARE_CENTER_TIMEOUT: Duration = Duration::from_secs(5);
 const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SmartChargeApplyPayload {
     pub enabled: bool,
     pub battery_healthy: u8,
@@ -30,11 +33,28 @@ pub struct SmartChargeApplyPayload {
     pub detail: String,
 }
 
-pub async fn sync_saved_state(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
-    apply_smart_charging(enabled).await
+/// Service first (it already holds the write token and needs no elevation);
+/// the desktop BatteryControl/Care Center paths only when the service could
+/// not do it. Every caller wants exactly this order, so it lives once.
+pub async fn apply_with_desktop_fallback(enabled: bool) -> Result<SmartChargeApplyPayload, String> {
+    let service = tauri::async_runtime::spawn_blocking(move || {
+        super::service_pipe::apply_smart_charging(enabled)
+    })
+    .await
+    .map_err(|error| format!("Smart charging apply worker failed: {error}"))?;
+    match service {
+        Ok(applied) => Ok(applied),
+        Err(service_error) => apply_smart_charging(enabled)
+            .await
+            .map_err(|desktop_error| {
+                format!(
+                    "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
+                )
+            }),
+    }
 }
 
-pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
+async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
     // The direct path spawns PowerShell for a few seconds; keep that off the
     // async runtime so other commands are not stalled behind it.
     let direct =

@@ -24,10 +24,6 @@ pub struct BlueLightApplyPayload {
     pub detail: String,
 }
 
-pub fn sync_saved_state(enabled: bool) -> Result<BlueLightApplyPayload, DynError> {
-    apply_blue_light_filter(enabled)
-}
-
 pub fn apply_blue_light_filter(enabled: bool) -> Result<BlueLightApplyPayload, DynError> {
     let gain_id = resolve_gain_id(enabled)?;
     persist_gain_id(gain_id)?;

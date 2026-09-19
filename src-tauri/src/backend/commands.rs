@@ -394,25 +394,7 @@ pub async fn apply_smart_charging(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<SmartChargeApplyResult, String> {
-    let applied = match off_main("Smart charging apply", move || {
-        service_pipe::apply_smart_charging(enabled)
-    })
-    .await?
-    {
-        Ok(applied) => smart_charge::SmartChargeApplyPayload {
-            enabled: applied.enabled,
-            battery_healthy: applied.battery_healthy,
-            applied_at_unix: applied.applied_at_unix,
-            detail: applied.detail,
-        },
-        Err(service_error) => smart_charge::apply_smart_charging(enabled)
-            .await
-            .map_err(|desktop_error| {
-                format!(
-                    "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
-                )
-            })?,
-    };
+    let applied = smart_charge::apply_with_desktop_fallback(enabled).await?;
 
     let mut controls = state.controls();
     controls.personal_settings.smart_charging_enabled = applied.enabled;

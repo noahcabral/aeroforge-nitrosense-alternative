@@ -146,22 +146,12 @@ fn run_startup_reconcile(
     if let Err(error) = service_pipe::restore_startup_state() {
         eprintln!("AeroForge manual-launch restore failed during startup: {error}");
     }
-    if let Err(error) = blue_light::sync_saved_state(saved_blue_light_state) {
+    if let Err(error) = blue_light::apply_blue_light_filter(saved_blue_light_state) {
         eprintln!("AeroForge blue-light sync failed during startup: {error}");
     }
-    let smart_charge_sync = match service_pipe::apply_smart_charging(saved_smart_charge_state) {
-        Ok(_) => Ok(()),
-        Err(service_error) => {
-            tauri::async_runtime::block_on(smart_charge::sync_saved_state(saved_smart_charge_state))
-                .map(|_| ())
-                .map_err(|desktop_error| {
-                    format!(
-                "service path failed: {service_error}; desktop fallback failed: {desktop_error}"
-            )
-                })
-        }
-    };
-    if let Err(error) = smart_charge_sync {
+    if let Err(error) = tauri::async_runtime::block_on(smart_charge::apply_with_desktop_fallback(
+        saved_smart_charge_state,
+    )) {
         eprintln!("AeroForge smart-charge sync failed during startup: {error}");
     }
     if let Err(error) = service_pipe::apply_telemetry_settings(saved_nvidia_telemetry_state) {

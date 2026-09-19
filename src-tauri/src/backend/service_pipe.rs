@@ -17,7 +17,9 @@ use super::models::{
     LiveControlSnapshot, PowerProfileId, ProcessorStateSettings, ServiceStatus,
     ServiceWorkerStatus, TelemetrySnapshot,
 };
-use super::{process::hidden_command, state::write_text_atomically};
+use super::{
+    process::hidden_command, smart_charge::SmartChargeApplyPayload, state::write_text_atomically,
+};
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
 const SERVICE_NAME: &str = "AeroForgeService";
@@ -171,15 +173,6 @@ pub struct AppliedFanControlPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedBootLogoPayload {
-    pub applied_at_unix: u64,
-    pub detail: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppliedSmartChargePayload {
-    pub enabled: bool,
-    pub battery_healthy: u8,
     pub applied_at_unix: u64,
     pub detail: String,
 }
@@ -433,14 +426,12 @@ pub fn apply_boot_logo(
 
 pub fn apply_smart_charging(
     enabled: bool,
-) -> Result<AppliedSmartChargePayload, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<SmartChargeApplyPayload, Box<dyn std::error::Error + Send + Sync>> {
     let payload = request(PipeRequest::ApplySmartCharging {
         payload: ApplySmartChargeRequest { enabled },
         write_token: load_or_create_write_token()?,
     })?;
-    Ok(serde_json::from_value::<AppliedSmartChargePayload>(
-        payload,
-    )?)
+    Ok(serde_json::from_value::<SmartChargeApplyPayload>(payload)?)
 }
 
 pub fn apply_telemetry_settings(

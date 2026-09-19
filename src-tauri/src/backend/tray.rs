@@ -359,31 +359,15 @@ async fn apply_tray_smart_charging(
     app: &AppHandle,
     enabled: bool,
 ) -> Result<(ControlSnapshot, String), String> {
-    let applied = match off_runtime("Smart charging apply", move || {
-        service_pipe::apply_smart_charging(enabled)
-    })
-    .await
-    {
-        Ok(applied) => (applied.enabled, applied.detail),
-        Err(service_error) => {
-            let desktop = smart_charge::sync_saved_state(enabled)
-                .await
-                .map_err(|desktop_error| {
-                    format!(
-                        "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
-                    )
-                })?;
-            (desktop.enabled, desktop.detail)
-        }
-    };
+    let applied = smart_charge::apply_with_desktop_fallback(enabled).await?;
 
     let mut controls = app.state::<BackendState>().controls();
-    controls.personal_settings.smart_charging_enabled = applied.0;
+    controls.personal_settings.smart_charging_enabled = applied.enabled;
     let controls = app
         .state::<BackendState>()
         .save_controls(controls)
         .map_err(|error| error.to_string())?;
-    Ok((controls, applied.1))
+    Ok((controls, applied.detail))
 }
 
 async fn restore_balanced_auto(app: &AppHandle) -> Result<(ControlSnapshot, String), String> {
