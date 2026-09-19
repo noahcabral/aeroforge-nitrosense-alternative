@@ -1,5 +1,6 @@
 import {
   type ChangeEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -53,6 +54,7 @@ import {
   type CapabilitySnapshot,
   type ControlLayerStatus,
   type ControlSnapshot,
+  type BackendPollSnapshot,
   type BootArtId,
   type CustomPowerBaseId,
   type FeatureSupport,
@@ -2301,23 +2303,36 @@ function App() {
   }
   refreshHardwareReadinessRef.current = refreshHardwareReadiness
 
+  // Bootstrap, the poll loop and post-apply refreshes all land the same three
+  // backend snapshots the same way; only setters and refs, so it never changes.
+  const applyBackendPollSnapshot = useCallback(
+    (
+      snapshot: Pick<BackendPollSnapshot, 'service' | 'telemetry' | 'liveControls'>,
+      polledAt: Date,
+    ) => {
+      const { service, telemetry, liveControls } = snapshot
+      setServiceConnected(service.connected)
+      setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
+      setLastBackendError(service.connected ? null : service.detail)
+      updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
+      updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+        liveControlSnapshotRef.current = next
+        setLiveControlSnapshot(next)
+      })
+      if (activeTabRef.current === 'debug') {
+        updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
+        setLastBackendPollAt(formatDebugClock(polledAt))
+      }
+    },
+    [],
+  )
+
   async function refreshCachedLiveControlsAfterApply() {
     const refreshStartedMs = performance.now()
 
     try {
       const snapshot = await getBackendPollSnapshot()
-      setServiceConnected(snapshot.service.connected)
-      setTelemetrySourceLabel(describeTelemetrySource(snapshot.service.connected, snapshot.telemetry))
-      setLastBackendError(snapshot.service.connected ? null : snapshot.service.detail)
-      updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
-      updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
-        liveControlSnapshotRef.current = next
-        setLiveControlSnapshot(next)
-      })
-      if (activeTabRef.current === 'debug') {
-        updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
-        setLastBackendPollAt(formatDebugClock(new Date()))
-      }
+      applyBackendPollSnapshot(snapshot, new Date())
 
       return {
         liveControls: snapshot.liveControls,
@@ -2577,22 +2592,7 @@ function App() {
           maybeRequestBackgroundServiceHealRef.current(readiness)
           hardwareReadinessRefreshRef.current = Date.now()
           setShellStatus(`${runtime.shell} v${runtime.backendVersion}`)
-          setServiceConnected(service.connected)
-          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
-          setLastBackendError(service.connected ? null : service.detail)
-          updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
-          updateSerializedState(
-            liveControlSnapshotStateRef,
-            liveControls,
-            (next) => {
-              liveControlSnapshotRef.current = next
-              setLiveControlSnapshot(next)
-            },
-          )
-          if (activeTabRef.current === 'debug') {
-            updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
-            setLastBackendPollAt(formatDebugClock(new Date()))
-          }
+          applyBackendPollSnapshot(bootstrap, new Date())
           setStatusMessage(
             `Desktop backend ${runtime.backendVersion} loaded. State ${
               persistence.initializedFromDisk ? 'restored from disk' : 'started from defaults'
@@ -2717,28 +2717,12 @@ function App() {
         backendCommandMs = performance.now() - backendCommandStartedMs
         const service = pollSnapshot.service
         const telemetry = pollSnapshot.telemetry
-        const liveControls = pollSnapshot.liveControls
         serviceMs = pollSnapshot.timings.serviceMs
         telemetryMs = pollSnapshot.timings.telemetryMs
         liveControlsMs = pollSnapshot.timings.liveControlsMs
 
         if (!cancelled) {
-          setServiceConnected(service.connected)
-          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
-          setLastBackendError(service.connected ? null : service.detail)
-          updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
-          updateSerializedState(
-            liveControlSnapshotStateRef,
-            liveControls,
-            (next) => {
-              liveControlSnapshotRef.current = next
-              setLiveControlSnapshot(next)
-            },
-          )
-          if (activeTabRef.current === 'debug') {
-            updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
-            setLastBackendPollAt(formatDebugClock(pollStartedAt))
-          }
+          applyBackendPollSnapshot(pollSnapshot, pollStartedAt)
           void refreshHardwareReadinessRef.current()
         }
 
@@ -2851,7 +2835,7 @@ function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.clearTimeout(pollTimer)
     }
-  }, [])
+  }, [applyBackendPollSnapshot])
 
   useEffect(() => {
     if (autoUpdateCheckTriggeredRef.current) {
