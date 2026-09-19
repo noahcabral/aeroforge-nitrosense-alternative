@@ -394,7 +394,11 @@ pub async fn apply_smart_charging(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<SmartChargeApplyResult, String> {
-    let applied = match service_pipe::apply_smart_charging(enabled) {
+    let applied = match off_main("Smart charging apply", move || {
+        service_pipe::apply_smart_charging(enabled)
+    })
+    .await?
+    {
         Ok(applied) => smart_charge::SmartChargeApplyPayload {
             enabled: applied.enabled,
             battery_healthy: applied.battery_healthy,

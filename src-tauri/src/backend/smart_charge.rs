@@ -35,7 +35,13 @@ pub async fn sync_saved_state(enabled: bool) -> Result<SmartChargeApplyPayload, 
 }
 
 pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
-    match apply_battery_control_direct(enabled) {
+    // The direct path spawns PowerShell for a few seconds; keep that off the
+    // async runtime so other commands are not stalled behind it.
+    let direct =
+        tauri::async_runtime::spawn_blocking(move || apply_battery_control_direct(enabled))
+            .await
+            .map_err(|error| io::Error::other(format!("BatteryControl worker failed: {error}")))?;
+    match direct {
         Ok(payload) => Ok(payload),
         Err(direct_error) => {
             let fallback = apply_care_center_smart_charging(enabled).await;
