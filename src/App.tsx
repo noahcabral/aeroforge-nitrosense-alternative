@@ -1085,6 +1085,7 @@ function App() {
   const powerPresetsRef = useRef<PowerControlPreset[]>([])
   const quickPresetsRef = useRef<QuickControlPreset[]>([])
   const syncPresetCollectionsRef = useRef<(controls: ControlSnapshot) => void>(() => {})
+  const applyControlsToUiRef = useRef<(controls: ControlSnapshot) => void>(() => {})
   const [fanSyncLockEnabled, setFanSyncLockEnabled] = useState(false)
   const [draggingPoint, setDraggingPoint] = useState<DragState | null>(null)
   const [smartChargingEnabled, setSmartChargingEnabled] = useState(true)
@@ -1722,6 +1723,36 @@ function App() {
     setAutoRefreshRateRestoreHz(restoreHz)
   }
 
+  function applyControlsToUi(controls: ControlSnapshot) {
+    applyBackendControlSnapshot(
+      controls,
+      setActivePowerProfile,
+      setCustomProcessorState,
+      setCustomPowerBase,
+      setGpuOverclock,
+      setCustomOcSlot,
+      setActiveOcSlot,
+      setOcApplyState,
+      setOcTuningLocked,
+      setActiveFanProfile,
+      commitCustomCurves,
+      setFanSyncLockEnabled,
+      commitSmartChargingEnabled,
+      commitProcessorStateControlEnabled,
+      commitNvidiaTelemetryEnabled,
+      commitKeepUiPrewarmed,
+      setUsbPowerEnabled,
+      commitBlueLightFilterEnabled,
+      setSelectedBootArt,
+      setCustomBootFilename,
+      setUpdateChannel,
+      setCheckForUpdatesOnLaunch,
+      commitAutoRefreshRateSettings,
+      (loaded) => syncPresetCollectionsRef.current(loaded),
+    )
+  }
+  applyControlsToUiRef.current = applyControlsToUi
+
   function updateSerializedState<T>(
     ref: { current: string | null },
     value: T | null,
@@ -1937,32 +1968,7 @@ function App() {
             return
           }
 
-          applyBackendControlSnapshot(
-            event.payload.controls,
-            setActivePowerProfile,
-            setCustomProcessorState,
-            setCustomPowerBase,
-            setGpuOverclock,
-            setCustomOcSlot,
-            setActiveOcSlot,
-            setOcApplyState,
-            setOcTuningLocked,
-            setActiveFanProfile,
-            commitCustomCurves,
-            setFanSyncLockEnabled,
-            commitSmartChargingEnabled,
-            commitProcessorStateControlEnabled,
-            commitNvidiaTelemetryEnabled,
-            commitKeepUiPrewarmed,
-            setUsbPowerEnabled,
-            commitBlueLightFilterEnabled,
-            setSelectedBootArt,
-            setCustomBootFilename,
-            setUpdateChannel,
-            setCheckForUpdatesOnLaunch,
-            commitAutoRefreshRateSettings,
-            (controls) => syncPresetCollectionsRef.current(controls),
-          )
+          applyControlsToUiRef.current(event.payload.controls)
           setStatusMessage(`${event.payload.action} applied from tray. ${event.payload.detail}`)
           void refreshCachedLiveControlsAfterApplyRef.current().catch((error) => {
             pushDebugEventRef.current(`tray refresh failed: ${describeError(error)}`)
@@ -2560,32 +2566,7 @@ function App() {
         if (!cancelled) {
           setBackendCapabilities(bootstrap.capabilities)
           controlsBootstrappedRef.current = true
-          applyBackendControlSnapshot(
-            mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls),
-            setActivePowerProfile,
-            setCustomProcessorState,
-            setCustomPowerBase,
-            setGpuOverclock,
-            setCustomOcSlot,
-            setActiveOcSlot,
-            setOcApplyState,
-            setOcTuningLocked,
-            setActiveFanProfile,
-            commitCustomCurves,
-            setFanSyncLockEnabled,
-            commitSmartChargingEnabled,
-            commitProcessorStateControlEnabled,
-            commitNvidiaTelemetryEnabled,
-            commitKeepUiPrewarmed,
-            setUsbPowerEnabled,
-            commitBlueLightFilterEnabled,
-            setSelectedBootArt,
-            setCustomBootFilename,
-            setUpdateChannel,
-            setCheckForUpdatesOnLaunch,
-            commitAutoRefreshRateSettings,
-            (controls) => syncPresetCollectionsRef.current(controls),
-          )
+          applyControlsToUiRef.current(mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls))
           setBackendVersion(runtime.backendVersion)
           setUpdateStatus(updater)
           setHardwareReadiness(readiness)
@@ -2655,32 +2636,7 @@ function App() {
             const controls = await getControlSnapshot()
             if (!cancelled) {
               controlsBootstrappedRef.current = true
-              applyBackendControlSnapshot(
-                controls,
-                setActivePowerProfile,
-                setCustomProcessorState,
-                setCustomPowerBase,
-                setGpuOverclock,
-                setCustomOcSlot,
-                setActiveOcSlot,
-                setOcApplyState,
-                setOcTuningLocked,
-                setActiveFanProfile,
-                commitCustomCurves,
-                setFanSyncLockEnabled,
-                commitSmartChargingEnabled,
-                commitProcessorStateControlEnabled,
-                commitNvidiaTelemetryEnabled,
-                commitKeepUiPrewarmed,
-                setUsbPowerEnabled,
-                commitBlueLightFilterEnabled,
-                setSelectedBootArt,
-                setCustomBootFilename,
-                setUpdateChannel,
-                setCheckForUpdatesOnLaunch,
-                commitAutoRefreshRateSettings,
-                (loaded) => syncPresetCollectionsRef.current(loaded),
-              )
+              applyControlsToUiRef.current(controls)
             }
           } catch (fallbackError) {
             pushTransportDebugEventRef.current(
@@ -3030,35 +2986,7 @@ function App() {
         return
       }
 
-      applyBackendControlSnapshot(
-        parsed.payload.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-        (enabled, restoreHz) => {
-          setAutoRefreshRateOnBatteryEnabled(enabled)
-          setAutoRefreshRateRestoreHz(restoreHz)
-        },
-        syncPresetCollectionsRef.current,
-      )
+      applyControlsToUi(parsed.payload.controls)
 
       await persistStagedControlsRef.current({
         activePowerProfile: parsed.payload.controls.activePowerProfile,
