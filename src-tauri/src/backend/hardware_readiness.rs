@@ -1,6 +1,10 @@
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
 };
 
 use super::{
@@ -39,7 +43,10 @@ pub fn snapshot() -> HardwareReadinessSnapshot {
         },
     };
 
-    let identity = read_registry_hardware_identity();
+    static IDENTITY: OnceLock<RegistryHardwareIdentity> = OnceLock::new();
+    let identity = IDENTITY
+        .get_or_init(read_registry_hardware_identity)
+        .clone();
     let acer_wmi_present = if wmi.service.running {
         acer_gaming_wmi_class_present()
     } else {
@@ -314,16 +321,15 @@ fn read_service_readiness(name: &str) -> WindowsServiceReadiness {
 }
 
 fn run_sc(args: &[&str]) -> Result<String, String> {
-    let output = hidden_command("sc.exe")
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
-    Ok(String::from_utf8_lossy(&output.stdout).to_string()
-        + &String::from_utf8_lossy(&output.stderr))
+    run_tool("sc.exe", args)
 }
 
 fn run_schtasks(args: &[&str]) -> Result<String, String> {
-    let output = hidden_command("schtasks.exe")
+    run_tool("schtasks.exe", args)
+}
+
+fn run_tool(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = hidden_command(program)
         .args(args)
         .output()
         .map_err(|error| error.to_string())?;
@@ -412,7 +418,7 @@ fn is_disabled_start_type(start_type: &str) -> bool {
     start_type.to_ascii_uppercase().contains("DISABLED")
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RegistryHardwareIdentity {
     system_vendor: Option<String>,
     system_model: Option<String>,
@@ -449,13 +455,22 @@ fn parse_reg_value(raw: &str, name: &str) -> Option<String> {
     })
 }
 
+/// The class is registered by the Acer WMI driver and does not go away once
+/// seen, so a positive probe is remembered: this runs on every poll tick and a
+/// PowerShell launch each time was the app's single biggest steady-state cost.
 fn acer_gaming_wmi_class_present() -> bool {
+    static PRESENT: AtomicBool = AtomicBool::new(false);
+    if PRESENT.load(Ordering::Relaxed) {
+        return true;
+    }
     let script = "Get-CimClass -Namespace root\\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Out-Null";
-    hidden_powershell()
+    let present = hidden_powershell()
         .args(["-Command", script])
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    PRESENT.fetch_or(present, Ordering::Relaxed);
+    present
 }
 
 fn repair_script_path() -> Option<PathBuf> {
