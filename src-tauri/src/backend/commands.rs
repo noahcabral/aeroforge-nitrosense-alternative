@@ -558,8 +558,7 @@ pub async fn apply_power_profile(
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
     let custom_base_profile_for_apply = custom_base_profile.clone();
-    let custom_base_profile_for_save = custom_base_profile.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
+    let applied = off_main("Power profile apply", move || {
         service_pipe::apply_power_profile(
             profile_id,
             processor_state,
@@ -567,8 +566,7 @@ pub async fn apply_power_profile(
             processor_state_control_enabled,
         )
     })
-    .await
-    .map_err(|error| format!("Power profile apply worker failed: {error}"))?
+    .await?
     .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
@@ -577,7 +575,7 @@ pub async fn apply_power_profile(
         applied.processor_state_control_enabled;
     if matches!(controls.active_power_profile, PowerProfileId::Custom) {
         controls.custom_processor_state = applied.processor_state;
-        if let Some(custom_base_profile) = custom_base_profile_for_save {
+        if let Some(custom_base_profile) = custom_base_profile {
             controls.custom_power_base = custom_base_profile;
         }
     }
@@ -626,11 +624,11 @@ pub async fn apply_fan_profile(
     profile_id: FanProfileId,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
-    let applied =
-        tauri::async_runtime::spawn_blocking(move || service_pipe::apply_fan_profile(profile_id))
-            .await
-            .map_err(|error| format!("Fan profile apply worker failed: {error}"))?
-            .map_err(|error| error.to_string())?;
+    let applied = off_main("Fan profile apply", move || {
+        service_pipe::apply_fan_profile(profile_id)
+    })
+    .await?
+    .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = applied.profile_id;
@@ -654,11 +652,10 @@ pub async fn apply_custom_fan_curves(
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
     let curves_for_save = curves.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
-        service_pipe::apply_custom_fan_curves(curves.clone())
+    let applied = off_main("Custom fan curve apply", move || {
+        service_pipe::apply_custom_fan_curves(curves)
     })
-    .await
-    .map_err(|error| format!("Custom fan curve apply worker failed: {error}"))?
+    .await?
     .map_err(|error| error.to_string())?;
 
     let mut controls = state.controls();
@@ -680,19 +677,23 @@ pub async fn apply_custom_fan_curves(
 #[tauri::command]
 pub async fn start_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(service_pipe::start_fan_speed_calibration)
-        .await
-        .map_err(|error| format!("Fan speed calibration worker failed: {error}"))?
-        .map_err(|error| error.to_string())
+    off_main(
+        "Fan speed calibration",
+        service_pipe::start_fan_speed_calibration,
+    )
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn cancel_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(service_pipe::cancel_fan_speed_calibration)
-        .await
-        .map_err(|error| format!("Fan speed calibration cancel worker failed: {error}"))?
-        .map_err(|error| error.to_string())
+    off_main(
+        "Fan speed calibration cancel",
+        service_pipe::cancel_fan_speed_calibration,
+    )
+    .await?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
