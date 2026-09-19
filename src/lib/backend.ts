@@ -95,12 +95,6 @@ export type RepairLaunchResult = {
   logPath: string | null
 }
 
-export type ServiceStartResult = {
-  started: boolean
-  elevated: boolean
-  detail: string
-}
-
 export type ServiceHealResult = {
   requested: boolean
   taskAvailable: boolean
@@ -437,10 +431,6 @@ export async function getBackendBootstrap() {
   return invoke<BackendBootstrap>('get_backend_bootstrap')
 }
 
-export async function getServiceStatus() {
-  return invoke<ServiceStatus>('get_service_status')
-}
-
 export async function getHardwareReadinessSnapshot() {
   return invoke<HardwareReadinessSnapshot>('get_hardware_readiness_snapshot')
 }
@@ -449,16 +439,8 @@ export async function repairHardwarePrerequisites() {
   return invoke<RepairLaunchResult>('repair_hardware_prerequisites')
 }
 
-export async function startHardwareService() {
-  return invoke<ServiceStartResult>('start_hardware_service')
-}
-
 export async function requestServiceHeal() {
   return invoke<ServiceHealResult>('request_service_heal')
-}
-
-export async function getTelemetrySnapshot() {
-  return invoke<TelemetrySnapshot>('get_telemetry_snapshot')
 }
 
 export async function getBackendPollSnapshot() {

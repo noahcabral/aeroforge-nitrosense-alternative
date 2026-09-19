@@ -14,8 +14,8 @@ use super::{
         BlueLightApplyResult, BootLogoApplyResult, CapabilitySnapshot, ControlSnapshot,
         CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, HardwareReadinessSnapshot,
         LiveControlSnapshot, NvidiaTelemetryApplyResult, PerformanceLogEvent, PowerProfileId,
-        ProcessorStateSettings, RepairLaunchResult, ServiceHealResult, ServiceStartResult,
-        ServiceStatus, SmartChargeApplyResult, TelemetrySnapshot, UpdateChannelId, UpdateStatus,
+        ProcessorStateSettings, RepairLaunchResult, ServiceHealResult, SmartChargeApplyResult,
+        TelemetrySnapshot, UpdateChannelId, UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
@@ -34,18 +34,6 @@ async fn off_main<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn get_service_status() -> Result<ServiceStatus, String> {
-    off_main(
-        "Service status",
-        || match service_pipe::fetch_service_status() {
-            Ok(status) => status,
-            Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
-        },
-    )
-    .await
-}
-
-#[tauri::command]
 pub async fn get_hardware_readiness_snapshot() -> Result<HardwareReadinessSnapshot, String> {
     off_main("Hardware readiness", hardware_readiness::snapshot).await
 }
@@ -53,11 +41,6 @@ pub async fn get_hardware_readiness_snapshot() -> Result<HardwareReadinessSnapsh
 #[tauri::command]
 pub async fn repair_hardware_prerequisites() -> Result<RepairLaunchResult, String> {
     off_main("Prerequisite repair", hardware_readiness::launch_repair).await
-}
-
-#[tauri::command]
-pub async fn start_hardware_service() -> Result<ServiceStartResult, String> {
-    off_main("Service start", hardware_readiness::start_installed_service).await
 }
 
 #[tauri::command]
@@ -82,23 +65,6 @@ pub async fn get_capability_snapshot(
 #[tauri::command]
 pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
     state.controls()
-}
-
-#[tauri::command]
-pub async fn get_telemetry_snapshot(
-    state: State<'_, BackendState>,
-) -> Result<TelemetrySnapshot, String> {
-    let fallback = state.telemetry();
-    off_main("Telemetry snapshot", move || {
-        let mut telemetry = service_pipe::fetch_cached_telemetry()
-            .or_else(|_| service_pipe::fetch_telemetry())
-            .unwrap_or(fallback);
-
-        refresh_cpu_clock_if_missing(&mut telemetry);
-
-        telemetry
-    })
-    .await
 }
 
 #[tauri::command]

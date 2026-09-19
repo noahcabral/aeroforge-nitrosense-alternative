@@ -20,15 +20,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            commands::get_service_status,
             commands::get_hardware_readiness_snapshot,
             commands::repair_hardware_prerequisites,
-            commands::start_hardware_service,
             commands::request_service_heal,
             commands::get_capability_snapshot,
             commands::get_control_snapshot,
             commands::get_live_control_snapshot,
-            commands::get_telemetry_snapshot,
             commands::get_backend_poll_snapshot,
             commands::get_backend_bootstrap,
             commands::check_for_updates,

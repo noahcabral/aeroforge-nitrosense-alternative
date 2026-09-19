@@ -140,14 +140,6 @@ pub struct RepairLaunchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ServiceStartResult {
-    pub started: bool,
-    pub elevated: bool,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ServiceHealResult {
     pub requested: bool,
     pub task_available: bool,

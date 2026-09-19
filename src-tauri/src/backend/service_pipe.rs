@@ -46,10 +46,8 @@ struct CachedSupervisorSnapshot {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PipeRequest {
-    GetServiceStatus,
     GetCapabilities,
     GetControlSnapshot,
-    GetTelemetrySnapshot,
     RestoreStartupState {
         write_token: String,
     },
@@ -184,10 +182,6 @@ pub struct AppliedTelemetrySettingsPayload {
     pub detail: String,
 }
 
-pub fn fetch_cached_service_status(pipe_error: &str) -> ServiceStatus {
-    build_cached_service_status(pipe_error, false)
-}
-
 pub fn fetch_fast_service_status() -> ServiceStatus {
     build_cached_service_status(
         "Using cached service supervisor snapshot for fast UI polling.",
@@ -276,11 +270,6 @@ fn supervisor_is_fresh(updated_at_unix: Option<u64>) -> bool {
         .unwrap_or(false)
 }
 
-pub fn fetch_service_status() -> Result<ServiceStatus, Box<dyn std::error::Error + Send + Sync>> {
-    let payload = request(PipeRequest::GetServiceStatus)?;
-    Ok(serde_json::from_value::<ServiceStatus>(payload)?)
-}
-
 pub fn fetch_capabilities() -> Result<CapabilitySnapshot, Box<dyn std::error::Error + Send + Sync>>
 {
     let payload = request(PipeRequest::GetCapabilities)?;
@@ -294,11 +283,6 @@ pub fn fetch_cached_capabilities(
     let mut snapshot = serde_json::from_str::<CapabilitySnapshot>(&raw)?;
     snapshot.cache_updated_at_unix = Some(updated_at_unix);
     Ok(snapshot)
-}
-
-pub fn fetch_telemetry() -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let payload = request(PipeRequest::GetTelemetrySnapshot)?;
-    Ok(serde_json::from_value::<TelemetrySnapshot>(payload)?)
 }
 
 pub fn fetch_cached_telemetry(

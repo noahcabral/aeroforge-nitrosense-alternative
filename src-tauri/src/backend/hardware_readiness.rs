@@ -10,7 +10,7 @@ use std::{
 use super::{
     models::{
         AcerControlReadiness, HardwareReadinessSnapshot, RepairLaunchResult, ServiceHealResult,
-        ServiceStartResult, WindowsServiceReadiness, WmiReadiness,
+        WindowsServiceReadiness, WmiReadiness,
     },
     process::{hidden_command, hidden_powershell},
 };
@@ -150,75 +150,6 @@ pub fn launch_repair() -> RepairLaunchResult {
     }
 }
 
-pub fn start_installed_service() -> ServiceStartResult {
-    let service = read_service_readiness(AEROFORGE_SERVICE);
-    if !service.installed {
-        return ServiceStartResult {
-            started: false,
-            elevated: false,
-            detail: format!("{AEROFORGE_SERVICE} is not installed. Use Repair Service And WMI."),
-        };
-    }
-    if service.running {
-        return ServiceStartResult {
-            started: true,
-            elevated: false,
-            detail: format!("{AEROFORGE_SERVICE} is already running."),
-        };
-    }
-
-    match run_sc(&["start", AEROFORGE_SERVICE]) {
-        Ok(output) if service_start_succeeded(&output) => {
-            if wait_for_service_running(std::time::Duration::from_secs(8)) {
-                ServiceStartResult {
-                    started: true,
-                    elevated: false,
-                    detail: format!("{AEROFORGE_SERVICE} started successfully."),
-                }
-            } else {
-                ServiceStartResult {
-                    started: false,
-                    elevated: false,
-                    detail: format!(
-                        "{AEROFORGE_SERVICE} start was accepted, but the service did not report running yet."
-                    ),
-                }
-            }
-        }
-        Ok(output) if service_already_running(&output) => ServiceStartResult {
-            started: true,
-            elevated: false,
-            detail: format!("{AEROFORGE_SERVICE} is already running."),
-        },
-        Ok(output) if service_start_needs_elevation(&output) => {
-            match shell_execute_elevated_service_start() {
-                Ok(()) => ServiceStartResult {
-                    started: false,
-                    elevated: true,
-                    detail: format!(
-                        "Service start needs administrator permission. Approve the Windows prompt to start {AEROFORGE_SERVICE}."
-                    ),
-                },
-                Err(error) => ServiceStartResult {
-                    started: false,
-                    elevated: true,
-                    detail: format!("Could not launch elevated service start: {error}"),
-                },
-            }
-        }
-        Ok(output) => ServiceStartResult {
-            started: false,
-            elevated: false,
-            detail: format!("Could not start {AEROFORGE_SERVICE}: {}", output.trim()),
-        },
-        Err(error) => ServiceStartResult {
-            started: false,
-            elevated: false,
-            detail: format!("Could not start {AEROFORGE_SERVICE}: {error}"),
-        },
-    }
-}
-
 pub fn request_service_heal() -> ServiceHealResult {
     let service = read_service_readiness(AEROFORGE_SERVICE);
     if !service.installed {
@@ -346,21 +277,6 @@ fn healer_task_available() -> bool {
 fn task_run_succeeded(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("success") || lower.contains("has been attempted")
-}
-
-fn service_start_succeeded(text: &str) -> bool {
-    let upper = text.to_ascii_uppercase();
-    upper.contains("START_PENDING") || upper.contains("RUNNING")
-}
-
-fn service_already_running(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    text.contains("1056") || lower.contains("already been started")
-}
-
-fn service_start_needs_elevation(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    text.contains("5") && (lower.contains("access is denied") || lower.contains("access denied"))
 }
 
 fn wait_for_service_running(timeout: std::time::Duration) -> bool {
@@ -536,13 +452,6 @@ fn shell_execute_elevated_powershell(
     Err("Hardware repair is only available on Windows.".into())
 }
 
-#[cfg(windows)]
-fn shell_execute_elevated_service_start() -> Result<(), String> {
-    run_elevated_powershell(
-        "-NoProfile -ExecutionPolicy Bypass -Command \"Start-Service -Name AeroForgeService\"",
-    )
-}
-
 /// Elevate Windows PowerShell by absolute path: a bare "powershell.exe" would let
 /// ShellExecute pick one up from the (user-writable, in portable installs) app
 /// directory and hand it the UAC-approved token.
@@ -578,11 +487,6 @@ fn run_elevated_powershell(parameters: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
-fn shell_execute_elevated_service_start() -> Result<(), String> {
-    Err("Service start is only available on Windows.".into())
-}
-
 fn quote_arg(path: &Path) -> String {
     format!("\"{}\"", path.display().to_string().replace('"', "\\\""))
 }
@@ -614,19 +518,6 @@ SERVICE_NAME: Winmgmt
     fn detects_missing_service() {
         assert!(service_missing(
             "[SC] OpenService FAILED 1060:\nThe specified service does not exist as an installed service."
-        ));
-    }
-
-    #[test]
-    fn classifies_service_start_results() {
-        assert!(service_start_succeeded(
-            "STATE              : 2  START_PENDING"
-        ));
-        assert!(service_already_running(
-            "[SC] StartService FAILED 1056:\nAn instance of the service is already running."
-        ));
-        assert!(service_start_needs_elevation(
-            "[SC] StartService FAILED 5:\nAccess is denied."
         ));
     }
 
