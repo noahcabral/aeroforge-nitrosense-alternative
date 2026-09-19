@@ -143,7 +143,7 @@ pub async fn get_backend_bootstrap(
 }
 
 #[tauri::command]
-pub fn append_performance_log(
+pub async fn append_performance_log(
     events: Vec<PerformanceLogEvent>,
     state: State<'_, BackendState>,
 ) -> Result<String, String> {
@@ -466,7 +466,7 @@ fn merge_capabilities(
 }
 
 #[tauri::command]
-pub fn save_control_snapshot(
+pub async fn save_control_snapshot(
     app: AppHandle,
     snapshot: ControlSnapshot,
     state: State<'_, BackendState>,
