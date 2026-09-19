@@ -69,6 +69,7 @@ import {
   buildJpegBootLogoName,
   prepareBootLogoUpload,
   preparePresetBootLogo,
+  type PreparedBootLogo,
 } from './lib/bootLogo'
 import {
   chartHeight,
@@ -3856,23 +3857,10 @@ function App() {
     setCustomBootFilename(buildJpegBootLogoName(file.name))
     setSelectedBootArt('custom')
     pulseControl('boot-upload')
-
-    setSettingsActionPending('boot-logo')
     setStatusMessage('Preparing and applying the boot-logo image...')
-
     try {
-      const prepared = await prepareBootLogoUpload(file)
-      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, 'custom')
-      applyAuthoritativeSnapshot(result.controls, 'bootLogo')
-      await persistStagedControlsRef.current({
-        selectedBootArt: 'custom',
-        customBootFilename: prepared.fileName,
-      })
-      setStatusMessage(result.detail)
-    } catch (error) {
-      setStatusMessage(`Boot-logo apply failed: ${describeError(error)}`)
+      await applyPreparedBootLogo('custom', () => prepareBootLogoUpload(file))
     } finally {
-      setSettingsActionPending((current) => (current === 'boot-logo' ? null : current))
       event.target.value = ''
     }
   }
@@ -3885,19 +3873,22 @@ function App() {
 
     setSelectedBootArt(art.id)
     pulseControl('boot-upload')
-    setSettingsActionPending('boot-logo')
     setStatusMessage(`Preparing ${art.name} for boot-logo apply...`)
+    await applyPreparedBootLogo(art.id as BootArtId, () => preparePresetBootLogo(art))
+  }
 
+  // Upload and preset artwork differ only in how the image is prepared.
+  async function applyPreparedBootLogo(
+    artId: BootArtId,
+    prepare: () => Promise<PreparedBootLogo>,
+  ) {
+    setSettingsActionPending('boot-logo')
     try {
-      const prepared = await preparePresetBootLogo(art)
-      const result = await applyBootLogo(
-        prepared.fileName,
-        prepared.imageBase64,
-        art.id as BootArtId,
-      )
+      const prepared = await prepare()
+      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, artId)
       applyAuthoritativeSnapshot(result.controls, 'bootLogo')
       await persistStagedControlsRef.current({
-        selectedBootArt: art.id,
+        selectedBootArt: artId,
         customBootFilename: prepared.fileName,
       })
       setStatusMessage(result.detail)
