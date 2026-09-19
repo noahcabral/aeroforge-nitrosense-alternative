@@ -5,7 +5,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         RwLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use super::models::{
@@ -14,6 +13,7 @@ use super::models::{
     PersonalSettings, PowerProfileId, ProcessorStateSettings, ShellStatus, TelemetrySnapshot,
     UpdateChannelId, UpdateStatus,
 };
+use super::now_unix;
 use super::process::hidden_command;
 use super::updater::UpdaterStore;
 
@@ -238,10 +238,7 @@ fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Er
         return Ok(());
     }
 
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let stamp = now_unix();
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())

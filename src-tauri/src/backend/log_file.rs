@@ -1,11 +1,8 @@
 //! Size-capped append-only text logs shared by the app and the hotkey helper,
 //! both of which run for the life of the session and log every Nitro key press.
-use std::{
-    fs, io,
-    io::Write,
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, io, io::Write, path::Path};
+
+use super::now_unix;
 
 const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -31,11 +28,7 @@ pub fn append_line(path: &Path, message: &str) {
     }
     let _ = rotate_if_needed(path);
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(file, "{seconds} {message}");
+        let _ = writeln!(file, "{} {message}", now_unix());
     }
 }
 

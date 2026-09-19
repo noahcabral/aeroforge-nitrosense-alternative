@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,8 @@ use super::models::{
     ServiceWorkerStatus, TelemetrySnapshot,
 };
 use super::{
-    process::hidden_command, smart_charge::SmartChargeApplyPayload, state::write_text_atomically,
+    now_unix, process::hidden_command, smart_charge::SmartChargeApplyPayload,
+    state::write_text_atomically,
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
@@ -260,11 +261,7 @@ fn supervisor_is_fresh(updated_at_unix: Option<u64>) -> bool {
     let Some(updated_at_unix) = updated_at_unix else {
         return false;
     };
-    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-
-    now.as_secs()
+    now_unix()
         .checked_sub(updated_at_unix)
         .map(|age| age <= FRESH_SUPERVISOR_MAX_AGE_SECONDS)
         .unwrap_or(false)
@@ -593,7 +590,7 @@ fn read_fresh_cached_snapshot(
     path: &Path,
 ) -> Result<(String, u64), Box<dyn std::error::Error + Send + Sync>> {
     let updated_at_unix = file_modified_unix(path)?;
-    let age = current_unix()?.saturating_sub(updated_at_unix);
+    let age = now_unix().saturating_sub(updated_at_unix);
     if age > FRESH_CACHED_SNAPSHOT_MAX_AGE_SECONDS {
         return Err(format!(
             "Cached service snapshot {} is stale: {age}s old.",
@@ -610,10 +607,6 @@ fn file_modified_unix(path: &Path) -> Result<u64, Box<dyn std::error::Error + Se
         .modified()?
         .duration_since(UNIX_EPOCH)?
         .as_secs())
-}
-
-fn current_unix() -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 pub fn ensure_service_running() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -661,10 +654,7 @@ fn cached_supervisor_worker_problem() -> Option<String> {
 }
 
 fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
+    let now = now_unix();
 
     for worker_name in CRITICAL_WORKERS {
         let Some(worker) = workers.iter().find(|worker| worker.name == *worker_name) else {
@@ -689,7 +679,7 @@ fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
         if worker.interval_seconds > 0 {
             let max_age = FRESH_PERIODIC_WORKER_MAX_AGE_SECONDS
                 .max(worker.interval_seconds.saturating_mul(4));
-            let age = now_unix.saturating_sub(worker.last_update_unix);
+            let age = now.saturating_sub(worker.last_update_unix);
             if age > max_age {
                 return Some(format!(
                     "{} heartbeat is stale: last update was {age}s ago, expected within {max_age}s",
