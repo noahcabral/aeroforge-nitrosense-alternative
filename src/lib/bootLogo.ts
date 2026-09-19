@@ -33,13 +33,12 @@ function loadImageElement(src: string) {
 }
 
 export function buildJpegBootLogoName(fileName: string) {
-  const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
-  return `${stem}.jpg`
+  return buildBootLogoName(fileName, 'jpg')
 }
 
-function buildGifBootLogoName(fileName: string) {
+function buildBootLogoName(fileName: string, extension: 'jpg' | 'gif') {
   const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
-  return `${stem}.gif`
+  return `${stem}.${extension}`
 }
 
 function base64PayloadFromDataUrl(dataUrl: string) {
@@ -193,7 +192,7 @@ export async function prepareBootLogoUpload(file: File): Promise<PreparedBootLog
   const sourceDataUrl = await readFileAsDataUrl(file)
   if (file.type === 'image/gif' || /\.gif$/i.test(file.name)) {
     return {
-      fileName: buildGifBootLogoName(file.name),
+      fileName: buildBootLogoName(file.name, 'gif'),
       imageBase64: base64PayloadFromDataUrl(sourceDataUrl),
     }
   }
