@@ -2,15 +2,10 @@
 #![windows_subsystem = "windows"]
 
 use std::{
-    collections::HashSet,
     env, fs,
-    mem::size_of,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        OnceLock,
-    },
+    sync::OnceLock,
     thread::{self, sleep},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -19,41 +14,22 @@ use aeroforge_control_lib::backend::{
     commands::show_update_notification,
     log_file,
     models::UpdateChannelId,
+    nitro_key,
     single_instance::{find_existing_main_window, is_app_process_running},
     updater::{refresh_status, UpdaterStore},
 };
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, HANDLE, HWND,
-        LPARAM, LRESULT, WPARAM,
-    },
-    System::{
-        LibraryLoader::GetModuleHandleW,
-        Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId},
-    },
-    UI::{
-        Input::{
-            GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList,
-            RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER,
-            RIDEV_INPUTSINK, RIDI_DEVICEINFO, RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
-            RIM_TYPEKEYBOARD,
-        },
-        WindowsAndMessaging::{
-            AllowSetForegroundWindow, BringWindowToTop, CreateWindowExW, DefWindowProcW,
-            DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowTextLengthW,
-            GetWindowTextW, GetWindowThreadProcessId, RegisterClassW, SetForegroundWindow,
-            SetWindowPos, ShowWindow, ShowWindowAsync, SwitchToThisWindow, TranslateMessage,
-            HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-            SW_RESTORE, WM_INPUT, WNDCLASSW, WS_OVERLAPPED,
-        },
+    Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND},
+    System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId},
+    UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow, GetWindowTextLengthW,
+        GetWindowTextW, GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow,
+        ShowWindowAsync, SwitchToThisWindow, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE,
     },
 };
 
-const NITRO_KEY_VKEY: u16 = 0x00ff;
-const NITRO_KEY_SCAN: u16 = 0x0075;
-const RAW_KEY_BREAK: u16 = 0x0001;
-const DEBOUNCE_MS: u64 = 750;
 const ASFW_ANY: u32 = u32::MAX;
 const BACKGROUND_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const BACKGROUND_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -61,7 +37,6 @@ const UI_PREWARM_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const UI_PREWARM_INTERVAL: Duration = Duration::from_secs(30);
 const UI_PREWARM_MAX_BACKOFF_EXPONENT: u32 = 5;
 
-static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
 static APP_EXE: OnceLock<PathBuf> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -111,7 +86,7 @@ fn main() {
     spawn_background_update_worker(&log_path);
     spawn_ui_prewarm_worker(&log_path, &app_exe);
 
-    if let Err(error) = run_raw_input_loop(&log_path) {
+    if let Err(error) = nitro_key::run_raw_input_loop(on_nitro_key, Some(log_path.clone())) {
         write_log(&log_path, &format!("raw-input loop stopped: {error}"));
     }
 }
@@ -420,211 +395,7 @@ fn default_stable_channel() -> UpdateChannelId {
     UpdateChannelId::Stable
 }
 
-fn run_raw_input_loop(log_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let class_name = to_wide("AeroForgeNitroKeyHelperRawInputWindow");
-    let window_name = to_wide("AeroForge Nitro Key Helper");
-    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    if instance.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    let window_class = WNDCLASSW {
-        lpfnWndProc: Some(raw_input_window_proc),
-        hInstance: instance,
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-
-    let atom = unsafe { RegisterClassW(&window_class) };
-    if atom == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_CLASS_ALREADY_EXISTS as i32) {
-            return Err(error.into());
-        }
-    }
-
-    let hwnd = unsafe {
-        CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            window_name.as_ptr(),
-            WS_OVERLAPPED,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            instance,
-            std::ptr::null_mut(),
-        )
-    };
-    if hwnd.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    let devices = build_raw_input_registrations(hwnd);
-    if devices.is_empty() {
-        return Err("no raw-input devices were available to register".into());
-    }
-
-    let registered = unsafe {
-        RegisterRawInputDevices(
-            devices.as_ptr(),
-            devices.len() as u32,
-            size_of::<RAWINPUTDEVICE>() as u32,
-        )
-    };
-    if registered == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    write_log(
-        log_path,
-        &format!(
-            "raw-input helper armed with {} registration(s)",
-            devices.len()
-        ),
-    );
-
-    let mut message = unsafe { std::mem::zeroed::<MSG>() };
-    while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
-        unsafe {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-
-    Ok(())
-}
-
-fn build_raw_input_registrations(hwnd: HWND) -> Vec<RAWINPUTDEVICE> {
-    let mut devices = Vec::new();
-    let mut seen = HashSet::<(u16, u16)>::new();
-
-    add_registration(&mut devices, &mut seen, 0x01, 0x06, hwnd);
-    add_registration(&mut devices, &mut seen, 0x0c, 0x01, hwnd);
-
-    let mut count = 0u32;
-    let list_item_size = size_of::<RAWINPUTDEVICELIST>() as u32;
-    let first_result =
-        unsafe { GetRawInputDeviceList(std::ptr::null_mut(), &mut count, list_item_size) };
-    if first_result == u32::MAX || count == 0 {
-        return devices;
-    }
-
-    let mut raw_devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
-    let list_result =
-        unsafe { GetRawInputDeviceList(raw_devices.as_mut_ptr(), &mut count, list_item_size) };
-    if list_result == u32::MAX {
-        return devices;
-    }
-
-    for raw_device in raw_devices.into_iter().take(list_result as usize) {
-        if raw_device.dwType == RIM_TYPEKEYBOARD {
-            add_registration(&mut devices, &mut seen, 0x01, 0x06, hwnd);
-            continue;
-        }
-
-        if raw_device.dwType != RIM_TYPEHID {
-            continue;
-        }
-
-        let Some(info) = read_raw_input_device_info(raw_device.hDevice) else {
-            continue;
-        };
-        let hid = unsafe { info.Anonymous.hid };
-        if hid.usUsagePage != 0 && hid.usUsage != 0 {
-            add_registration(&mut devices, &mut seen, hid.usUsagePage, hid.usUsage, hwnd);
-        }
-    }
-
-    devices
-}
-
-fn add_registration(
-    devices: &mut Vec<RAWINPUTDEVICE>,
-    seen: &mut HashSet<(u16, u16)>,
-    usage_page: u16,
-    usage: u16,
-    hwnd: HWND,
-) {
-    if !seen.insert((usage_page, usage)) {
-        return;
-    }
-
-    devices.push(RAWINPUTDEVICE {
-        usUsagePage: usage_page,
-        usUsage: usage,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    });
-}
-
-fn read_raw_input_device_info(handle: HANDLE) -> Option<RID_DEVICE_INFO> {
-    let mut info = RID_DEVICE_INFO {
-        cbSize: size_of::<RID_DEVICE_INFO>() as u32,
-        ..Default::default()
-    };
-    let mut info_size = info.cbSize;
-    let result = unsafe {
-        GetRawInputDeviceInfoW(
-            handle,
-            RIDI_DEVICEINFO,
-            (&mut info as *mut RID_DEVICE_INFO).cast(),
-            &mut info_size,
-        )
-    };
-
-    if result == u32::MAX {
-        None
-    } else {
-        Some(info)
-    }
-}
-
-unsafe extern "system" fn raw_input_window_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if message == WM_INPUT {
-        handle_raw_input(lparam);
-    }
-
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-}
-
-fn handle_raw_input(lparam: LPARAM) {
-    // Keyboard reports always fit a RAWINPUT; a HID report that does not is
-    // rejected by the size check and would be ignored below anyway. Reading
-    // into the struct itself also keeps the read aligned, unlike a byte buffer.
-    let mut raw_input = unsafe { std::mem::zeroed::<RAWINPUT>() };
-    let mut raw_size = size_of::<RAWINPUT>() as u32;
-    let read_result = unsafe {
-        GetRawInputData(
-            lparam as _,
-            RID_INPUT,
-            (&mut raw_input as *mut RAWINPUT).cast(),
-            &mut raw_size,
-            size_of::<RAWINPUTHEADER>() as u32,
-        )
-    };
-    if read_result == u32::MAX || raw_input.header.dwType != RIM_TYPEKEYBOARD {
-        return;
-    }
-
-    let keyboard = unsafe { raw_input.data.keyboard };
-    let is_key_down = keyboard.Flags & RAW_KEY_BREAK == 0;
-    if !is_key_down || keyboard.VKey != NITRO_KEY_VKEY || keyboard.MakeCode != NITRO_KEY_SCAN {
-        return;
-    }
-
-    if !accept_debounced_press() {
-        return;
-    }
-
+fn on_nitro_key() {
     let Some(log_path) = LOG_PATH.get().cloned() else {
         return;
     };
@@ -851,19 +622,6 @@ fn restore_native_window_to_foreground(hwnd: HWND) -> String {
         "helper foreground request unlock={foreground_unlock_ok} show={show_ok} async_show={async_show_ok} topmost={topmost_ok} notopmost={notopmost_ok} pos={pos_ok} top={top_ok} foreground={foreground_ok} matched={foreground_matched} title=\"{}\" after_foreground_pid={after_process_id} after_foreground_title=\"{after_title}\" current_thread={current_thread} target_thread={target_thread} foreground_thread={foreground_thread}",
         window_title(hwnd)
     )
-}
-
-fn accept_debounced_press() -> bool {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let previous_ms = LAST_NITRO_KEY_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(previous_ms) < DEBOUNCE_MS {
-        return false;
-    }
-    LAST_NITRO_KEY_MS.store(now_ms, Ordering::Relaxed);
-    true
 }
 
 fn write_log(path: &Path, message: &str) {

@@ -59,6 +59,8 @@ const DEBOUNCE_MS: u64 = 750;
 static NITRO_KEY_SENDER: OnceLock<Mutex<mpsc::Sender<()>>> = OnceLock::new();
 #[cfg(windows)]
 static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+static ON_PRESS: OnceLock<fn()> = OnceLock::new();
 
 pub fn start(app_handle: tauri::AppHandle) {
     #[cfg(windows)]
@@ -93,7 +95,7 @@ fn start_windows(app_handle: AppHandle) {
 
     let listener_log_path = log_path;
     thread::spawn(move || {
-        if let Err(error) = run_raw_input_loop(listener_log_path.clone()) {
+        if let Err(error) = run_raw_input_loop(notify_press, listener_log_path.clone()) {
             log::warn!("Nitro key raw-input listener stopped: {error}");
             write_listener_log(
                 &listener_log_path,
@@ -101,6 +103,15 @@ fn start_windows(app_handle: AppHandle) {
             );
         }
     });
+}
+
+#[cfg(windows)]
+fn notify_press() {
+    if let Some(sender) = NITRO_KEY_SENDER.get() {
+        if let Ok(sender) = sender.lock() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -265,10 +276,18 @@ fn bring_main_window_forward(app_handle: &AppHandle, log_path: &Option<PathBuf>)
     }
 }
 
+/// Runs a raw-input message loop on the calling thread and calls `on_press`
+/// for each debounced Nitro key press. One listener per process; the app and
+/// the hotkey helper share this so the HID plumbing lives in one place.
 #[cfg(windows)]
-fn run_raw_input_loop(
+pub fn run_raw_input_loop(
+    on_press: fn(),
     log_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if ON_PRESS.set(on_press).is_err() {
+        return Err("raw-input listener is already running in this process".into());
+    }
+
     let class_name = to_wide("AeroForgeNitroKeyRawInputWindow");
     let window_name = to_wide("AeroForge Nitro Key Listener");
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -547,10 +566,8 @@ fn handle_raw_input(lparam: LPARAM) {
         return;
     }
 
-    if let Some(sender) = NITRO_KEY_SENDER.get() {
-        if let Ok(sender) = sender.lock() {
-            let _ = sender.send(());
-        }
+    if let Some(on_press) = ON_PRESS.get() {
+        on_press();
     }
 }
 
