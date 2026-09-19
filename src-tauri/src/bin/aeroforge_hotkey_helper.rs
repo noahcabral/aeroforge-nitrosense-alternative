@@ -11,7 +11,7 @@ use std::{
 };
 
 use aeroforge_control_lib::backend::{
-    commands::show_update_notification,
+    commands::notify_update_available,
     log_file,
     models::UpdateChannelId,
     nitro_key, now_unix,
@@ -277,7 +277,7 @@ fn run_background_update_check(
         .clone()
         .or_else(|| status.latest_title.clone())
         .unwrap_or_else(|| "A new AeroForge update".into());
-    show_update_notification(version_label)
+    notify_update_available(&version_label)
         .map_err(|error| format!("Windows update notification failed: {error}"))?;
 
     notify_state.last_notified_key = Some(notification_key.clone());

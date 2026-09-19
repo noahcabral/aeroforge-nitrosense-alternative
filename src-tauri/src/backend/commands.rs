@@ -209,8 +209,16 @@ pub async fn install_staged_update(app: AppHandle) -> Result<UpdateStatus, Strin
 }
 
 #[tauri::command]
-pub fn show_update_notification(version_label: String) -> Result<(), String> {
-    let version = normalize_notification_text(&version_label, 80);
+pub async fn show_update_notification(version_label: String) -> Result<(), String> {
+    off_main("Update notification", move || {
+        notify_update_available(&version_label)
+    })
+    .await?
+}
+
+/// Also raised by the hotkey helper from its own background thread.
+pub fn notify_update_available(version_label: &str) -> Result<(), String> {
+    let version = normalize_notification_text(version_label, 80);
     let body = if version.is_empty() {
         "A new AeroForge build is ready to download.".to_string()
     } else {
@@ -221,7 +229,10 @@ pub fn show_update_notification(version_label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn show_thermal_warning_notification(sensor_label: String, temp_c: u8) -> Result<(), String> {
+pub async fn show_thermal_warning_notification(
+    sensor_label: String,
+    temp_c: u8,
+) -> Result<(), String> {
     let sensor = normalize_notification_text(&sensor_label, 30);
     let sensor = if sensor.is_empty() {
         "CPU".to_string()
@@ -233,7 +244,10 @@ pub fn show_thermal_warning_notification(sensor_label: String, temp_c: u8) -> Re
         "{sensor} reached {temp_c}C while Quiet Auto fan control is active. Switch to Max/Turbo or reduce load if it keeps climbing."
     );
 
-    show_desktop_notification("AeroForge temperature warning", &body)
+    off_main("Thermal warning notification", move || {
+        show_desktop_notification("AeroForge temperature warning", &body)
+    })
+    .await?
 }
 
 #[cfg(windows)]
