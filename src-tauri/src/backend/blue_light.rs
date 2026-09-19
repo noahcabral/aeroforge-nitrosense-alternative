@@ -1,9 +1,5 @@
-use std::{
-    fs, io,
-    path::Path,
-    ptr::null_mut,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use super::now_unix;
+use std::{fs, io, path::Path, ptr::null_mut};
 
 use serde_json::{Map, Value};
 use windows_sys::Win32::{
@@ -153,13 +149,6 @@ fn gain_profile(gain_id: u8) -> Result<GainProfile, DynError> {
         ))
         .into()),
     }
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 struct GainProfile {

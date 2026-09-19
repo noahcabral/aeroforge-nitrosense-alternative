@@ -1,8 +1,8 @@
+use super::now_unix;
 use std::{
     io,
     mem::{size_of, zeroed},
     ptr::null,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use windows_sys::Win32::Graphics::Gdi::{
@@ -214,11 +214,4 @@ fn format_display_change_error(code: DISP_CHANGE, refresh_hz: u32, phase: &str) 
     format!(
         "Windows rejected the {phase} refresh-rate change to {refresh_hz} Hz with DISP_CHANGE code {code}."
     )
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

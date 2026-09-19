@@ -1,10 +1,10 @@
+use super::now_unix;
 use std::{
     ffi::OsStr,
     fs, io,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::RwLock,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{
@@ -741,13 +741,6 @@ fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Er
     let backup_name = format!("{file_name}.{reason}.{stamp}.bak");
     let backup_path = path.with_file_name(backup_name);
     fs::rename(path, backup_path)
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn extract_zip(zip_path: &Path, destination: &Path) -> Result<(), DynError> {

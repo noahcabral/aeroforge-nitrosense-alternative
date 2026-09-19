@@ -7,14 +7,14 @@ use std::{
     process::Command,
     sync::OnceLock,
     thread::{self, sleep},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use aeroforge_control_lib::backend::{
     commands::show_update_notification,
     log_file,
     models::UpdateChannelId,
-    nitro_key,
+    nitro_key, now_unix,
     single_instance::{find_existing_main_window, is_app_process_running},
     updater::{refresh_status, UpdaterStore},
 };
@@ -281,7 +281,7 @@ fn run_background_update_check(
         .map_err(|error| format!("Windows update notification failed: {error}"))?;
 
     notify_state.last_notified_key = Some(notification_key.clone());
-    notify_state.last_notified_at_unix = Some(unix_now());
+    notify_state.last_notified_at_unix = Some(now_unix());
     save_background_update_state(&config_root, &notify_state)?;
     write_log(
         log_path,
@@ -337,13 +337,6 @@ fn save_background_update_state(
     let state_file = config_root.join("background-update-notification.json");
     fs::write(state_file, serde_json::to_string_pretty(state)?)?;
     Ok(())
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[derive(Debug, Clone)]

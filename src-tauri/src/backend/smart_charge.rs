@@ -1,8 +1,5 @@
-use std::{
-    fs, io,
-    path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use super::now_unix;
+use std::{fs, io, path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector as NativeTlsConnector;
@@ -790,11 +787,4 @@ fn persist_battery_healthy(battery_healthy: u8) -> Result<(), DynError> {
 
     super::state::write_text_atomically(path, &serde_json::to_string_pretty(&root)?)?;
     Ok(())
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
