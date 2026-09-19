@@ -501,30 +501,24 @@ fn detected_model_is_anv15_51() -> bool {
 }
 
 fn query_registry_value(key: &str, value_name: &str) -> Option<String> {
-    let output = hidden_command("reg")
-        .args(["query", key, "/v", value_name])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = reg_query(&[key, "/v", value_name])?;
     registry_value_from_query_output(&text, value_name)
 }
 
 fn query_registry_tree(key: &str) -> Option<String> {
+    reg_query(&[key, "/s", "/f", "VEN_10DE"])
+}
+
+fn reg_query(args: &[&str]) -> Option<String> {
     let output = hidden_command("reg")
-        .args(["query", key, "/s", "/f", "VEN_10DE"])
+        .arg("query")
+        .args(args)
         .output()
         .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn registry_value_from_query_output(raw: &str, value_name: &str) -> Option<String> {
