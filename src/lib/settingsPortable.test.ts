@@ -48,6 +48,7 @@ const controls: ControlSnapshot = {
     blueLightFilterEnabled: false,
     autoRefreshRateOnBatteryEnabled: false,
     autoRefreshRateRestoreHz: null,
+    autoPerformanceEnabled: false,
     selectedBootArt: 'ember',
     customBootFilename: 'custom-boot.png',
     updateChannel: 'stable',

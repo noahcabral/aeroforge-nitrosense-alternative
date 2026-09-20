@@ -150,6 +150,7 @@ function normalizePersonalSettings(value: Record<string, unknown>): PersonalSett
       typeof restoreHz === 'number' && Number.isInteger(restoreHz) && restoreHz > 0
         ? restoreHz
         : null,
+    autoPerformanceEnabled: bool(value.autoPerformanceEnabled, false),
     selectedBootArt:
       bootArt === 'ember' || bootArt === 'arc' || bootArt === 'slate' || bootArt === 'custom'
         ? bootArt

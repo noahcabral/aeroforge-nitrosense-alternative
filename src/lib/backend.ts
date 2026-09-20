@@ -176,6 +176,8 @@ export type PersonalSettings = {
   blueLightFilterEnabled: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
+  /** Opt-in Automatic Performance: load/thermal/AC-driven power + safe GPU offsets. */
+  autoPerformanceEnabled: boolean
   selectedBootArt: BootArtId
   customBootFilename: string
   updateChannel: 'stable' | 'preview'

@@ -120,6 +120,13 @@ import {
   parsePresetPack,
 } from './lib/presetTransfer'
 import {
+  autoPerformanceAlreadyApplied,
+  autoPerformanceModeLabel,
+  decideAutoPerformance,
+  type AutoPerformanceDecision,
+  type AutoPerformanceMode,
+} from './lib/autoPerformance'
+import {
   buildPortableSettings,
   defaultSettingsExportFilename,
   parsePortableSettings,
@@ -137,6 +144,7 @@ type SettingsActionPending =
   | 'boot-logo'
   | 'refresh-rate'
   | 'nvidia-telemetry'
+  | 'auto-performance'
   | 'hardware-repair'
   | 'hardware-start'
   | 'fan-calibration'
@@ -204,6 +212,7 @@ type PersistControlOverrides = {
   keepUiPrewarmed?: boolean
   autoRefreshRateOnBatteryEnabled?: boolean
   autoRefreshRateRestoreHz?: number | null
+  autoPerformanceEnabled?: boolean
   blueLightFilterEnabled?: boolean
   selectedBootArt?: string
   customBootFilename?: string
@@ -935,6 +944,7 @@ function buildControlSnapshotForPersistence(input: {
   keepUiPrewarmed: boolean
   autoRefreshRateOnBatteryEnabled: boolean
   autoRefreshRateRestoreHz: number | null
+  autoPerformanceEnabled: boolean
   usbPowerEnabled: boolean
   blueLightFilterEnabled: boolean
   selectedBootArt: string
@@ -969,6 +979,7 @@ function buildControlSnapshotForPersistence(input: {
       blueLightFilterEnabled: input.blueLightFilterEnabled,
       autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
       autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
+      autoPerformanceEnabled: input.autoPerformanceEnabled,
       selectedBootArt: input.selectedBootArt as ControlSnapshot['personalSettings']['selectedBootArt'],
       customBootFilename: input.customBootFilename,
       updateChannel: input.updateChannel,
@@ -1001,6 +1012,7 @@ function applyBackendControlSnapshot(
   setUpdateChannel: (channel: UpdateChannel) => void,
   setCheckForUpdatesOnLaunch: (enabled: boolean) => void,
   setAutoRefreshRateSettings?: (enabled: boolean, restoreHz: number | null) => void,
+  setAutoPerformanceEnabled?: (enabled: boolean) => void,
   setPresetCollections?: (controls: ControlSnapshot) => void,
 ) {
   applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
@@ -1028,6 +1040,7 @@ function applyBackendControlSnapshot(
     controls.personalSettings.autoRefreshRateOnBatteryEnabled,
     controls.personalSettings.autoRefreshRateRestoreHz,
   )
+  setAutoPerformanceEnabled?.(controls.personalSettings.autoPerformanceEnabled ?? false)
   setSelectedBootArt(controls.personalSettings.selectedBootArt)
   setCustomBootFilename(controls.personalSettings.customBootFilename)
   setUpdateChannel(controls.personalSettings.updateChannel ?? 'stable')
@@ -1104,10 +1117,17 @@ function App() {
   const [autoRefreshRateOnBatteryEnabled, setAutoRefreshRateOnBatteryEnabled] =
     useState(false)
   const autoRefreshRateOnBatteryEnabledRef = useRef(false)
-  const [autoRefreshRateRestoreHz, setAutoRefreshRateRestoreHz] = useState<number | null>(
-    null,
-  )
+  const [autoRefreshRateRestoreHz, setAutoRefreshRateRestoreHz] = useState<number | null>(null)
   const autoRefreshRateRestoreHzRef = useRef<number | null>(null)
+  const [autoPerformanceEnabled, setAutoPerformanceEnabled] = useState(false)
+  const autoPerformanceEnabledRef = useRef(false)
+  const autoPerformanceStickyModeRef = useRef<AutoPerformanceMode | null>(null)
+  const autoPerformanceApplyInFlightRef = useRef(false)
+  const autoPerformanceLastKeyRef = useRef<string | null>(null)
+  const autoPerformanceTimerRef = useRef<number | null>(null)
+  const [autoPerformanceStatus, setAutoPerformanceStatus] = useState<string | null>(null)
+  const [autoPerformanceMode, setAutoPerformanceMode] = useState<AutoPerformanceMode | null>(null)
+  const scheduleAutoPerformanceEvaluationRef = useRef<(immediate?: boolean) => void>(() => {})
   const autoRefreshRateSyncKeyRef = useRef<string | null>(null)
   const [selectedBootArt, setSelectedBootArt] = useState<string>('ember')
   const [customBootPreview, setCustomBootPreview] = useState<string | null>(null)
@@ -1142,6 +1162,7 @@ function App() {
   >(() => {})
   const refreshHardwareReadinessRef = useRef<(force?: boolean) => Promise<void>>(async () => {})
   const [liveTelemetry, setLiveTelemetry] = useState<TelemetrySnapshot | null>(null)
+  const liveTelemetryRef = useRef<TelemetrySnapshot | null>(null)
   const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('No telemetry')
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
@@ -1532,6 +1553,27 @@ function App() {
     settingsActionPendingRef.current = settingsActionPending
   }, [settingsActionPending])
 
+  useEffect(() => {
+    liveTelemetryRef.current = liveTelemetry
+  }, [liveTelemetry])
+
+  useEffect(() => {
+    if (!autoPerformanceEnabled) {
+      return
+    }
+    scheduleAutoPerformanceEvaluationRef.current(false)
+  }, [
+    autoPerformanceEnabled,
+    liveTelemetry?.acPluggedIn,
+    liveTelemetry?.cpuUsagePercent,
+    liveTelemetry?.gpuUsagePercent,
+    liveTelemetry?.cpuTempC,
+    liveTelemetry?.gpuTempC,
+    liveTelemetry?.systemTempC,
+    ocTuningLocked,
+    nvidiaTelemetryEnabled,
+  ])
+
   function commitCustomCurves(next: CurveSet | ((current: CurveSet) => CurveSet)) {
     // Resolve against the ref, not inside the updater: pointerup reads the ref
     // synchronously and React may defer the updater past it during a drag.
@@ -1725,6 +1767,17 @@ function App() {
     setAutoRefreshRateRestoreHz(restoreHz)
   }
 
+  function commitAutoPerformanceEnabled(enabled: boolean) {
+    autoPerformanceEnabledRef.current = enabled
+    setAutoPerformanceEnabled(enabled)
+    if (!enabled) {
+      autoPerformanceStickyModeRef.current = null
+      autoPerformanceLastKeyRef.current = null
+      setAutoPerformanceStatus(null)
+      setAutoPerformanceMode(null)
+    }
+  }
+
   function applyControlsToUi(controls: ControlSnapshot) {
     applyBackendControlSnapshot(
       controls,
@@ -1750,6 +1803,7 @@ function App() {
       setUpdateChannel,
       setCheckForUpdatesOnLaunch,
       commitAutoRefreshRateSettings,
+      commitAutoPerformanceEnabled,
       (loaded) => syncPresetCollectionsRef.current(loaded),
     )
   }
@@ -1789,6 +1843,9 @@ function App() {
       if (stagedPersistenceTimerRef.current !== null) {
         window.clearTimeout(stagedPersistenceTimerRef.current)
       }
+      if (autoPerformanceTimerRef.current !== null) {
+        window.clearTimeout(autoPerformanceTimerRef.current)
+      }
     },
     [],
   )
@@ -1823,6 +1880,8 @@ function App() {
       autoRefreshRateOnBatteryEnabledRef.current
     const nextAutoRefreshRateRestoreHz =
       overrides?.autoRefreshRateRestoreHz ?? autoRefreshRateRestoreHzRef.current
+    const nextAutoPerformanceEnabled =
+      overrides?.autoPerformanceEnabled ?? autoPerformanceEnabledRef.current
     const nextBlueLightFilterEnabled =
       overrides?.blueLightFilterEnabled ?? blueLightFilterEnabledRef.current
     const nextSelectedBootArt = overrides?.selectedBootArt ?? selectedBootArt
@@ -1854,6 +1913,7 @@ function App() {
           keepUiPrewarmed: nextKeepUiPrewarmed,
           autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
           autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
+          autoPerformanceEnabled: nextAutoPerformanceEnabled,
           usbPowerEnabled,
           blueLightFilterEnabled: nextBlueLightFilterEnabled,
           selectedBootArt: nextSelectedBootArt,
@@ -1920,6 +1980,7 @@ function App() {
     keepUiPrewarmed,
     autoRefreshRateOnBatteryEnabled,
     autoRefreshRateRestoreHz,
+    autoPerformanceEnabled,
     usbPowerEnabled,
     blueLightFilterEnabled,
     selectedBootArt,
@@ -2918,6 +2979,7 @@ function App() {
         keepUiPrewarmed,
         autoRefreshRateOnBatteryEnabled,
         autoRefreshRateRestoreHz,
+        autoPerformanceEnabled,
         usbPowerEnabled,
         blueLightFilterEnabled,
         selectedBootArt,
@@ -2993,6 +3055,8 @@ function App() {
           parsed.payload.controls.personalSettings.autoRefreshRateOnBatteryEnabled,
         autoRefreshRateRestoreHz:
           parsed.payload.controls.personalSettings.autoRefreshRateRestoreHz,
+        autoPerformanceEnabled:
+          parsed.payload.controls.personalSettings.autoPerformanceEnabled ?? false,
         blueLightFilterEnabled:
           parsed.payload.controls.personalSettings.blueLightFilterEnabled,
         selectedBootArt: parsed.payload.controls.personalSettings.selectedBootArt,
@@ -3067,7 +3131,249 @@ function App() {
     }
   }
 
+  async function handleAutoPerformanceToggle() {
+    if (settingsActionPending) {
+      return
+    }
+
+    const nextEnabled = !autoPerformanceEnabledRef.current
+    commitAutoPerformanceEnabled(nextEnabled)
+    setSettingsActionPending('auto-performance')
+    setStatusMessage(
+      nextEnabled
+        ? 'Automatic Performance armed. AeroForge will switch Quiet/Balanced/Performance/Turbo from AC, load, and thermals, and only apply NitroSense-matched GPU offsets when cool on AC.'
+        : 'Automatic Performance disabled. Your current power and GPU settings stay as last applied.',
+    )
+
+    try {
+      await persistStagedControlsRef.current({ autoPerformanceEnabled: nextEnabled })
+      if (nextEnabled) {
+        scheduleAutoPerformanceEvaluationRef.current(true)
+      }
+    } catch (error) {
+      commitAutoPerformanceEnabled(!nextEnabled)
+      setStatusMessage(`Automatic Performance toggle failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'auto-performance' ? null : current))
+    }
+  }
+
+  function stockGpuTuningFromSlots(): GpuTuningState {
+    const stock =
+      ocProfileSlots.find((slot) => slot.id === 'daily')?.settings ?? defaultGpuOverclock
+    return { ...stock, coreClock: 0, memoryClock: 0, voltageOffset: 0 }
+  }
+
+  function gpuTuningForOcSlot(slotId: string): GpuTuningState {
+    const slot = ocProfileSlots.find((item) => item.id === slotId)
+    if (!slot) {
+      return { ...nitroSenseExtremeGpuOverclock }
+    }
+    return { ...slot.settings }
+  }
+
+  async function applyAutoPerformanceDecision(decision: AutoPerformanceDecision) {
+    if (autoPerformanceApplyInFlightRef.current || powerProfileApplyInFlightRef.current) {
+      return
+    }
+
+    const currentGpu = toBackendGpuTuningState(gpuOverclock)
+    if (
+      autoPerformanceAlreadyApplied(decision, {
+        powerProfileId: activePowerProfile,
+        ocSlotId: activeOcSlot,
+        coreClockMhz: currentGpu.coreClockMhz,
+        memoryClockMhz: currentGpu.memoryClockMhz,
+      })
+    ) {
+      autoPerformanceStickyModeRef.current = decision.mode
+      setAutoPerformanceMode(decision.mode)
+      setAutoPerformanceStatus(decision.reason)
+      return
+    }
+
+    const decisionKey = `${decision.powerProfileId}:${decision.ocSlotId}:${decision.wantsGpuOffsets}`
+    if (autoPerformanceLastKeyRef.current === decisionKey) {
+      return
+    }
+
+    autoPerformanceApplyInFlightRef.current = true
+    autoPerformanceLastKeyRef.current = decisionKey
+    autoPerformanceStickyModeRef.current = decision.mode
+    setAutoPerformanceMode(decision.mode)
+    setAutoPerformanceStatus(decision.reason)
+    setStatusMessage(`Automatic Performance: ${decision.reason}`)
+
+    try {
+      const currentCore = gpuOverclock.coreClock
+      const currentMem = gpuOverclock.memoryClock
+      const needsStockClocks =
+        !decision.wantsGpuOffsets && (currentCore !== 0 || currentMem !== 0)
+      const needsOffsetClocks =
+        decision.wantsGpuOffsets &&
+        (currentCore !== 100 ||
+          (currentMem !== 200 && currentMem !== 0) ||
+          activeOcSlot !== decision.ocSlotId)
+
+      if (needsOffsetClocks || needsStockClocks) {
+        const nextTuning = needsOffsetClocks
+          ? gpuTuningForOcSlot(decision.ocSlotId)
+          : stockGpuTuningFromSlots()
+        setGpuOverclock(nextTuning)
+        setActiveOcSlot(decision.ocSlotId)
+
+        if (serviceConnectedRef.current) {
+          const result = await applyGpuTuning(
+            toBackendGpuTuningState(nextTuning),
+            decision.ocSlotId,
+          )
+          applyAuthoritativeSnapshot(result.controls, 'gpu')
+        } else {
+          setOcApplyState('live')
+        }
+      }
+
+      // Re-apply the named power profile after GPU tuning so controls stay on
+      // Quiet/Balanced/Performance/Turbo instead of the Custom forced by GPU apply.
+      await handlePowerProfileWithoutDisablingAuto(decision.powerProfileId)
+    } catch (error) {
+      autoPerformanceLastKeyRef.current = null
+      setStatusMessage(`Automatic Performance apply failed: ${describeError(error)}`)
+      setAutoPerformanceStatus(`Apply failed: ${describeError(error)}`)
+    } finally {
+      autoPerformanceApplyInFlightRef.current = false
+    }
+  }
+
+  async function handlePowerProfileWithoutDisablingAuto(profileId: PowerProfile['id']) {
+    // Same as handlePowerProfile but keeps Automatic Performance armed.
+    if (customPowerApplyTimerRef.current !== null) {
+      window.clearTimeout(customPowerApplyTimerRef.current)
+      customPowerApplyTimerRef.current = null
+    }
+    customPowerApplyRevisionRef.current += 1
+
+    const nextProcessorState = getProcessorStateForPowerProfile(
+      profileId,
+      customProcessorStateRef.current,
+    )
+    const profileName = powerProfiles.find((profile) => profile.id === profileId)?.name ?? 'Power'
+
+    if (profileId === 'custom') {
+      customProcessorStateRef.current = nextProcessorState
+      setCustomProcessorState(nextProcessorState)
+    }
+
+    const hasService = serviceConnectedRef.current
+    const hasPowerHardware = hasService && (hardwareReadiness?.ready ?? true)
+    const processorPolicyEnabled = processorStateControlEnabledRef.current
+
+    setActivePowerProfile(profileId)
+    pulseControl(profileId)
+
+    if (!hasPowerHardware) {
+      await waitForNextPaint()
+      await persistStagedControlsRef.current({
+        activePowerProfile: profileId,
+        ...(profileId === 'custom' ? { customProcessorState: nextProcessorState } : {}),
+      })
+      return
+    }
+
+    if (powerProfileApplyInFlightRef.current) {
+      queuedPowerProfileRef.current = profileId
+      return
+    }
+
+    powerProfileApplyInFlightRef.current = true
+    beginControlApply()
+
+    try {
+      await waitForNextPaint()
+      const updatedControls = await applyPowerProfile(
+        profileId,
+        {
+          minPercent: nextProcessorState.min,
+          maxPercent: nextProcessorState.max,
+        },
+        profileId === 'custom' ? customPowerBaseRef.current : null,
+        processorPolicyEnabled,
+      )
+      const refreshed = await refreshCachedLiveControlsAfterApply()
+      const liveControls = refreshed.liveControls
+      const queuedProfile = queuedPowerProfileRef.current
+      const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
+
+      if (!resultSuperseded) {
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
+      }
+
+      if (!resultSuperseded) {
+        setStatusMessage(`Automatic Performance applied ${profileName}.`)
+      }
+    } catch (error) {
+      setStatusMessage(`Automatic Performance power apply failed: ${describeError(error)}`)
+    } finally {
+      powerProfileApplyInFlightRef.current = false
+      const queuedProfile = queuedPowerProfileRef.current
+      queuedPowerProfileRef.current = null
+      endControlApply()
+      if (queuedProfile !== null && queuedProfile !== profileId) {
+        void handlePowerProfileWithoutDisablingAuto(queuedProfile)
+      }
+    }
+  }
+
+  function scheduleAutoPerformanceEvaluation(immediate = false) {
+    if (autoPerformanceTimerRef.current !== null) {
+      window.clearTimeout(autoPerformanceTimerRef.current)
+      autoPerformanceTimerRef.current = null
+    }
+
+    const run = () => {
+      autoPerformanceTimerRef.current = null
+      if (!autoPerformanceEnabledRef.current) {
+        return
+      }
+
+      const telemetry = liveTelemetryRef.current
+      if (!telemetry) {
+        setAutoPerformanceStatus('Waiting for telemetry…')
+        return
+      }
+
+      const decision = decideAutoPerformance({
+        acPluggedIn: telemetry.acPluggedIn,
+        cpuUsagePercent: telemetry.cpuUsagePercent,
+        gpuUsagePercent: telemetry.gpuUsagePercent,
+        cpuTempC: telemetry.cpuTempC,
+        gpuTempC: telemetry.gpuTempC,
+        systemTempC: telemetry.systemTempC,
+        stickyMode: autoPerformanceStickyModeRef.current,
+        ocTuningLocked,
+        nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+      })
+
+      void applyAutoPerformanceDecision(decision)
+    }
+
+    if (immediate) {
+      run()
+      return
+    }
+
+    autoPerformanceTimerRef.current = window.setTimeout(run, 2500)
+  }
+  scheduleAutoPerformanceEvaluationRef.current = scheduleAutoPerformanceEvaluation
+
   async function handlePowerProfile(profileId: PowerProfile['id']) {
+    // Manual profile selection always exits Automatic Performance so the user's
+    // choice is sticky until they re-enable Auto.
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
     // A pending debounced Custom apply must not land after a different profile
     // was chosen: it would snap the UI back to Custom and race the hardware write.
     if (customPowerApplyTimerRef.current !== null) {
@@ -4366,6 +4672,11 @@ function App() {
       return
     }
 
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
     setActivePowerProfile('custom')
     setActiveOcSlot(slot.id)
     setGpuOverclock({ ...slot.settings })
@@ -4437,6 +4748,7 @@ function App() {
           keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
+          autoPerformanceEnabled: autoPerformanceEnabledRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -4490,6 +4802,7 @@ function App() {
           keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
+          autoPerformanceEnabled: autoPerformanceEnabledRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -5015,9 +5328,38 @@ function App() {
                 emptyLabel="No power apply has run yet."
               />
 
+              <div className="power-auto-panel">
+                <div>
+                  <strong>Automatic Performance</strong>
+                  <p>
+                    {autoPerformanceEnabled
+                      ? autoPerformanceStatus ??
+                        'Watching AC power, load, and thermals. GPU offsets stay within NitroSense-matched +100/+200 MHz and never run on battery.'
+                      : 'Opt-in auto mode switches Quiet → Turbo from AC, load, and thermals. GPU clock offsets only apply on AC when cool, using the same NitroSense Performance/Turbo presets — never voltage or raised power limits.'}
+                  </p>
+                </div>
+                <button
+                  className={`toggle ${autoPerformanceEnabled ? 'is-on' : ''}`}
+                  disabled={settingsActionPending !== null}
+                  onClick={() => void handleAutoPerformanceToggle()}
+                  aria-pressed={autoPerformanceEnabled}
+                  type="button"
+                >
+                  <span />
+                </button>
+              </div>
+
               <div className="power-mode__frame">
                 <div className="power-mode__header">
-                  <span className="eyebrow">{formatPowerSource(displayedAcPluggedIn)}</span>
+                  <span className="eyebrow">
+                    {autoPerformanceEnabled
+                      ? `Auto · ${
+                          autoPerformanceMode
+                            ? autoPerformanceModeLabel(autoPerformanceMode)
+                            : 'arming'
+                        } · ${formatPowerSource(displayedAcPluggedIn)}`
+                      : formatPowerSource(displayedAcPluggedIn)}
+                  </span>
                 </div>
 
                 <div className="power-mode__profiles">
@@ -5536,6 +5878,28 @@ function App() {
                             </button>
                           </div>
                         )}
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>Automatic Performance</strong>
+                            <p>
+                              {autoPerformanceEnabled
+                                ? autoPerformanceStatus ??
+                                  'Armed: switches Quiet/Balanced/Performance/Turbo from AC, load, and thermals; NitroSense GPU offsets only when cool on AC.'
+                                : 'Opt-in. Never overclocks on battery, never writes voltage/power%/temp limits, and backs off above 85°C.'}
+                            </p>
+                          </div>
+
+                          <button
+                            className={`toggle ${autoPerformanceEnabled ? 'is-on' : ''}`}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleAutoPerformanceToggle()}
+                            aria-pressed={autoPerformanceEnabled}
+                            type="button"
+                          >
+                            <span />
+                          </button>
+                        </div>
 
                         <div className="personal-setting-block">
                           <div>

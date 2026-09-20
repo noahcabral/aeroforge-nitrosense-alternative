@@ -381,6 +381,7 @@ fn build_default_controls() -> ControlSnapshot {
             blue_light_filter_enabled: false,
             auto_refresh_rate_on_battery_enabled: false,
             auto_refresh_rate_restore_hz: None,
+            auto_performance_enabled: false,
             selected_boot_art: BootArtId::Ember,
             custom_boot_filename: "custom-boot.png".into(),
             update_channel: UpdateChannelId::Stable,
