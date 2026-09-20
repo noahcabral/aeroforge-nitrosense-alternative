@@ -127,6 +127,12 @@ import {
   type AutoPerformanceMode,
 } from './lib/autoPerformance'
 import {
+  findBestGpuOverclock,
+  resultForTier,
+  stepDownGpuOverclockTier,
+  type AutoGpuFinderResult,
+} from './lib/autoGpuOverclock'
+import {
   buildPortableSettings,
   defaultSettingsExportFilename,
   parsePortableSettings,
@@ -1127,6 +1133,8 @@ function App() {
   const autoPerformanceTimerRef = useRef<number | null>(null)
   const [autoPerformanceStatus, setAutoPerformanceStatus] = useState<string | null>(null)
   const [autoPerformanceMode, setAutoPerformanceMode] = useState<AutoPerformanceMode | null>(null)
+  const [autoGpuFinderResult, setAutoGpuFinderResult] = useState<AutoGpuFinderResult | null>(null)
+  const [autoGpuFinderPending, setAutoGpuFinderPending] = useState(false)
   const scheduleAutoPerformanceEvaluationRef = useRef<(immediate?: boolean) => void>(() => {})
   const autoRefreshRateSyncKeyRef = useRef<string | null>(null)
   const [selectedBootArt, setSelectedBootArt] = useState<string>('ember')
@@ -4822,10 +4830,122 @@ function App() {
     setActiveOcSlot('daily')
     setGpuOverclock({ ...defaultGpuOverclock })
     setOcApplyState('staged')
+    setAutoGpuFinderResult(null)
     setStatusMessage(
       'GPU overclocking and voltage controls restored to the AeroForge daily baseline.',
     )
     pulseControl('daily')
+  }
+
+  function nitrosenseMemoryOffsetFromSlots(): number {
+    const extreme = ocProfileSlots.find((slot) => slot.id === 'arena' || slot.id === 'creator')
+    return extreme?.settings.memoryClock ?? 200
+  }
+
+  function runAutoGpuFinder(): AutoGpuFinderResult {
+    const result = findBestGpuOverclock({
+      acPluggedIn: displayedAcPluggedIn,
+      gpuTempC: displayedGpuTemp,
+      cpuTempC: displayedCpuTemp,
+      systemTempC: displayedSystemTemp,
+      gpuName: activeTelemetry?.gpuName ?? displayedGpuIdentity,
+      nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+      ocTuningLocked,
+      nitrosenseMemoryOffsetMhz: nitrosenseMemoryOffsetFromSlots(),
+    })
+    setAutoGpuFinderResult(result)
+    return result
+  }
+
+  function handleFindBestGpuOverclock() {
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
+    const result = runAutoGpuFinder()
+    setGpuOverclock({
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    })
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setOcApplyState('staged')
+    setStatusMessage(`Auto GPU Overclocking: ${result.summary}`)
+    pulseControl('auto-gpu-find')
+  }
+
+  async function handleApplyAutoGpuRecommendation() {
+    const result = autoGpuFinderResult ?? runAutoGpuFinder()
+    if (!result.canApply) {
+      setStatusMessage(result.blockedReason ?? result.summary)
+      showToast('warning', 'Auto GPU Overclocking blocked', result.blockedReason ?? result.summary)
+      return
+    }
+
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
+    const nextTuning: GpuTuningState = {
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    }
+    setGpuOverclock(nextTuning)
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setAutoGpuFinderPending(true)
+    pulseControl('auto-gpu-apply')
+
+    try {
+      if (!serviceConnected) {
+        setOcApplyState('live')
+        setStatusMessage(
+          `Staged ${result.tierLabel} (${result.offsets.coreClockMhz >= 0 ? '+' : ''}${result.offsets.coreClockMhz} / ${result.offsets.memoryClockMhz >= 0 ? '+' : ''}${result.offsets.memoryClockMhz} MHz) in preview. Connect the AeroForge service to apply on hardware, then follow the instructions below.`,
+        )
+        showToast('info', 'Auto GPU settings staged', result.tierLabel)
+        return
+      }
+
+      const applied = await applyGpuTuning(
+        toBackendGpuTuningState(nextTuning),
+        result.suggestedOcSlotId,
+      )
+      applyAuthoritativeSnapshot(applied.controls, 'gpu')
+      setStatusMessage(`Auto GPU Overclocking applied ${result.tierLabel}. ${result.summary}`)
+      showToast('success', 'Auto GPU Overclocking applied', result.tierLabel)
+    } catch (error) {
+      setStatusMessage(`Auto GPU Overclocking apply failed: ${describeError(error)}`)
+      showToast('error', 'Auto GPU Overclocking failed', describeError(error))
+    } finally {
+      setAutoGpuFinderPending(false)
+    }
+  }
+
+  function handleAutoGpuStepDown() {
+    const current = autoGpuFinderResult?.tierId ?? 'nitrosense'
+    const nextTier = stepDownGpuOverclockTier(current)
+    const result = resultForTier(
+      nextTier,
+      { nitrosenseMemoryOffsetMhz: nitrosenseMemoryOffsetFromSlots() },
+      `Stepped down to ${nextTier === 'stock' ? 'Stock' : 'Mild'} after instability. Retest, then Save To Custom if stable.`,
+    )
+    setAutoGpuFinderResult(result)
+    setGpuOverclock({
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    })
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setOcApplyState('staged')
+    setStatusMessage(result.summary)
   }
 
   const activeStageFitSnapshot =
@@ -5480,6 +5600,74 @@ function App() {
                         <span>
                           Core and memory offsets apply live through the NVIDIA path on this GPU.
                         </span>
+                      </div>
+
+                      <div className="power-oc-auto">
+                        <div className="power-oc-auto__copy">
+                          <span className="eyebrow">Auto GPU Overclocking</span>
+                          <strong>
+                            {autoGpuFinderResult
+                              ? `${autoGpuFinderResult.tierLabel} · core ${
+                                  autoGpuFinderResult.offsets.coreClockMhz >= 0 ? '+' : ''
+                                }${autoGpuFinderResult.offsets.coreClockMhz} / mem ${
+                                  autoGpuFinderResult.offsets.memoryClockMhz >= 0 ? '+' : ''
+                                }${autoGpuFinderResult.offsets.memoryClockMhz} MHz`
+                              : 'Find the best safe offsets for this laptop'}
+                          </strong>
+                          <p>
+                            {autoGpuFinderResult?.summary ??
+                              'Reads AC power, thermals, and telemetry, then picks Stock, Mild (+50/+100), or NitroSense Extreme (+100/+200) with verification steps. Never writes voltage or raised power limits.'}
+                          </p>
+                        </div>
+                        <div className="power-oc-auto__actions">
+                          <button
+                            className={`button button--primary ${
+                              glowTarget === 'auto-gpu-find' ? 'is-pulsing' : ''
+                            }`}
+                            type="button"
+                            disabled={ocTuningLocked || autoGpuFinderPending}
+                            onClick={handleFindBestGpuOverclock}
+                          >
+                            Find Best Settings
+                          </button>
+                          <button
+                            className={`button ${
+                              glowTarget === 'auto-gpu-apply' ? 'is-pulsing' : ''
+                            }`}
+                            type="button"
+                            disabled={
+                              ocTuningLocked ||
+                              autoGpuFinderPending ||
+                              (autoGpuFinderResult != null && !autoGpuFinderResult.canApply)
+                            }
+                            onClick={() => void handleApplyAutoGpuRecommendation()}
+                          >
+                            {autoGpuFinderPending ? 'Applying…' : 'Apply Recommendation'}
+                          </button>
+                          <button
+                            className="button button--ghost"
+                            type="button"
+                            disabled={
+                              ocTuningLocked ||
+                              autoGpuFinderPending ||
+                              autoGpuFinderResult == null ||
+                              autoGpuFinderResult.tierId === 'stock'
+                            }
+                            onClick={handleAutoGpuStepDown}
+                          >
+                            Unstable — Step Down
+                          </button>
+                        </div>
+                        {autoGpuFinderResult && (
+                          <ol className="power-oc-auto__instructions">
+                            {autoGpuFinderResult.instructions.map((step) => (
+                              <li key={step}>{step}</li>
+                            ))}
+                          </ol>
+                        )}
+                        {autoGpuFinderResult?.blockedReason && (
+                          <p className="power-oc-auto__blocked">{autoGpuFinderResult.blockedReason}</p>
+                        )}
                       </div>
 
                       <div className="power-oc-topline">
