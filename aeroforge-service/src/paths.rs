@@ -157,7 +157,12 @@ pub fn write_log_line(
     level: &str,
     message: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let line = format!("{} [{}] {}\n", timestamp_string(), level, message);
+    let line = format!(
+        "{} [{}] {}\n",
+        crate::workers::unix_timestamp(),
+        level,
+        message
+    );
     let _rotate_guard = LOG_ROTATE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -257,16 +262,6 @@ fn replace_file(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     fs::rename(source, target)?;
     Ok(())
-}
-
-fn timestamp_string() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    now.to_string()
 }
 
 #[cfg(test)]
