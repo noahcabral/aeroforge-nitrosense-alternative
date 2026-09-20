@@ -9,6 +9,11 @@ export function formatDebugClock(date: Date) {
   })
 }
 
+/** `2026-01-01-13-05-09`: the UTC time as a filesystem-safe filename segment. */
+export function filenameTimestamp(date = new Date()) {
+  return date.toISOString().slice(0, 19).replace(/[:T]/g, '-')
+}
+
 export function formatUnixClock(unix: number | null | undefined) {
   if (!unix) {
     return 'Waiting'

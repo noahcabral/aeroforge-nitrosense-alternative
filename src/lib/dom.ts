@@ -13,6 +13,10 @@ export function downloadTextFile(filename: string, contents: string, mime = 'app
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
 }
 
+export function downloadJsonFile(filename: string, value: unknown) {
+  downloadTextFile(filename, `${JSON.stringify(value, null, 2)}\n`)
+}
+
 export async function copyTextToClipboard(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text)

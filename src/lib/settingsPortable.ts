@@ -14,6 +14,7 @@ import type {
   PowerProfileId,
   ProcessorStateSettings,
 } from './backend'
+import { filenameTimestamp } from './format'
 import { sanitizePresetCollections } from './presetTransfer'
 
 export const SETTINGS_EXPORT_FORMAT = 'aeroforge-control-settings' as const
@@ -252,7 +253,6 @@ export function parsePortableSettings(raw: string): PortableSettingsParseResult 
 }
 
 export function defaultSettingsExportFilename(version: string | null): string {
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
   const versionPart = version ? `v${version.replace(/[^\w.-]+/g, '_')}-` : ''
-  return `AeroForge-Settings-${versionPart}${stamp}.json`
+  return `AeroForge-Settings-${versionPart}${filenameTimestamp()}.json`
 }

@@ -89,13 +89,14 @@ import {
   type FanCurveTemplate,
 } from './lib/curves'
 import { formatDiagnosticsText, type DiagnosticsBundle } from './lib/diagnostics'
-import { copyTextToClipboard, downloadTextFile } from './lib/dom'
+import { copyTextToClipboard, downloadJsonFile, downloadTextFile } from './lib/dom'
 import { describeError, withTimeout } from './lib/errors'
 import {
   buildCpuPowerLimitLabel,
   buildFanSpeedDetail,
   buildGpuPowerLimitLabel,
   buildHardwareIdentity,
+  filenameTimestamp,
   formatDebugClock,
   formatFanSpeedMeta,
   formatFrameTime,
@@ -2864,12 +2865,7 @@ function App() {
   function exportDiagnosticsFile() {
     try {
       const bundle = buildCurrentDiagnosticsBundle()
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      downloadTextFile(
-        `AeroForge-Diagnostics-${stamp}.json`,
-        `${JSON.stringify(bundle, null, 2)}\n`,
-        'application/json',
-      )
+      downloadJsonFile(`AeroForge-Diagnostics-${filenameTimestamp()}.json`, bundle)
       pushDebugEvent('diagnostics JSON exported')
       showToast('success', 'Diagnostics exported', 'JSON diagnostic bundle saved.')
     } catch (error) {
@@ -2888,12 +2884,7 @@ function App() {
         powerPresets,
         quickPresets,
       })
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      downloadTextFile(
-        `AeroForge-Presets-${stamp}.json`,
-        `${JSON.stringify(pack, null, 2)}\n`,
-        'application/json',
-      )
+      downloadJsonFile(`AeroForge-Presets-${filenameTimestamp()}.json`, pack)
       showToast(
         'success',
         'Presets exported',
