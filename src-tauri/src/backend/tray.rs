@@ -7,8 +7,8 @@ use tauri::{
     App, AppHandle, Emitter, Manager, Wry,
 };
 
-use super::DynError;
 use super::{
+    commands::off_main_fallible,
     models::{ControlSnapshot, FanProfileId, PowerProfileId, ProcessorStateSettings},
     service_pipe, smart_charge,
     state::BackendState,
@@ -288,23 +288,11 @@ async fn apply_menu_action(app: &AppHandle, id: &str) -> Result<(ControlSnapshot
     }
 }
 
-/// Service pipe calls block for up to the pipe timeout, so keep them off the
-/// async runtime's worker threads (matches the `commands` handlers).
-async fn off_runtime<T: Send + 'static>(
-    what: &str,
-    work: impl FnOnce() -> Result<T, DynError> + Send + 'static,
-) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|error| format!("{what} worker failed: {error}"))?
-        .map_err(|error| error.to_string())
-}
-
 async fn apply_tray_fan_profile(
     app: &AppHandle,
     profile_id: FanProfileId,
 ) -> Result<(ControlSnapshot, String), String> {
-    let applied = off_runtime("Fan profile apply", move || {
+    let applied = off_main_fallible("Fan profile apply", move || {
         service_pipe::apply_fan_profile(profile_id)
     })
     .await?;
@@ -335,7 +323,7 @@ async fn apply_tray_power_profile(
         .personal_settings
         .processor_state_control_enabled;
     let processor_state = default_processor_state_for_profile(&profile_id);
-    let applied = off_runtime("Power profile apply", move || {
+    let applied = off_main_fallible("Power profile apply", move || {
         service_pipe::apply_power_profile(
             profile_id,
             processor_state,

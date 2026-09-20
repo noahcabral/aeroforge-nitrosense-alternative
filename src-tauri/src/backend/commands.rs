@@ -19,7 +19,7 @@ use super::{
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
-    tray, updater,
+    tray, updater, DynError,
 };
 
 /// Sync commands run on the main thread, so anything that waits on the service
@@ -31,6 +31,16 @@ async fn off_main<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(work)
         .await
         .map_err(|error| format!("{what} worker failed: {error}"))
+}
+
+/// Same, for work that fails with a DynError; the tray menu shares it.
+pub async fn off_main_fallible<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> Result<T, DynError> + Send + 'static,
+) -> Result<T, String> {
+    off_main(what, work)
+        .await?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -116,9 +126,7 @@ fn elapsed_ms(started: Instant) -> f64 {
 
 #[tauri::command]
 pub async fn get_live_control_snapshot() -> Result<LiveControlSnapshot, String> {
-    off_main("Live control snapshot", service_pipe::fetch_live_controls)
-        .await?
-        .map_err(|error| error.to_string())
+    off_main_fallible("Live control snapshot", service_pipe::fetch_live_controls).await
 }
 
 #[tauri::command]
@@ -177,11 +185,10 @@ pub async fn check_for_updates(
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    off_main("Update check", move || {
+    off_main_fallible("Update check", move || {
         updater::refresh_status(app.state::<BackendState>().updater(), resolved_channel)
     })
-    .await?
-    .map_err(|error| error.to_string())
+    .await
 }
 
 #[tauri::command]
@@ -192,20 +199,18 @@ pub async fn stage_update_download(
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    off_main("Update download", move || {
+    off_main_fallible("Update download", move || {
         updater::stage_latest_update(app.state::<BackendState>().updater(), resolved_channel)
     })
-    .await?
-    .map_err(|error| error.to_string())
+    .await
 }
 
 #[tauri::command]
 pub async fn install_staged_update(app: AppHandle) -> Result<UpdateStatus, String> {
-    off_main("Update install", move || {
+    off_main_fallible("Update install", move || {
         updater::launch_staged_install(app.state::<BackendState>().updater())
     })
-    .await?
-    .map_err(|error| error.to_string())
+    .await
 }
 
 #[tauri::command]
@@ -378,11 +383,10 @@ pub async fn apply_auto_refresh_rate(
 ) -> Result<super::models::DisplayRefreshApplyResult, String> {
     let mut controls = state.controls();
     let saved_restore_hz = controls.personal_settings.auto_refresh_rate_restore_hz;
-    let applied = off_main("Refresh rate apply", move || {
+    let applied = off_main_fallible("Refresh rate apply", move || {
         display_refresh::sync_auto_refresh_rate(enabled, on_battery, saved_restore_hz)
     })
-    .await?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     controls
         .personal_settings
@@ -488,7 +492,7 @@ pub async fn apply_power_profile(
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
     let custom_base_profile_for_apply = custom_base_profile.clone();
-    let applied = off_main("Power profile apply", move || {
+    let applied = off_main_fallible("Power profile apply", move || {
         service_pipe::apply_power_profile(
             profile_id,
             processor_state,
@@ -496,8 +500,7 @@ pub async fn apply_power_profile(
             processor_state_control_enabled,
         )
     })
-    .await?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_power_profile = applied.profile_id;
@@ -524,11 +527,10 @@ pub async fn apply_gpu_tuning(
     active_oc_slot: String,
     state: State<'_, BackendState>,
 ) -> Result<super::models::GpuTuningApplyResult, String> {
-    let applied = off_main("GPU tuning apply", move || {
+    let applied = off_main_fallible("GPU tuning apply", move || {
         service_pipe::apply_gpu_tuning(tuning)
     })
-    .await?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_power_profile = PowerProfileId::Custom;
@@ -554,11 +556,10 @@ pub async fn apply_fan_profile(
     profile_id: FanProfileId,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
-    let applied = off_main("Fan profile apply", move || {
+    let applied = off_main_fallible("Fan profile apply", move || {
         service_pipe::apply_fan_profile(profile_id)
     })
-    .await?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = applied.profile_id;
@@ -582,11 +583,10 @@ pub async fn apply_custom_fan_curves(
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
     let curves_for_save = curves.clone();
-    let applied = off_main("Custom fan curve apply", move || {
+    let applied = off_main_fallible("Custom fan curve apply", move || {
         service_pipe::apply_custom_fan_curves(curves)
     })
-    .await?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = FanProfileId::Custom;
@@ -607,23 +607,21 @@ pub async fn apply_custom_fan_curves(
 #[tauri::command]
 pub async fn start_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    off_main(
+    off_main_fallible(
         "Fan speed calibration",
         service_pipe::start_fan_speed_calibration,
     )
-    .await?
-    .map_err(|error| error.to_string())
+    .await
 }
 
 #[tauri::command]
 pub async fn cancel_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    off_main(
+    off_main_fallible(
         "Fan speed calibration cancel",
         service_pipe::cancel_fan_speed_calibration,
     )
-    .await?
-    .map_err(|error| error.to_string())
+    .await
 }
 
 #[tauri::command]
