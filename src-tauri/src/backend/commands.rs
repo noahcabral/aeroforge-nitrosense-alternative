@@ -633,14 +633,12 @@ pub async fn apply_boot_logo(
 ) -> Result<BootLogoApplyResult, String> {
     let config_root = state.config_root();
     let upload_name = file_name.clone();
-    let applied = off_main("Boot logo apply", move || {
+    let applied = off_main_fallible("Boot logo apply", move || {
         let image_path =
-            boot_logo::save_uploaded_boot_logo(&config_root, &upload_name, &image_base64)
-                .map_err(|error| error.to_string())?;
+            boot_logo::save_uploaded_boot_logo(&config_root, &upload_name, &image_base64)?;
         service_pipe::apply_boot_logo(image_path.display().to_string(), Some(upload_name))
-            .map_err(|error| error.to_string())
     })
-    .await??;
+    .await?;
 
     let mut controls = state.controls();
     controls.personal_settings.selected_boot_art = selected_boot_art
