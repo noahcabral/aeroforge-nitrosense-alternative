@@ -2081,10 +2081,6 @@ function App() {
       resetStageFit(setPowerScale, setPowerScaledHeight)
     }
 
-    if (!isDevBuild() && activeTab !== 'debug') {
-      return
-    }
-
     const activeStage =
       activeTab === 'home'
         ? {
