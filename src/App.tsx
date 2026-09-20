@@ -8,7 +8,7 @@ import {
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
-import aeroforgeMark from './assets/aeroforge-mark.png'
+import aeroforgeMark from './assets/aeroforge-mark.webp'
 import { BootSplashPreview } from './components/BootSplashPreview'
 import { CurveTemplateBar } from './components/CurveTemplateBar'
 import { FanCurvePanel } from './components/FanCurvePanel'

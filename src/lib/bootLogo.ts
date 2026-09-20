@@ -1,7 +1,7 @@
 /** Boot-logo image preparation: renders preset artwork or re-encodes an upload for the firmware path. */
 
-import aeroforgeMark from '../assets/aeroforge-mark.png'
-import aeroforgeWordmark from '../assets/aeroforge-wordmark.png'
+import aeroforgeMark from '../assets/aeroforge-mark.webp'
+import aeroforgeWordmark from '../assets/aeroforge-wordmark.webp'
 import type { BootArt } from './bootArt'
 
 export type PreparedBootLogo = {

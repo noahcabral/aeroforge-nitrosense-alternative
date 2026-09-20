@@ -1,4 +1,4 @@
-import aeroforgeMark from '../assets/aeroforge-mark.png'
+import aeroforgeMark from '../assets/aeroforge-mark.webp'
 import type { BootArt } from '../lib/bootArt'
 
 type BootSplashPreviewProps = {
