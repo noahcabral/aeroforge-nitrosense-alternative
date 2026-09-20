@@ -298,10 +298,7 @@ async fn apply_tray_fan_profile(
     .await?;
     let mut controls = app.state::<BackendState>().controls();
     controls.active_fan_profile = applied.profile_id;
-    let controls = app
-        .state::<BackendState>()
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = app.state::<BackendState>().save_controls(controls)?;
     let detail = if applied.detail.trim().is_empty() {
         format!(
             "Applied {:?} fan mode from the tray.",
@@ -337,10 +334,7 @@ async fn apply_tray_power_profile(
     controls.active_power_profile = applied.profile_id;
     controls.personal_settings.processor_state_control_enabled =
         applied.processor_state_control_enabled;
-    let controls = app
-        .state::<BackendState>()
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = app.state::<BackendState>().save_controls(controls)?;
     Ok((controls, applied.detail))
 }
 
@@ -352,10 +346,7 @@ async fn apply_tray_smart_charging(
 
     let mut controls = app.state::<BackendState>().controls();
     controls.personal_settings.smart_charging_enabled = applied.enabled;
-    let controls = app
-        .state::<BackendState>()
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = app.state::<BackendState>().save_controls(controls)?;
     Ok((controls, applied.detail))
 }
 

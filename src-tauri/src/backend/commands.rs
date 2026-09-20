@@ -339,9 +339,7 @@ pub fn apply_blue_light_filter(
     let mut controls = state.controls();
     controls.personal_settings.blue_light_filter_enabled = applied.enabled;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(BlueLightApplyResult {
         controls,
@@ -362,9 +360,7 @@ pub async fn apply_smart_charging(
     let mut controls = state.controls();
     controls.personal_settings.smart_charging_enabled = applied.enabled;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
     tray::refresh(&app, &controls);
 
     Ok(SmartChargeApplyResult {
@@ -393,9 +389,7 @@ pub async fn apply_auto_refresh_rate(
         .auto_refresh_rate_on_battery_enabled = applied.enabled;
     controls.personal_settings.auto_refresh_rate_restore_hz = applied.restore_hz;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(super::models::DisplayRefreshApplyResult {
         controls,
@@ -421,9 +415,7 @@ pub async fn set_nvidia_telemetry_enabled(
 
     let mut controls = state.controls();
     controls.personal_settings.nvidia_telemetry_enabled = enabled;
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     let (enabled, detail) = match service_result {
         Ok(applied) => (applied.nvidia_telemetry_enabled, applied.detail),
@@ -475,9 +467,7 @@ pub async fn save_control_snapshot(
     snapshot: ControlSnapshot,
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
-    let controls = state
-        .save_controls(snapshot)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(snapshot)?;
     tray::refresh(&app, &controls);
     Ok(controls)
 }
@@ -513,9 +503,7 @@ pub async fn apply_power_profile(
         }
     }
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
     tray::refresh(&app, &controls);
     Ok(controls)
 }
@@ -538,9 +526,7 @@ pub async fn apply_gpu_tuning(
     controls.active_oc_slot = active_oc_slot;
     controls.oc_apply_state = ApplyState::Live;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
     tray::refresh(&app, &controls);
 
     Ok(super::models::GpuTuningApplyResult {
@@ -564,9 +550,7 @@ pub async fn apply_fan_profile(
     let mut controls = state.controls();
     controls.active_fan_profile = applied.profile_id;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
     tray::refresh(&app, &controls);
 
     Ok(super::models::FanControlApplyResult {
@@ -592,9 +576,7 @@ pub async fn apply_custom_fan_curves(
     controls.active_fan_profile = FanProfileId::Custom;
     controls.fan_curves = applied.curves.unwrap_or(curves_for_save);
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
     tray::refresh(&app, &controls);
 
     Ok(super::models::FanControlApplyResult {
@@ -647,9 +629,7 @@ pub async fn apply_boot_logo(
         .unwrap_or(super::models::BootArtId::Custom);
     controls.personal_settings.custom_boot_filename = file_name;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(BootLogoApplyResult {
         controls,

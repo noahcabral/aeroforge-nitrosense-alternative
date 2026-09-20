@@ -98,7 +98,8 @@ impl BackendState {
         self.updater.status()
     }
 
-    pub fn save_controls(&self, snapshot: ControlSnapshot) -> Result<ControlSnapshot, DynError> {
+    /// Every caller hands the failure straight to the UI, so it is already a String.
+    pub fn save_controls(&self, snapshot: ControlSnapshot) -> Result<ControlSnapshot, String> {
         // The lock stays held across the file write so concurrent saves reach
         // disk in the same order they reached memory.
         let mut controls = self
@@ -106,7 +107,7 @@ impl BackendState {
             .write()
             .expect("backend controls lock poisoned");
         *controls = snapshot;
-        persist_controls(&self.config_file, &controls)?;
+        persist_controls(&self.config_file, &controls).map_err(|error| error.to_string())?;
         Ok(controls.clone())
     }
 }
