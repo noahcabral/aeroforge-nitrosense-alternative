@@ -1,4 +1,5 @@
 use super::now_unix;
+use super::DynError;
 use std::{
     ffi::OsStr,
     fs, io,
@@ -19,8 +20,6 @@ use zip::ZipArchive;
 use super::models::{UpdateChannelId, UpdateStatus};
 use super::process::hidden_command;
 use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const UPDATE_REPO_SLUG: &str = "noahcabral/aeroforge-nitrosense-alternative";
 const UPDATE_STATE_FILE: &str = "update-state.json";
@@ -316,7 +315,8 @@ fn resolve_update_candidate(
         status.latest_published_at = release.published_at.clone();
         status.latest_commit_sha = None;
         status.latest_asset_name = latest_asset.as_ref().map(|asset| asset.name.clone());
-        status.update_available = is_newer_release(current_version.as_ref(), release_version.as_ref());
+        status.update_available =
+            is_newer_release(current_version.as_ref(), release_version.as_ref());
         status.can_stage_update = latest_asset.is_some() && status.update_available;
         status.can_install_update = staged_update_ready(&status);
         status.detail = if let Some(asset) = latest_asset.as_ref() {
@@ -922,9 +922,18 @@ mod tests {
     #[test]
     fn unparseable_release_tag_never_counts_as_newer() {
         let current = Version::parse("0.15.6").unwrap();
-        assert!(is_newer_release(Some(&current), Some(&Version::parse("0.16.0").unwrap())));
-        assert!(!is_newer_release(Some(&current), Some(&Version::parse("0.15.6").unwrap())));
-        assert!(!is_newer_release(Some(&current), Some(&Version::parse("0.15.5").unwrap())));
+        assert!(is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.16.0").unwrap())
+        ));
+        assert!(!is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.15.6").unwrap())
+        ));
+        assert!(!is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.15.5").unwrap())
+        ));
         assert!(!is_newer_release(Some(&current), None));
         assert!(!is_newer_release(None, Some(&current)));
     }

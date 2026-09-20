@@ -7,6 +7,7 @@ use tauri::{
     App, AppHandle, Emitter, Manager, Wry,
 };
 
+use super::DynError;
 use super::{
     models::{ControlSnapshot, FanProfileId, PowerProfileId, ProcessorStateSettings},
     service_pipe, smart_charge,
@@ -291,7 +292,7 @@ async fn apply_menu_action(app: &AppHandle, id: &str) -> Result<(ControlSnapshot
 /// async runtime's worker threads (matches the `commands` handlers).
 async fn off_runtime<T: Send + 'static>(
     what: &str,
-    work: impl FnOnce() -> Result<T, Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    work: impl FnOnce() -> Result<T, DynError> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(work)
         .await

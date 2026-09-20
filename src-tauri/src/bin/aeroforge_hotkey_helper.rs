@@ -17,6 +17,7 @@ use aeroforge_control_lib::backend::{
     nitro_key, now_unix,
     single_instance::{find_existing_main_window, is_app_process_running},
     updater::{refresh_status, UpdaterStore},
+    DynError,
 };
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
@@ -199,10 +200,7 @@ mod prewarm_backoff_tests {
 }
 
 /// Returns whether a hidden UI instance was launched on this tick.
-fn reconcile_ui_prewarm(
-    log_path: &Path,
-    app_exe: &Path,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+fn reconcile_ui_prewarm(log_path: &Path, app_exe: &Path) -> Result<bool, DynError> {
     let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
         return Err("could not resolve AeroForge config root".into());
     };
@@ -232,9 +230,7 @@ fn reconcile_ui_prewarm(
     }
 }
 
-fn run_background_update_check(
-    log_path: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_background_update_check(log_path: &Path) -> Result<(), DynError> {
     let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
         return Err("could not resolve AeroForge config root".into());
     };
@@ -333,7 +329,7 @@ fn load_background_update_state(config_root: &Path) -> BackgroundUpdateNotificat
 fn save_background_update_state(
     config_root: &Path,
     state: &BackgroundUpdateNotificationState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let state_file = config_root.join("background-update-notification.json");
     fs::write(state_file, serde_json::to_string_pretty(state)?)?;
     Ok(())

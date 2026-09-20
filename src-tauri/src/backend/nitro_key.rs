@@ -13,6 +13,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::DynError;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -280,10 +282,7 @@ fn bring_main_window_forward(app_handle: &AppHandle, log_path: &Option<PathBuf>)
 /// for each debounced Nitro key press. One listener per process; the app and
 /// the hotkey helper share this so the HID plumbing lives in one place.
 #[cfg(windows)]
-pub fn run_raw_input_loop(
-    on_press: fn(),
-    log_path: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_raw_input_loop(on_press: fn(), log_path: Option<PathBuf>) -> Result<(), DynError> {
     if ON_PRESS.set(on_press).is_err() {
         return Err("raw-input listener is already running in this process".into());
     }

@@ -1,4 +1,5 @@
 use super::now_unix;
+use super::DynError;
 use std::{
     io,
     mem::{size_of, zeroed},
@@ -9,8 +10,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsW, EnumDisplaySettingsW, CDS_TEST, DEVMODEW, DISP_CHANGE,
     DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS,
 };
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const BATTERY_REFRESH_HZ: u32 = 60;
 

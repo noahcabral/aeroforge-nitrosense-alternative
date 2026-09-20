@@ -1,4 +1,5 @@
 use super::now_unix;
+use super::DynError;
 use std::{fs, io, path::Path, ptr::null_mut};
 
 use serde_json::{Map, Value};
@@ -6,8 +7,6 @@ use windows_sys::Win32::{
     Graphics::Gdi::{GetDC, ReleaseDC},
     UI::ColorSystem::SetDeviceGammaRamp,
 };
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\QA\settings.json";
 const DEFAULT_ENABLED_GAIN_ID: u8 = 3;

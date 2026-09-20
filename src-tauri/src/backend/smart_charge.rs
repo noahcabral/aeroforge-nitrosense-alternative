@@ -1,4 +1,5 @@
 use super::now_unix;
+use super::DynError;
 use std::{fs, io, path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
@@ -12,8 +13,6 @@ use tokio_tungstenite::{
 };
 
 use super::process::hidden_command;
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const CARE_CENTER_URL: &str = "wss://127.0.0.1:4343/";
 const CARE_CENTER_AUTH_DATA: &str = "OO24T5iPpUKxfxjPZW4ddo3uGeIJXC+ZbJPzCNGMBenvnZ7J9xQjpykAdgAL1a9HocmZsOHxisitF9B0t7msCayFnVDZA79rADTRjUNWQaLEQA6wSpLrLo/Fu/gHH7BM";

@@ -16,6 +16,7 @@ use super::models::{
 use super::now_unix;
 use super::process::hidden_command;
 use super::updater::UpdaterStore;
+use super::DynError;
 
 const ANV15_51_GPU_MEMORY_OFFSETS: [(&str, i16); 3] = [
     ("PCI\\VEN_10DE&DEV_25AC&SUBSYS_171E1025", 0),
@@ -33,7 +34,7 @@ pub struct BackendState {
 }
 
 impl BackendState {
-    pub fn load(config_root: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load(config_root: PathBuf) -> Result<Self, DynError> {
         fs::create_dir_all(&config_root)?;
         let config_file = config_root.join("control-state.json");
 
@@ -97,10 +98,7 @@ impl BackendState {
         self.updater.status()
     }
 
-    pub fn save_controls(
-        &self,
-        snapshot: ControlSnapshot,
-    ) -> Result<ControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn save_controls(&self, snapshot: ControlSnapshot) -> Result<ControlSnapshot, DynError> {
         // The lock stays held across the file write so concurrent saves reach
         // disk in the same order they reached memory.
         let mut controls = self
@@ -113,10 +111,7 @@ impl BackendState {
     }
 }
 
-fn persist_controls(
-    config_file: &Path,
-    controls: &ControlSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn persist_controls(config_file: &Path, controls: &ControlSnapshot) -> Result<(), DynError> {
     write_text_atomically(config_file, &serde_json::to_string_pretty(controls)?)
 }
 
@@ -124,10 +119,7 @@ fn persist_controls(
 /// can never leave a truncated file behind (rename replaces in place on NTFS).
 /// Each call gets its own temp file so two writers of the same path never
 /// share one.
-pub(crate) fn write_text_atomically(
-    path: &Path,
-    content: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn write_text_atomically(path: &Path, content: &str) -> Result<(), DynError> {
     let parent = path.parent().ok_or("config path has no parent directory")?;
     fs::create_dir_all(parent)?;
     let file_name = path
@@ -155,7 +147,7 @@ pub(crate) fn write_text_atomically(
 fn load_controls(
     config_file: &Path,
     defaults: &ControlSnapshot,
-) -> Result<(ControlSnapshot, bool), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ControlSnapshot, bool), DynError> {
     if !config_file.exists() {
         return Ok((defaults.clone(), false));
     }

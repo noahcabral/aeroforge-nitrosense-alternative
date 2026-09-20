@@ -17,6 +17,7 @@ use super::models::{
     LiveControlSnapshot, PowerProfileId, ProcessorStateSettings, ServiceStatus,
     ServiceWorkerStatus, TelemetrySnapshot,
 };
+use super::DynError;
 use super::{
     now_unix,
     process::{combined_output_text, hidden_command},
@@ -269,14 +270,12 @@ fn supervisor_is_fresh(updated_at_unix: Option<u64>) -> bool {
         .unwrap_or(false)
 }
 
-pub fn fetch_capabilities() -> Result<CapabilitySnapshot, Box<dyn std::error::Error + Send + Sync>>
-{
+pub fn fetch_capabilities() -> Result<CapabilitySnapshot, DynError> {
     let payload = request(PipeRequest::GetCapabilities)?;
     Ok(serde_json::from_value::<CapabilitySnapshot>(payload)?)
 }
 
-pub fn fetch_cached_capabilities(
-) -> Result<CapabilitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn fetch_cached_capabilities() -> Result<CapabilitySnapshot, DynError> {
     let path = capabilities_file_path();
     let (raw, updated_at_unix) = read_fresh_cached_snapshot(&path)?;
     let mut snapshot = serde_json::from_str::<CapabilitySnapshot>(&raw)?;
@@ -284,8 +283,7 @@ pub fn fetch_cached_capabilities(
     Ok(snapshot)
 }
 
-pub fn fetch_cached_telemetry(
-) -> Result<TelemetrySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn fetch_cached_telemetry() -> Result<TelemetrySnapshot, DynError> {
     let path = telemetry_file_path();
     let (raw, updated_at_unix) = read_fresh_cached_snapshot(&path)?;
     let mut snapshot = serde_json::from_str::<TelemetrySnapshot>(&raw)?;
@@ -293,8 +291,7 @@ pub fn fetch_cached_telemetry(
     Ok(snapshot)
 }
 
-pub fn fetch_cached_live_controls(
-) -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn fetch_cached_live_controls() -> Result<LiveControlSnapshot, DynError> {
     // The control snapshot is rewritten on apply, not on a timer, so its age
     // says nothing about the service's health; the caller already gates on a
     // fresh supervisor. An age check here blanked layer statuses, fan
@@ -306,13 +303,12 @@ pub fn fetch_cached_live_controls(
     Ok(snapshot)
 }
 
-pub fn fetch_live_controls() -> Result<LiveControlSnapshot, Box<dyn std::error::Error + Send + Sync>>
-{
+pub fn fetch_live_controls() -> Result<LiveControlSnapshot, DynError> {
     let payload = request(PipeRequest::GetControlSnapshot)?;
     Ok(serde_json::from_value::<LiveControlSnapshot>(payload)?)
 }
 
-pub fn restore_startup_state() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub fn restore_startup_state() -> Result<String, DynError> {
     let payload = request(PipeRequest::RestoreStartupState {
         write_token: load_or_create_write_token()?,
     })?;
@@ -328,7 +324,7 @@ pub fn apply_power_profile(
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
     processor_state_control_enabled: bool,
-) -> Result<AppliedPowerProfilePayload, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedPowerProfilePayload, DynError> {
     let payload = request(PipeRequest::ApplyPowerProfile {
         payload: ApplyPowerProfileRequest {
             profile_id,
@@ -343,9 +339,7 @@ pub fn apply_power_profile(
     )?)
 }
 
-pub fn apply_gpu_tuning(
-    tuning: GpuTuningState,
-) -> Result<AppliedGpuTuningPayload, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_gpu_tuning(tuning: GpuTuningState) -> Result<AppliedGpuTuningPayload, DynError> {
     let payload = request(PipeRequest::ApplyGpuTuning {
         payload: ApplyGpuTuningRequest { tuning },
         write_token: load_or_create_write_token()?,
@@ -353,9 +347,7 @@ pub fn apply_gpu_tuning(
     Ok(serde_json::from_value::<AppliedGpuTuningPayload>(payload)?)
 }
 
-pub fn apply_fan_profile(
-    profile_id: FanProfileId,
-) -> Result<AppliedFanControlPayload, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_fan_profile(profile_id: FanProfileId) -> Result<AppliedFanControlPayload, DynError> {
     let payload = request(PipeRequest::ApplyFanProfile {
         payload: ApplyFanProfileRequest { profile_id },
         write_token: load_or_create_write_token()?,
@@ -363,9 +355,7 @@ pub fn apply_fan_profile(
     Ok(serde_json::from_value::<AppliedFanControlPayload>(payload)?)
 }
 
-pub fn apply_custom_fan_curves(
-    curves: FanCurveSet,
-) -> Result<AppliedFanControlPayload, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_custom_fan_curves(curves: FanCurveSet) -> Result<AppliedFanControlPayload, DynError> {
     let payload = request(PipeRequest::ApplyCustomFanCurves {
         payload: ApplyCustomFanCurvesRequest { curves },
         write_token: load_or_create_write_token()?,
@@ -373,8 +363,8 @@ pub fn apply_custom_fan_curves(
     Ok(serde_json::from_value::<AppliedFanControlPayload>(payload)?)
 }
 
-pub fn start_fan_speed_calibration(
-) -> Result<super::models::FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn start_fan_speed_calibration() -> Result<super::models::FanSpeedCalibrationSnapshot, DynError>
+{
     let payload = request(PipeRequest::StartFanSpeedCalibration {
         write_token: load_or_create_write_token()?,
     })?;
@@ -383,8 +373,8 @@ pub fn start_fan_speed_calibration(
     >(payload)?)
 }
 
-pub fn cancel_fan_speed_calibration(
-) -> Result<super::models::FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn cancel_fan_speed_calibration() -> Result<super::models::FanSpeedCalibrationSnapshot, DynError>
+{
     let payload = request(PipeRequest::CancelFanSpeedCalibration {
         write_token: load_or_create_write_token()?,
     })?;
@@ -396,7 +386,7 @@ pub fn cancel_fan_speed_calibration(
 pub fn apply_boot_logo(
     image_path: String,
     original_filename: Option<String>,
-) -> Result<AppliedBootLogoPayload, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedBootLogoPayload, DynError> {
     let payload = request(PipeRequest::ApplyBootLogo {
         payload: ApplyBootLogoRequest {
             image_path,
@@ -407,9 +397,7 @@ pub fn apply_boot_logo(
     Ok(serde_json::from_value::<AppliedBootLogoPayload>(payload)?)
 }
 
-pub fn apply_smart_charging(
-    enabled: bool,
-) -> Result<SmartChargeApplyPayload, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
     let payload = request(PipeRequest::ApplySmartCharging {
         payload: ApplySmartChargeRequest { enabled },
         write_token: load_or_create_write_token()?,
@@ -419,7 +407,7 @@ pub fn apply_smart_charging(
 
 pub fn apply_telemetry_settings(
     nvidia_telemetry_enabled: bool,
-) -> Result<AppliedTelemetrySettingsPayload, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedTelemetrySettingsPayload, DynError> {
     let payload = request(PipeRequest::ApplyTelemetrySettings {
         payload: ApplyTelemetrySettingsRequest {
             nvidia_telemetry_enabled,
@@ -436,7 +424,7 @@ pub fn apply_telemetry_settings(
 /// handler (stalled WMI/driver call) ever reaches this.
 const PIPE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+fn request(command: PipeRequest) -> Result<Value, DynError> {
     // A named pipe opened as a File has no read timeout, so run the blocking
     // exchange on its own thread and give up waiting for it. A wedged thread is
     // released when the service answers or restarts (the pipe breaks on both).
@@ -456,9 +444,7 @@ fn request(command: PipeRequest) -> Result<Value, Box<dyn std::error::Error + Se
     }
 }
 
-fn request_blocking(
-    command: PipeRequest,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+fn request_blocking(command: PipeRequest) -> Result<Value, DynError> {
     let mut pipe = open_pipe_with_retry()?;
     let serialized = serde_json::to_string(&command)?;
     pipe.write_all(serialized.as_bytes())?;
@@ -484,7 +470,7 @@ fn request_blocking(
 // by the service's first-use pin for good.
 static WRITE_TOKEN_LOCK: Mutex<()> = Mutex::new(());
 
-fn load_or_create_write_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn load_or_create_write_token() -> Result<String, DynError> {
     let _guard = WRITE_TOKEN_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -512,7 +498,7 @@ fn desktop_write_token_path() -> PathBuf {
         .join(IPC_WRITE_TOKEN_FILE)
 }
 
-fn restrict_token_file_acl(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn restrict_token_file_acl(path: &Path) -> Result<(), DynError> {
     let username = env::var("USERNAME").unwrap_or_else(|_| "Users".into());
     let grant = format!("{username}:F");
     let output = hidden_command("icacls")
@@ -540,7 +526,7 @@ fn restrict_token_file_acl(path: &Path) -> Result<(), Box<dyn std::error::Error 
     Ok(())
 }
 
-fn generate_write_token() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn generate_write_token() -> Result<String, DynError> {
     use windows_sys::Win32::Security::Cryptography::{
         BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
     };
@@ -565,7 +551,7 @@ fn is_valid_write_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn open_pipe_with_retry() -> Result<std::fs::File, Box<dyn std::error::Error + Send + Sync>> {
+fn open_pipe_with_retry() -> Result<std::fs::File, DynError> {
     let mut last_error: Option<std::io::Error> = None;
     let mut recovery_attempted = false;
 
@@ -588,9 +574,7 @@ fn open_pipe_with_retry() -> Result<std::fs::File, Box<dyn std::error::Error + S
         .into())
 }
 
-fn read_fresh_cached_snapshot(
-    path: &Path,
-) -> Result<(String, u64), Box<dyn std::error::Error + Send + Sync>> {
+fn read_fresh_cached_snapshot(path: &Path) -> Result<(String, u64), DynError> {
     let updated_at_unix = file_modified_unix(path)?;
     let age = now_unix().saturating_sub(updated_at_unix);
     if age > FRESH_CACHED_SNAPSHOT_MAX_AGE_SECONDS {
@@ -604,14 +588,14 @@ fn read_fresh_cached_snapshot(
     Ok((fs::read_to_string(path)?, updated_at_unix))
 }
 
-fn file_modified_unix(path: &Path) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+fn file_modified_unix(path: &Path) -> Result<u64, DynError> {
     Ok(fs::metadata(path)?
         .modified()?
         .duration_since(UNIX_EPOCH)?
         .as_secs())
 }
 
-pub fn ensure_service_running() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub fn ensure_service_running() -> Result<String, DynError> {
     let worker_problem = cached_supervisor_worker_problem();
     let service_state = query_service_state()?;
 
@@ -694,7 +678,7 @@ fn critical_worker_problem(workers: &[ServiceWorkerStatus]) -> Option<String> {
     None
 }
 
-fn query_service_state() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+fn query_service_state() -> Result<Option<String>, DynError> {
     let output = sc_output(["query", SERVICE_NAME])?;
     let text = combined_output_text(&output);
     if text.contains("does not exist") || text.contains("1060") {
@@ -715,7 +699,7 @@ fn query_service_state() -> Result<Option<String>, Box<dyn std::error::Error + S
     Ok(Some("UNKNOWN".into()))
 }
 
-fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn start_service() -> Result<(), DynError> {
     let output = sc_output(["start", SERVICE_NAME])?;
     if output.status.success() {
         return Ok(());
@@ -729,7 +713,7 @@ fn start_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err(format!("sc.exe start {SERVICE_NAME} failed: {}", text.trim()).into())
 }
 
-fn stop_service_best_effort() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn stop_service_best_effort() -> Result<(), DynError> {
     let output = sc_output(["stop", SERVICE_NAME])?;
     if output.status.success() {
         return Ok(());
@@ -743,10 +727,7 @@ fn stop_service_best_effort() -> Result<(), Box<dyn std::error::Error + Send + S
     Err(format!("sc.exe stop {SERVICE_NAME} failed: {}", text.trim()).into())
 }
 
-fn wait_for_service_state(
-    target: &str,
-    timeout: Duration,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn wait_for_service_state(target: &str, timeout: Duration) -> Result<(), DynError> {
     let started = std::time::Instant::now();
     while started.elapsed() <= timeout {
         if query_service_state()?.as_deref() == Some(target) {
@@ -757,9 +738,7 @@ fn wait_for_service_state(
     Err(format!("{SERVICE_NAME} did not reach {target} within {:?}", timeout).into())
 }
 
-fn sc_output<const N: usize>(
-    args: [&str; N],
-) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+fn sc_output<const N: usize>(args: [&str; N]) -> Result<std::process::Output, DynError> {
     Ok(hidden_command("sc.exe").args(args).output()?)
 }
 

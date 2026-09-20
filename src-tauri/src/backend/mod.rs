@@ -18,6 +18,9 @@ pub mod updater;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The one error type every fallible path in this crate boxes into.
+pub type DynError = Box<dyn std::error::Error + Send + Sync>;
+
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
