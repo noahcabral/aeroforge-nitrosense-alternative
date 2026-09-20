@@ -88,7 +88,7 @@ import {
   type CurveTarget,
   type FanCurveTemplate,
 } from './lib/curves'
-import { buildDiagnosticsBundle, formatDiagnosticsText } from './lib/diagnostics'
+import { formatDiagnosticsText, type DiagnosticsBundle } from './lib/diagnostics'
 import { copyTextToClipboard, downloadTextFile } from './lib/dom'
 import { describeError, withTimeout } from './lib/errors'
 import {
@@ -2818,8 +2818,8 @@ function App() {
     }, 1200)
   }
 
-  function buildCurrentDiagnosticsBundle() {
-    return buildDiagnosticsBundle({
+  function buildCurrentDiagnosticsBundle(): DiagnosticsBundle {
+    return {
       generatedAt: new Date().toISOString(),
       appVersion: backendVersion,
       shellStatus,
@@ -2842,15 +2842,9 @@ function App() {
       lastBackendPollAt,
       telemetrySourceLabel,
       recentEvents: debugEventsSnapshot(),
-      frameStats: {
-        averageMs: frameStats.averageMs,
-        maxMs: frameStats.maxMs,
-        fps: frameStats.fps,
-        longFrameCount: frameStats.longFrameCount,
-        updatedAt: frameStats.updatedAt,
-      },
+      frameStats,
       performanceLogPath: performanceLogState.path,
-    })
+    }
   }
 
   async function copyDiagnosticsToClipboard() {

@@ -5,14 +5,7 @@ import type {
   ServiceStatus,
   TelemetrySnapshot,
 } from './backend'
-
-export type DiagnosticsFrameStats = {
-  averageMs: number
-  maxMs: number
-  fps: number
-  longFrameCount: number
-  updatedAt: string
-}
+import type { FrameStats } from '../hooks/useFrameStats'
 
 export type DiagnosticsBundle = {
   generatedAt: string
@@ -37,15 +30,8 @@ export type DiagnosticsBundle = {
   lastBackendPollAt: string
   telemetrySourceLabel: string
   recentEvents: string[]
-  frameStats: DiagnosticsFrameStats
+  frameStats: FrameStats
   performanceLogPath: string | null
-}
-
-export function buildDiagnosticsBundle(input: DiagnosticsBundle): DiagnosticsBundle {
-  return {
-    ...input,
-    recentEvents: input.recentEvents.slice(-80),
-  }
 }
 
 export function formatDiagnosticsText(bundle: DiagnosticsBundle): string {
@@ -189,7 +175,7 @@ export function formatDiagnosticsText(bundle: DiagnosticsBundle): string {
 
   if (bundle.recentEvents.length > 0) {
     push('--- Recent debug events ---')
-    for (const event of bundle.recentEvents.slice(-40)) {
+    for (const event of bundle.recentEvents) {
       push(`* ${event}`)
     }
     push()
