@@ -303,6 +303,10 @@ pub struct PersonalSettings {
     pub auto_refresh_rate_on_battery_enabled: bool,
     #[serde(default)]
     pub auto_refresh_rate_restore_hz: Option<u32>,
+    /// Opt-in Automatic Performance: switches power profiles and NitroSense-matched
+    /// GPU clock offsets from AC/load/thermals. Default off for safety.
+    #[serde(default)]
+    pub auto_performance_enabled: bool,
     #[serde(default = "default_boot_art")]
     pub selected_boot_art: BootArtId,
     #[serde(default = "default_custom_boot_filename")]
