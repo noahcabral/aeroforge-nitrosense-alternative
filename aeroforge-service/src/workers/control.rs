@@ -722,7 +722,7 @@ pub fn restore_startup_state(paths: &ServicePaths) -> Result<(), DynError> {
 
     match fan_profile {
         FanProfileId::Custom => {
-            if let Some(curves) = snapshot.active_fan_curves.clone() {
+            if let Some(curves) = snapshot.active_fan_curves {
                 match apply_custom_fan_curves(
                     paths,
                     ApplyCustomFanCurvesRequest {

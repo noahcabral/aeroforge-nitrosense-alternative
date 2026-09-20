@@ -310,7 +310,7 @@ fn resolve_update_candidate(
             .name
             .clone()
             .or_else(|| Some(release.tag_name.clone()));
-        status.latest_published_at = release.published_at.clone();
+        status.latest_published_at = release.published_at;
         status.latest_commit_sha = None;
         status.latest_asset_name = latest_asset.as_ref().map(|asset| asset.name.clone());
         status.update_available =

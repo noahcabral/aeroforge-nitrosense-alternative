@@ -82,11 +82,7 @@ impl ServiceHost {
 
         drop(event_tx);
 
-        handles.push(spawn_supervisor(
-            self.paths.clone(),
-            self.stop_flag.clone(),
-            event_rx,
-        )?);
+        handles.push(spawn_supervisor(self.paths, self.stop_flag, event_rx)?);
 
         Ok(handles)
     }

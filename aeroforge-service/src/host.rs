@@ -124,7 +124,7 @@ fn run_service() -> Result<(), DynError> {
         process_id: None,
     })?;
 
-    let host = workers::ServiceHost::new(paths.clone(), stop_flag.clone());
+    let host = workers::ServiceHost::new(paths.clone(), stop_flag);
     let result = host.start().and_then(|join_handles| {
         let _ = shutdown_rx.recv();
 

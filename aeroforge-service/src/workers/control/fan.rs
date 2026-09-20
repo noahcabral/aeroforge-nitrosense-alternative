@@ -102,7 +102,7 @@ fn apply_curve_backed_fan_control(
     curves: FanCurveSet,
     quiet_success_log: bool,
 ) -> Result<AppliedFanControlSnapshot, DynError> {
-    let targets = resolve_curve_backed_targets(paths, profile_id.clone(), curves);
+    let targets = resolve_curve_backed_targets(paths, profile_id, curves);
     apply_curve_backed_targets(paths, targets, quiet_success_log)
 }
 
@@ -335,7 +335,7 @@ pub fn apply_quiet_auto_fan_policy(
                 "tempC": temp_c,
             })),
             "calibration": calibration.clone(),
-            "thermalWarning": warning.clone(),
+            "thermalWarning": warning,
         },
         "behavior": behavior_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
@@ -778,8 +778,8 @@ fn apply_firmware_wmi_fan_control(
         }).collect::<Vec<_>>(),
         "verification": verification,
         "nvidiaPower": {
-            "before": power_before.clone(),
-            "after": power_after.clone(),
+            "before": power_before,
+            "after": power_after,
         },
     }));
 
