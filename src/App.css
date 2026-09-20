@@ -63,8 +63,7 @@
   letter-spacing: -0.03em;
 }
 
-.brand-subtitle,
-.topbar__status span {
+.brand-subtitle {
   color: var(--text-dim);
   font-size: 0.82rem;
 }
@@ -111,14 +110,6 @@
 .topbar__nav button.is-active:hover,
 .topbar__nav button.is-active:focus-visible {
   border-bottom-color: rgba(255, 174, 110, 0.95);
-}
-
-.topbar__status {
-  justify-self: end;
-  padding: 0.4rem 0.72rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .hardware-banner {
@@ -2194,57 +2185,8 @@
   line-height: 1.5;
 }
 
-.settings-channel-block {
-  display: grid;
-  gap: 0.8rem;
-  padding-top: 1.2rem;
-  border-top: 1px solid rgba(236, 120, 46, 0.14);
-}
-
-.settings-channel-block--token {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 480px);
-  align-items: start;
-}
-
-.settings-channel-block strong {
-  display: block;
-  font-size: 1.35rem;
-  margin-bottom: 0.35rem;
-}
-
-.settings-channel-block p,
 .settings-note p {
   margin: 0;
-}
-
-.settings-segmented {
-  width: max-content;
-  max-width: 100%;
-}
-
-.settings-token-row {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.settings-token-input {
-  width: 100%;
-  min-height: 46px;
-  padding: 0.85rem 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
-  font: inherit;
-}
-
-.settings-token-input::placeholder {
-  color: var(--text-soft);
-}
-
-.settings-token-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
 }
 
 .settings-note {
@@ -2268,14 +2210,6 @@
   display: block;
   color: var(--text-bright);
   font-weight: 700;
-}
-
-.settings-note__meta {
-  display: grid;
-  align-content: start;
-  gap: 0.35rem;
-  padding-left: 1rem;
-  border-left: 1px solid rgba(236, 120, 46, 0.14);
 }
 
 .settings-action-row {
@@ -2535,16 +2469,8 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-.status-bar,
 .panel {
   border-radius: 24px;
-}
-
-.hero__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
 }
 
 .debug-panel {
@@ -2650,11 +2576,6 @@
   font-size: 0.88rem;
 }
 
-.chip--accent {
-  color: var(--text-bright);
-  background: linear-gradient(135deg, rgba(235, 140, 90, 0.22), rgba(235, 140, 90, 0.05));
-}
-
 .metric-card {
   padding: 0.58rem 0.72rem;
   border-radius: 18px;
@@ -2667,9 +2588,6 @@
 
 .metric-card span,
 .metric-card small,
-.profile-card__strap,
-.charging-card__label,
-.curve-frame__legend span,
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.15em;
@@ -2686,8 +2604,7 @@
   color: var(--text-soft);
 }
 
-.panel,
-.status-bar {
+.panel {
   padding: 1.15rem;
 }
 
@@ -2709,20 +2626,10 @@
   letter-spacing: -0.04em;
 }
 
-.segmented {
-  display: inline-flex;
-  padding: 0.3rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.segmented button,
 .topbar__nav button,
 .power-mode__tabs button,
 .fan-mode__tabs button,
 .button,
-.profile-card,
 .art-tile,
 .toggle,
 .toggle span,
@@ -2744,12 +2651,10 @@
     opacity 180ms ease;
 }
 
-.segmented button:focus-visible,
 .topbar__nav button:focus-visible,
 .power-mode__tabs button:focus-visible,
 .fan-mode__tabs button:focus-visible,
 .button:focus-visible,
-.profile-card:focus-visible,
 .art-tile:focus-visible,
 .toggle:focus-visible,
 .power-tile:focus-visible,
@@ -2759,34 +2664,6 @@
 .power-oc-slot:focus-visible {
   outline: 1px solid rgba(235, 140, 90, 0.62);
   outline-offset: 3px;
-}
-
-.segmented button {
-  border: 0;
-  background: transparent;
-  color: var(--text-soft);
-  border-radius: 999px;
-  padding: 0.65rem 1rem;
-  cursor: pointer;
-  font: inherit;
-}
-
-.segmented button.is-active {
-  background: linear-gradient(135deg, rgba(235, 140, 90, 0.9), rgba(180, 87, 47, 0.85));
-  color: #f7f1eb;
-}
-
-.curve-layout {
-  display: grid;
-  grid-template-columns: 1.35fr 0.7fr;
-  gap: 1rem;
-}
-
-.curve-frame {
-  border-radius: 24px;
-  padding: 1rem;
-  background: linear-gradient(180deg, rgba(14, 19, 27, 0.94), rgba(8, 11, 17, 0.92));
-  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .curve-chart {
@@ -2811,12 +2688,6 @@
 
 .curve-chart__grid--vertical {
   stroke-dasharray: 4 8;
-}
-
-.curve-chart__axis {
-  fill: rgba(228, 233, 238, 0.46);
-  font-size: 11px;
-  letter-spacing: 0.1em;
 }
 
 .curve-chart__glow {
@@ -2851,45 +2722,6 @@
   cursor: grabbing;
 }
 
-.curve-frame__legend {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: baseline;
-  margin-top: 0.8rem;
-}
-
-.curve-frame__legend strong {
-  color: var(--text-bright);
-}
-
-.curve-points {
-  display: grid;
-  grid-template-rows: repeat(5, minmax(0, 1fr)) auto;
-  gap: 0.7rem;
-}
-
-.curve-point-row {
-  display: grid;
-  grid-template-columns: 0.8fr 1fr 1fr;
-  align-items: center;
-  padding: 0.95rem 1rem;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-}
-
-.curve-point-row span {
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-  font-size: 0.72rem;
-}
-
-.curve-point-row strong {
-  font-size: 1.05rem;
-}
-
 .curve-actions {
   display: grid;
   gap: 0.7rem;
@@ -2915,14 +2747,10 @@
 
 .button:hover:not(:disabled),
 .button:focus-visible:not(:disabled),
-.profile-card:hover,
-.profile-card:focus-visible,
 .art-tile:hover:not(:disabled),
 .art-tile:focus-visible:not(:disabled),
 .toggle:hover:not(:disabled),
-.toggle:focus-visible:not(:disabled),
-.segmented button:hover,
-.segmented button:focus-visible {
+.toggle:focus-visible:not(:disabled) {
   transform: translateY(-1px);
 }
 
@@ -3002,47 +2830,8 @@
   background: rgba(235, 140, 90, 0.1);
 }
 
-.profile-list {
-  display: grid;
-  gap: 0.85rem;
-}
-
-.profile-card {
-  text-align: left;
-  width: 100%;
-  padding: 1rem 1.05rem;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(180deg, rgba(16, 21, 30, 0.95), rgba(12, 17, 24, 0.82));
-  color: inherit;
-  cursor: pointer;
-}
-
-.profile-card strong {
-  display: block;
-  margin: 0.3rem 0 0.45rem;
-  font-size: 1.15rem;
-}
-
-.profile-card p {
-  margin: 0;
-  color: var(--text-soft);
-  line-height: 1.45;
-}
-
-.profile-card__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem;
-  margin-top: 0.85rem;
-  color: var(--text-dim);
-  font-size: 0.85rem;
-}
-
-.profile-card.is-selected,
 .art-tile.is-selected,
 .upload-card.is-pulsing,
-.profile-card.is-pulsing,
 .button.is-pulsing,
 .power-oc-slot.is-pulsing {
   border-color: rgba(235, 140, 90, 0.62);
@@ -3050,29 +2839,6 @@
     0 0 0 1px rgba(235, 140, 90, 0.24),
     0 14px 34px rgba(160, 87, 42, 0.24);
   background: linear-gradient(180deg, rgba(29, 23, 19, 0.96), rgba(15, 16, 22, 0.88));
-}
-
-.charging-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1rem 1.05rem;
-  border-radius: 22px;
-  background: linear-gradient(180deg, rgba(15, 21, 31, 0.92), rgba(10, 13, 19, 0.92));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.charging-card strong {
-  display: block;
-  font-size: 1.4rem;
-  margin: 0.25rem 0 0.4rem;
-}
-
-.charging-card p {
-  margin: 0;
-  color: var(--text-soft);
-  line-height: 1.45;
 }
 
 .toggle {
@@ -3146,12 +2912,6 @@
   display: flex;
   justify-content: space-between;
   color: var(--text-soft);
-}
-
-.branding-layout {
-  display: grid;
-  grid-template-columns: 0.9fr 1.1fr;
-  gap: 1rem;
 }
 
 .branding-preview {
@@ -3289,20 +3049,6 @@
   display: block;
 }
 
-.branding-preview__caption {
-  display: grid;
-  gap: 0.3rem;
-  margin-top: 0.8rem;
-}
-
-.branding-preview__caption strong {
-  font-size: 1.15rem;
-}
-
-.branding-preview__caption span {
-  color: var(--text-soft);
-}
-
 .branding-controls {
   display: grid;
   gap: 1rem;
@@ -3401,19 +3147,6 @@
     linear-gradient(135deg, #181b21, #455061 58%, #768090);
 }
 
-.status-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-top: 1.25rem;
-}
-
-.status-bar strong {
-  flex: 1;
-  font-size: 1rem;
-}
-
 @keyframes rise-in {
   from {
     opacity: 0;
@@ -3427,24 +3160,22 @@
 
 @media (max-width: 1100px) {
   .home-stage,
-  .dashboard__grid,
-  .branding-layout,
-  .fan-custom-grid,
-  .fan-preset-dashboard,
-  .preset-grid,
-  .personal-mode__layout,
-  .power-custom-grid,
-  .power-oc-grid,
-  .debug-grid,
-  .debug-status-grid {
+.dashboard__grid,
+.fan-custom-grid,
+.fan-preset-dashboard,
+.preset-grid,
+.personal-mode__layout,
+.power-custom-grid,
+.power-oc-grid,
+.debug-grid,
+.debug-status-grid {
     grid-template-columns: 1fr;
   }
 
   .power-oc-topline,
-  .hardware-banner,
-  .settings-summary-grid,
-  .settings-note,
-  .settings-channel-block--token {
+.hardware-banner,
+.settings-summary-grid,
+.settings-note {
     grid-template-columns: 1fr;
   }
 
@@ -3475,11 +3206,6 @@
     grid-template-columns: 1fr;
   }
 
-  .status-bar {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .preset-panel__header {
     align-items: flex-start;
     flex-direction: column;
@@ -3497,8 +3223,7 @@
   }
 
   .topbar__brand,
-  .topbar__nav,
-  .topbar__status {
+.topbar__nav {
     justify-self: stretch;
   }
 
@@ -3511,8 +3236,7 @@
     padding: 0.75rem 0 1.5rem;
   }
 
-  .panel,
-  .status-bar {
+  .panel {
     border-radius: 22px;
     padding: 1rem;
   }
@@ -3526,33 +3250,25 @@
     grid-template-columns: 1fr;
   }
 
-  .curve-frame__legend,
   .battery-meter__labels,
-  .charging-card,
-  .fan-custom-footer,
-  .personal-setting-block,
-  .settings-action-row,
-  .boot-preview-panel__footer,
-  .debug-panel__header,
-  .debug-log__header {
+.fan-custom-footer,
+.personal-setting-block,
+.settings-action-row,
+.boot-preview-panel__footer,
+.debug-panel__header,
+.debug-log__header {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .curve-point-row {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .fan-mode__profiles,
-  .fan-curve-card__points,
-  .fan-curve-actions,
-  .power-mode__profiles,
-  .settings-segmented,
-  .settings-token-actions,
-  .power-oc-slots,
-  .preset-list__header,
-  .preset-item,
-  .power-oc-state-grid {
+.fan-curve-card__points,
+.fan-curve-actions,
+.power-mode__profiles,
+.power-oc-slots,
+.preset-list__header,
+.preset-item,
+.power-oc-state-grid {
     grid-template-columns: 1fr;
     width: 100%;
   }
