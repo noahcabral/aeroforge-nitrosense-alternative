@@ -1,7 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
-    path::PathBuf,
+    io::Write,
     time::Instant,
 };
 
@@ -155,26 +154,27 @@ pub async fn append_performance_log(
     events: Vec<PerformanceLogEvent>,
     state: State<'_, BackendState>,
 ) -> Result<String, String> {
-    let path = performance_log_path(&state).map_err(|error| error.to_string())?;
+    let log_dir = state.config_root().join("logs");
+    off_main_fallible("Performance log append", move || {
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join("performance.jsonl");
 
-    if events.is_empty() {
-        return Ok(path.display().to_string());
-    }
+        if events.is_empty() {
+            return Ok(path.display().to_string());
+        }
 
-    super::log_file::rotate_if_needed(&path).map_err(|error| error.to_string())?;
+        super::log_file::rotate_if_needed(&path)?;
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
-    for event in events.into_iter().take(128) {
-        serde_json::to_writer(&mut file, &event).map_err(|error| error.to_string())?;
-        writeln!(file).map_err(|error| error.to_string())?;
-    }
+        for event in events.into_iter().take(128) {
+            serde_json::to_writer(&mut file, &event)?;
+            writeln!(file)?;
+        }
 
-    Ok(path.display().to_string())
+        Ok(path.display().to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -645,10 +645,4 @@ fn parse_boot_art_id(value: &str) -> super::models::BootArtId {
         "slate" => super::models::BootArtId::Slate,
         _ => super::models::BootArtId::Custom,
     }
-}
-
-fn performance_log_path(state: &BackendState) -> io::Result<PathBuf> {
-    let log_dir = state.config_root().join("logs");
-    fs::create_dir_all(&log_dir)?;
-    Ok(log_dir.join("performance.jsonl"))
 }
