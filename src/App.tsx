@@ -3230,9 +3230,7 @@ function App() {
         totalMs: performance.now() - applyStartedMs,
         error: describeError(error),
       })
-      setStatusMessage(
-        `Power profile apply failed: ${error instanceof Error ? error.message : String(error)}`,
-      )
+      setStatusMessage(`Power profile apply failed: ${describeError(error)}`)
       updateToast(toastId, 'error', 'Power failed', describeError(error))
     } finally {
       powerProfileApplyInFlightRef.current = false
