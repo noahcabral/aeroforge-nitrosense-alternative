@@ -121,14 +121,12 @@ pub fn stage_latest_update(
     fs::create_dir_all(&stage_root)?;
     let staged_file = stage_root.join(&candidate.name);
 
-    let mut response = github_client()?
+    let staged_bytes = github_client()?
         .get(&candidate.browser_download_url)
         .send()?
-        .error_for_status()?;
-    let mut file = fs::File::create(&staged_file)?;
-    io::copy(&mut response, &mut file)?;
-
-    let staged_bytes = fs::read(&staged_file)?;
+        .error_for_status()?
+        .bytes()?;
+    fs::write(&staged_file, &staged_bytes)?;
     let staged_sha256 = format!("{:x}", Sha256::digest(&staged_bytes));
     let verified_sha256 = if let Some(checksum_asset) = checksum_asset {
         let checksum_text = download_text_asset(&checksum_asset)?;
