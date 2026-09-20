@@ -1791,6 +1791,58 @@
   box-shadow: 0 18px 34px rgba(133, 50, 19, 0.32);
 }
 
+.power-oc-auto {
+  display: grid;
+  gap: 0.85rem;
+  margin: 0 0 1.1rem;
+  padding: 1rem;
+  border: 1px solid rgba(236, 120, 46, 0.22);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(42, 18, 8, 0.72), rgba(16, 10, 8, 0.9));
+}
+
+.power-oc-auto__copy .eyebrow {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.power-oc-auto__copy strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--text-bright);
+}
+
+.power-oc-auto__copy p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.power-oc-auto__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+
+.power-oc-auto__instructions {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.power-oc-auto__instructions li + li {
+  margin-top: 0.35rem;
+}
+
+.power-oc-auto__blocked {
+  margin: 0;
+  color: #ffb088;
+  font-size: 0.9rem;
+}
+
 .power-oc-actions {
   display: flex;
   flex-wrap: wrap;
