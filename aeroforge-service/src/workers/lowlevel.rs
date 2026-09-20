@@ -14,6 +14,7 @@ use std::{
 use models::LowLevelSnapshot;
 use winring::{PackagePowerLimitApplyResult, PackagePowerLimitWrite, RaplReadback};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{
@@ -35,7 +36,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let mut sampler = LowLevelSampler::new();
 
     while !stop_flag.load(Ordering::SeqCst) {
@@ -95,17 +96,14 @@ impl MsrProvider {
         }
     }
 
-    fn read_tj_max(&self) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_tj_max(&self) -> Result<Option<u8>, DynError> {
         match self {
             Self::PawnIo(_) => Ok(None),
             Self::WinRing(context) => context.read_tj_max(),
         }
     }
 
-    fn read_package_temp(
-        &self,
-        tj_max_c: Option<u8>,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_package_temp(&self, tj_max_c: Option<u8>) -> Result<Option<u8>, DynError> {
         match self {
             Self::PawnIo(_) => Ok(None),
             Self::WinRing(context) => context.read_package_temp(tj_max_c),
@@ -116,16 +114,14 @@ impl MsrProvider {
         &self,
         affinity_mask: usize,
         tj_max_c: Option<u8>,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<u8>, DynError> {
         match self {
             Self::PawnIo(_) => Ok(None),
             Self::WinRing(context) => context.read_core_temp(affinity_mask, tj_max_c),
         }
     }
 
-    pub(crate) fn read_rapl_readback(
-        &self,
-    ) -> Result<Option<RaplReadback>, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn read_rapl_readback(&self) -> Result<Option<RaplReadback>, DynError> {
         match self {
             Self::PawnIo(context) => context.read_rapl_readback(),
             Self::WinRing(context) => context.read_rapl_readback(),
@@ -135,8 +131,7 @@ impl MsrProvider {
     pub(crate) fn apply_package_power_limit(
         &self,
         write: PackagePowerLimitWrite,
-    ) -> Result<Option<PackagePowerLimitApplyResult>, Box<dyn std::error::Error + Send + Sync>>
-    {
+    ) -> Result<Option<PackagePowerLimitApplyResult>, DynError> {
         match self {
             Self::PawnIo(context) => context.apply_package_power_limit(write),
             Self::WinRing(context) => context.apply_package_power_limit(write),
@@ -144,9 +139,7 @@ impl MsrProvider {
     }
 }
 
-pub(crate) fn load_msr_provider(
-    paths: &ServicePaths,
-) -> Result<MsrProvider, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn load_msr_provider(paths: &ServicePaths) -> Result<MsrProvider, DynError> {
     match pawnio::PawnIoContext::load(paths) {
         Ok(context) => Ok(MsrProvider::PawnIo(context)),
         Err(pawnio_error) => match winring::WinRingContext::load(paths) {
@@ -176,10 +169,7 @@ impl LowLevelSampler {
         }
     }
 
-    fn sample(
-        &mut self,
-        paths: &ServicePaths,
-    ) -> Result<LowLevelSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    fn sample(&mut self, paths: &ServicePaths) -> Result<LowLevelSnapshot, DynError> {
         self.try_load_context(paths);
 
         let (core_affinity_masks, logical_processor_count) = topology::discover_cpu_topology(paths);

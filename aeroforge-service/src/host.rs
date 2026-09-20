@@ -18,6 +18,7 @@ use windows_service::{
     service_dispatcher,
 };
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers,
@@ -27,7 +28,7 @@ define_windows_service!(ffi_service_main, service_main);
 
 const SERVICE_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn run_console_host() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_console_host() -> Result<(), DynError> {
     let paths = ServicePaths::discover_console()?;
     let shutdown_log = paths.clone();
     write_log_line(
@@ -68,9 +69,7 @@ pub fn run_console_host() -> Result<(), Box<dyn std::error::Error + Send + Sync>
     Ok(())
 }
 
-pub fn run_windows_service_host(
-    service_name: &'static str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_windows_service_host(service_name: &'static str) -> Result<(), DynError> {
     service_dispatcher::start(service_name, ffi_service_main)?;
     Ok(())
 }
@@ -80,7 +79,7 @@ fn service_main(_arguments: Vec<OsString>) {
     let _ = run_service();
 }
 
-fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_service() -> Result<(), DynError> {
     let paths = ServicePaths::discover()?;
     // Log writes are best effort here: a full or locked log must not keep the
     // service (and with it fan/power control) from starting or stopping.

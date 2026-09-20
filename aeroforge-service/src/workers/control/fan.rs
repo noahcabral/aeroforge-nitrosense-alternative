@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::{env, io, thread, time::Duration};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::unix_timestamp,
@@ -45,7 +46,7 @@ const FAN_SPEED_CALIBRATION_THERMAL_POLL_MS: u64 = 2000;
 pub fn apply_fan_profile(
     paths: &ServicePaths,
     request: ApplyFanProfileRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     match request.profile_id {
         FanProfileId::Auto => apply_firmware_wmi_fan_control(
             paths,
@@ -74,7 +75,7 @@ pub fn apply_fan_profile(
 pub fn apply_cool_fan_profile(
     paths: &ServicePaths,
     quiet_success_log: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     apply_curve_backed_fan_control(
         paths,
         FanProfileId::Cool,
@@ -86,7 +87,7 @@ pub fn apply_cool_fan_profile(
 pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     apply_curve_backed_fan_control(
         paths,
         FanProfileId::Custom,
@@ -100,7 +101,7 @@ fn apply_curve_backed_fan_control(
     profile_id: FanProfileId,
     curves: FanCurveSet,
     quiet_success_log: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     let targets = resolve_curve_backed_targets(paths, profile_id.clone(), curves);
     apply_curve_backed_targets(paths, targets, quiet_success_log)
 }
@@ -109,7 +110,7 @@ pub(crate) fn apply_curve_backed_targets(
     paths: &ServicePaths,
     targets: CurveBackedFanTargets,
     quiet_success_log: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     let profile_label = curve_backed_profile_label(&targets.profile_id);
     let context = format!(
         "{profile_label} compressed to current-temperature targets: CPU {}C -> requested {}% / applied {}%, GPU {}C -> requested {}% / applied {}%. Zero-percent targets are allowed only at 50C or below; above that AeroForge keeps the {MIN_MANUAL_FAN_PERCENT}% firmware safety floor. AcerGamingFunction accepts direct per-fan target speeds, not a full curve table.",
@@ -212,7 +213,7 @@ pub fn apply_quiet_auto_fan_policy(
     paths: &ServicePaths,
     previous: &ControlSnapshot,
     log_success: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     let now = unix_timestamp();
     let verification_before = build_fan_verification();
     let temperatures = read_current_temperatures(paths);
@@ -378,7 +379,7 @@ pub fn apply_quiet_auto_fan_policy(
 pub fn run_fan_speed_calibration(
     paths: &ServicePaths,
     cancel_requested: &dyn Fn() -> bool,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     let initial_snapshot = state::load_snapshot(paths)?;
     let started_at = unix_timestamp();
     let mut calibration = FanSpeedCalibrationSnapshot {
@@ -442,7 +443,7 @@ fn run_fan_speed_calibration_steps(
     strategy: &CustomFanStrategy,
     calibration: &mut FanSpeedCalibrationSnapshot,
     cancel_requested: &dyn Fn() -> bool,
-) -> Result<CalibrationStop, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<CalibrationStop, DynError> {
     if cancel_requested() {
         return Ok(CalibrationStop::Canceled(None));
     }
@@ -486,7 +487,7 @@ fn apply_calibration_speed_target(
     paths: &ServicePaths,
     strategy: &CustomFanStrategy,
     percent: u8,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     write_log_line(
         &paths.component_log("control-fan"),
         "INFO",
@@ -560,7 +561,7 @@ fn reject_failed_calibration_speed_results(
     percent: u8,
     phase: &str,
     speed_results: &[super::acer_wmi::AcerWmiMethodResult],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     if let Some(rejected) = speed_results
         .iter()
         .find(|result| !wmi_output_accepted(result))
@@ -580,7 +581,7 @@ fn settle_fan_speed_calibration(
     paths: &ServicePaths,
     percent: u8,
     cancel_requested: &dyn Fn() -> bool,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, DynError> {
     let total_ms = FAN_SPEED_CALIBRATION_SETTLE_SECS.saturating_mul(1000);
     let mut waited_ms = 0;
     while waited_ms < total_ms {
@@ -628,7 +629,7 @@ fn finish_canceled_calibration(
     initial_snapshot: &ControlSnapshot,
     mut calibration: FanSpeedCalibrationSnapshot,
     percent: Option<u8>,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     let restore_detail = restore_fan_profile_after_calibration(paths, initial_snapshot)?;
     let completed_at = unix_timestamp();
     calibration.running = false;
@@ -652,7 +653,7 @@ fn finish_canceled_calibration(
 fn restore_fan_profile_after_calibration(
     paths: &ServicePaths,
     previous: &ControlSnapshot,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String, DynError> {
     match previous
         .active_fan_profile
         .clone()
@@ -730,7 +731,7 @@ fn apply_firmware_wmi_fan_control(
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     context: &str,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     write_log_line(
         &paths.component_log("control-fan"),
         "INFO",
@@ -824,7 +825,7 @@ fn apply_custom_wmi_fan_control(
     gpu_speed_percent: Option<u8>,
     context: &str,
     log_success: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     if log_success {
         write_log_line(
             &paths.component_log("control-fan"),
@@ -947,7 +948,7 @@ fn apply_custom_behavior_latch(
     strategy: &CustomFanStrategy,
     behavior_input: u64,
     phase: &str,
-) -> Result<super::acer_wmi::AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<super::acer_wmi::AcerWmiMethodResult, DynError> {
     let result = apply_fan_behavior(behavior_input)?;
     if !wmi_output_accepted(&result) {
         write_log_line(
@@ -965,7 +966,7 @@ fn apply_custom_behavior_latch(
 fn apply_direct_speed_targets(
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
-) -> Result<Vec<super::acer_wmi::AcerWmiMethodResult>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<super::acer_wmi::AcerWmiMethodResult>, DynError> {
     let mut speed_results = Vec::new();
     if let Some(cpu_speed) = cpu_speed_percent {
         speed_results.push(apply_fan_speed(FAN_SELECTOR_CPU, cpu_speed)?);

@@ -1,5 +1,6 @@
-use std::io;
 use crate::paths::{command_failure_detail, powershell_command};
+use crate::DynError;
+use std::io;
 
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -34,7 +35,7 @@ struct BatteryControlApplyOutput {
 pub fn apply_smart_charging(
     paths: &ServicePaths,
     request: ApplySmartChargeRequest,
-) -> Result<AppliedSmartChargeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedSmartChargeSnapshot, DynError> {
     let requested_health_status = if request.enabled { 1u8 } else { 0u8 };
     log_battery_control_snapshot(paths, "before-apply", requested_health_status);
     let output = match apply_battery_control_health_status(requested_health_status) {
@@ -115,9 +116,7 @@ fn log_battery_control_snapshot(paths: &ServicePaths, phase: &str, requested_hea
     }
 }
 
-fn read_battery_control_snapshot(
-    requested_health_status: u8,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn read_battery_control_snapshot(requested_health_status: u8) -> Result<String, DynError> {
     // `-Command` appends extra arguments to the script text instead of binding
     // them to $args, so the requested status is spliced in as the first line.
     let script = format!(
@@ -247,7 +246,7 @@ $result | ConvertTo-Json -Depth 8 -Compress
 // made by faxcon
 fn apply_battery_control_health_status(
     requested_health_status: u8,
-) -> Result<BatteryControlApplyOutput, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BatteryControlApplyOutput, DynError> {
     // Same splice as the snapshot read: `-Command` gets the status as the
     // first line, so no script file has to be dropped in SYSTEM's temp dir.
     let script = format!(
@@ -531,9 +530,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     Ok(parsed)
 }
 
-fn parse_battery_control_result<T: DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_battery_control_result<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DynError> {
     let text = String::from_utf8_lossy(bytes);
     let payload = text
         .lines()

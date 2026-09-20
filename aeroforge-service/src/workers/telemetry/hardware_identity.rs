@@ -8,6 +8,7 @@ use super::{
     models::HardwareIdentitySnapshot,
 };
 use crate::paths::ServicePaths;
+use crate::DynError;
 
 static HARDWARE_IDENTITY_CACHE: OnceLock<Arc<Mutex<HardwareIdentityCache>>> = OnceLock::new();
 
@@ -72,8 +73,7 @@ pub fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentitySnapshot 
     )
 }
 
-fn query_hardware_identity_snapshot(
-) -> Result<HardwareIdentitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_hardware_identity_snapshot() -> Result<HardwareIdentitySnapshot, DynError> {
     let script = r#"
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, Manufacturer
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.PNPDeviceID -notmatch '^ROOT\\' }
@@ -128,8 +128,7 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
     })
 }
 
-fn query_registry_hardware_identity_snapshot(
-) -> Result<HardwareIdentitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_registry_hardware_identity_snapshot() -> Result<HardwareIdentitySnapshot, DynError> {
     let output = crate::paths::system32_command("reg")
         .args(["query", r"HKLM\HARDWARE\DESCRIPTION\System\BIOS"])
         .output()?;

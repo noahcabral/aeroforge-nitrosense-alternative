@@ -1,6 +1,8 @@
 use libloading::Library;
 use std::ffi::c_void;
 
+use crate::DynError;
+
 const NVAPI_OK: i32 = 0;
 const NVAPI_INIT_CANDIDATE_ID: u32 = 0x0150_E828;
 const NVAPI_WHISPER_SETTER_ID: u32 = 0xD256_1B69;
@@ -19,9 +21,7 @@ pub struct NvApiWhisperResult {
     pub status: i32,
 }
 
-pub fn set_whisper_mode(
-    enable: bool,
-) -> Result<NvApiWhisperResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn set_whisper_mode(enable: bool) -> Result<NvApiWhisperResult, DynError> {
     let library = unsafe { Library::new(crate::paths::system32_path("nvapi64.dll")) }?;
     let query = unsafe {
         *library

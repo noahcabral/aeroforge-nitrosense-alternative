@@ -6,6 +6,7 @@ use std::{
 
 use serde_json::json;
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::unix_timestamp,
@@ -19,7 +20,7 @@ const MIN_ESP_FREE_AFTER_WRITE_BYTES: u64 = 16 * 1024 * 1024;
 pub fn apply_boot_logo(
     paths: &ServicePaths,
     request: ApplyBootLogoRequest,
-) -> Result<AppliedBootLogoSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedBootLogoSnapshot, DynError> {
     let staged = validate_boot_logo_file(&request.image_path)?;
     let esp = platform::locate_efi_system_partition()?;
 
@@ -78,9 +79,7 @@ pub fn apply_boot_logo(
     })
 }
 
-fn validate_boot_logo_file(
-    path: &str,
-) -> Result<ValidatedBootLogo, Box<dyn std::error::Error + Send + Sync>> {
+fn validate_boot_logo_file(path: &str) -> Result<ValidatedBootLogo, DynError> {
     let path_ref = Path::new(path);
     if !path_ref.exists() {
         return Err(format!("Boot-logo image does not exist: {path}").into());
@@ -112,7 +111,11 @@ fn validate_boot_logo_file(
         .take(MAX_BOOT_LOGO_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_BOOT_LOGO_BYTES {
-        return Err(format!("Boot-logo image changed size while being read: {} bytes.", bytes.len()).into());
+        return Err(format!(
+            "Boot-logo image changed size while being read: {} bytes.",
+            bytes.len()
+        )
+        .into());
     }
     let header_len = bytes.len().min(12);
     let format = BootLogoFormat::from_extension_and_header(&extension, &bytes[..header_len])?;
@@ -128,7 +131,7 @@ fn write_logo_to_esp(
     paths: &ServicePaths,
     staged: &ValidatedBootLogo,
     esp: &platform::EspVolume,
-) -> Result<BootLogoWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BootLogoWriteResult, DynError> {
     let acer_programdata_dir = PathBuf::from(r"C:\ProgramData\oem\AcerAgentService\BIOSLogo");
     let acer_recovery_dir = PathBuf::from(r"C:\Recovery\OEM\BiosAnimation");
     let acer_programdata_stage =
@@ -259,10 +262,7 @@ fn file_exists(path: &Path) -> Result<bool, io::Error> {
     }
 }
 
-fn ensure_path_stays_under(
-    path: &Path,
-    root: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn ensure_path_stays_under(path: &Path, root: &Path) -> Result<(), DynError> {
     if path.starts_with(root) {
         Ok(())
     } else {
@@ -282,10 +282,7 @@ enum BootLogoFormat {
 }
 
 impl BootLogoFormat {
-    fn from_extension_and_header(
-        extension: &str,
-        header: &[u8],
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn from_extension_and_header(extension: &str, header: &[u8]) -> Result<Self, DynError> {
         match extension {
             "gif" if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") => {
                 Ok(Self::Gif)
@@ -339,7 +336,7 @@ fn stage_logo_pair(
     staged: &ValidatedBootLogo,
     target_dir: &Path,
     stage_name: &str,
-) -> Result<StageWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<StageWriteResult, DynError> {
     if !target_dir.is_dir() {
         write_log_line(
             &paths.component_log("control-boot-logo"),
@@ -394,7 +391,7 @@ fn stage_logo_pair(
 /// Every component of `dir` must be a real directory. A junction or symlink
 /// planted by a local user would otherwise redirect SYSTEM's reads, deletes
 /// and writes somewhere else.
-fn ensure_no_reparse_points(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn ensure_no_reparse_points(dir: &Path) -> Result<(), DynError> {
     for ancestor in dir.ancestors() {
         if ancestor.parent().is_none() {
             break;
@@ -414,7 +411,7 @@ fn backup_existing_logo_pair(
     paths: &ServicePaths,
     target_dir: &Path,
     stage_name: &str,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<PathBuf>, DynError> {
     let existing = ["AcerLogo.jpg", "AcerLogo.gif"]
         .into_iter()
         .map(|name| target_dir.join(name))
@@ -457,6 +454,7 @@ struct StageWriteResult {
 
 #[cfg(windows)]
 mod platform {
+    use crate::DynError;
     use std::{
         io,
         path::{Path, PathBuf},
@@ -483,8 +481,7 @@ mod platform {
         pub marker_path: PathBuf,
     }
 
-    pub fn locate_efi_system_partition(
-    ) -> Result<EspVolume, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn locate_efi_system_partition() -> Result<EspVolume, DynError> {
         let mut volume_names = Vec::new();
         let mut buffer = vec![0u16; 512];
 
@@ -537,9 +534,7 @@ mod platform {
         }
     }
 
-    fn inspect_volume(
-        volume_name: &str,
-    ) -> Result<Option<EspVolume>, Box<dyn std::error::Error + Send + Sync>> {
+    fn inspect_volume(volume_name: &str) -> Result<Option<EspVolume>, DynError> {
         let (label, file_system) = get_volume_information(volume_name)?;
         if !file_system.eq_ignore_ascii_case("FAT32") {
             return Ok(None);
@@ -639,6 +634,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
+    use crate::DynError;
     use std::path::PathBuf;
 
     pub struct EspVolume {
@@ -651,8 +647,7 @@ mod platform {
         pub marker_path: PathBuf,
     }
 
-    pub fn locate_efi_system_partition(
-    ) -> Result<EspVolume, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn locate_efi_system_partition() -> Result<EspVolume, DynError> {
         Err("Direct boot-logo EFI apply is only supported on Windows.".into())
     }
 }

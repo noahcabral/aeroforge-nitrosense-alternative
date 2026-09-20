@@ -6,6 +6,7 @@ use std::{
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 
 use super::models::PowerSnapshot;
+use crate::DynError;
 
 const SYSTEM_BATTERY_STATE_LEVEL: u32 = 5;
 const STATUS_SUCCESS: i32 = 0;
@@ -37,7 +38,7 @@ extern "system" {
     ) -> i32;
 }
 
-pub fn read_power_snapshot() -> Result<PowerSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_power_snapshot() -> Result<PowerSnapshot, DynError> {
     let mut status = unsafe { zeroed::<SYSTEM_POWER_STATUS>() };
     let ok = unsafe { GetSystemPowerStatus(&mut status) };
 

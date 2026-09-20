@@ -1,5 +1,6 @@
-use regex::Regex;
 use crate::paths::{command_failure_detail, system32_command};
+use crate::DynError;
+use regex::Regex;
 use std::{env, sync::OnceLock, thread, time::Duration};
 
 use crate::{
@@ -37,7 +38,7 @@ enum PowercfgCurrentIndex {
 pub fn apply_power_profile(
     paths: &ServicePaths,
     request: ApplyPowerProfileRequest,
-) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedPowerProfileSnapshot, DynError> {
     let profile_id = request.profile_id.clone();
     let custom_base_profile = request.custom_base_profile.clone();
     let processor_state_control_enabled = request.processor_state_control_enabled;
@@ -185,7 +186,7 @@ pub fn apply_power_profile(
 
 fn sanitize_processor_state(
     processor_state: ProcessorStateSettings,
-) -> Result<ProcessorStateSettings, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ProcessorStateSettings, DynError> {
     let min_percent = processor_state.min_percent.clamp(0, 100);
     let max_percent = processor_state.max_percent.clamp(5, 100);
 
@@ -207,7 +208,7 @@ fn apply_operating_mode(
     paths: &ServicePaths,
     profile_id: &PowerProfileId,
     custom_base_profile: Option<&CustomPowerBaseId>,
-) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedOperatingMode, DynError> {
     match profile_id {
         PowerProfileId::BatteryGuard => {
             let firmware_detail = apply_acer_platform_profile_or_fallback(
@@ -284,7 +285,7 @@ fn apply_acer_profile_with_whisper_clear(
     input: u64,
     balanced_base_for_custom: bool,
     custom_base_label: Option<&'static str>,
-) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedOperatingMode, DynError> {
     let firmware_detail = apply_acer_platform_profile_or_fallback(
         profile_label(profile_id),
         input,
@@ -663,7 +664,7 @@ fn profile_readback_enabled() -> bool {
 }
 
 fn describe_supported_profiles(
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
+    result: &Result<Option<u8>, DynError>,
     target_profile_value: u8,
 ) -> String {
     match result {
@@ -707,25 +708,17 @@ fn supported_profile_names(mask: u8) -> Vec<&'static str> {
     names
 }
 
-fn read_misc_value_byte(
-    setting: u8,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn read_misc_value_byte(setting: u8) -> Result<Option<u8>, DynError> {
     Ok(read_gaming_misc_setting(setting)?
         .output
         .map(decode_gm_output_byte))
 }
 
-fn profile_readback_matches(
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
-    expected: u8,
-) -> bool {
+fn profile_readback_matches(result: &Result<Option<u8>, DynError>, expected: u8) -> bool {
     matches!(result, Ok(Some(value)) if *value == expected)
 }
 
-fn describe_profile_readback(
-    label: &str,
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
-) -> String {
+fn describe_profile_readback(label: &str, result: &Result<Option<u8>, DynError>) -> String {
     match result {
         Ok(Some(value)) => format!("{label} read as 0x{value:02X}."),
         Ok(None) => format!("{label} returned no gmOutput byte."),
@@ -768,11 +761,7 @@ fn apply_whisper_mode_detail(
     }
 }
 
-fn apply_scheme_value(
-    action: &str,
-    setting: &str,
-    value: u8,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn apply_scheme_value(action: &str, setting: &str, value: u8) -> Result<(), DynError> {
     run_powercfg(&[
         &format!("/{action}"),
         SCHEME_CURRENT,
@@ -782,13 +771,11 @@ fn apply_scheme_value(
     ])
 }
 
-fn run_powercfg(arguments: &[&str]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_powercfg(arguments: &[&str]) -> Result<(), DynError> {
     run_powercfg_output(arguments).map(drop)
 }
 
-fn run_powercfg_output(
-    arguments: &[&str],
-) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+fn run_powercfg_output(arguments: &[&str]) -> Result<std::process::Output, DynError> {
     let output = system32_command("powercfg").args(arguments).output()?;
     if output.status.success() {
         return Ok(output);
@@ -802,8 +789,7 @@ fn run_powercfg_output(
     .into())
 }
 
-fn read_processor_state_readback(
-) -> Result<ProcessorStateReadback, Box<dyn std::error::Error + Send + Sync>> {
+fn read_processor_state_readback() -> Result<ProcessorStateReadback, DynError> {
     // One powercfg /q per setting answers both AC and DC; each spawn costs ~100 ms.
     let (min_ac, min_dc) = query_scheme_values(PROCTHROTTLEMIN)?;
     let (max_ac, max_dc) = query_scheme_values(PROCTHROTTLEMAX)?;
@@ -819,9 +805,7 @@ fn read_processor_state_readback(
     })
 }
 
-fn query_scheme_values(
-    setting: &str,
-) -> Result<(u8, u8), Box<dyn std::error::Error + Send + Sync>> {
+fn query_scheme_values(setting: &str) -> Result<(u8, u8), DynError> {
     let stdout = query_scheme_output(setting)?;
     Ok((
         parse_scheme_value(
@@ -839,7 +823,7 @@ fn query_scheme_values(
     ))
 }
 
-fn query_scheme_output(setting: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn query_scheme_output(setting: &str) -> Result<String, DynError> {
     let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -849,7 +833,7 @@ fn parse_scheme_value(
     setting: &str,
     label: &str,
     current_index: PowercfgCurrentIndex,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<u8, DynError> {
     if let Some(value) = parse_labeled_powercfg_value(stdout, setting, label)? {
         return Ok(value);
     }
@@ -869,7 +853,7 @@ fn parse_labeled_powercfg_value(
     stdout: &str,
     setting: &str,
     label: &str,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<u8>, DynError> {
     let regex = current_index_regex();
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -893,7 +877,7 @@ fn parse_scoped_powercfg_value(
     stdout: &str,
     setting: &str,
     current_index: PowercfgCurrentIndex,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<u8>, DynError> {
     let regex = current_index_regex();
     let mut all_values = Vec::new();
     let mut setting_values = Vec::new();
@@ -945,10 +929,7 @@ fn parse_scoped_powercfg_value(
     Ok(Some(percent_from_powercfg_hex(parsed, setting)?))
 }
 
-fn percent_from_powercfg_hex(
-    parsed: u32,
-    setting: &str,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+fn percent_from_powercfg_hex(parsed: u32, setting: &str) -> Result<u8, DynError> {
     u8::try_from(parsed)
         .map_err(|_| format!("Readback value {} for {} exceeds u8 range", parsed, setting).into())
 }

@@ -1,4 +1,5 @@
 use crate::paths::ServicePaths;
+use crate::DynError;
 use std::{fs, sync::Mutex, thread, time::Duration};
 
 use super::models::{
@@ -6,9 +7,7 @@ use super::models::{
     AppliedPowerProfileSnapshot, ControlSnapshot, FanSpeedCalibrationSnapshot,
 };
 
-pub fn load_snapshot(
-    paths: &ServicePaths,
-) -> Result<ControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+pub fn load_snapshot(paths: &ServicePaths) -> Result<ControlSnapshot, DynError> {
     let path = paths.worker_snapshot("control");
     if !path.exists() {
         return Ok(ControlSnapshot::default_snapshot("control-worker"));
@@ -44,9 +43,7 @@ pub fn load_snapshot(
         .into())
 }
 
-pub fn persist_default_snapshot(
-    paths: &ServicePaths,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn persist_default_snapshot(paths: &ServicePaths) -> Result<(), DynError> {
     let path = paths.worker_snapshot("control");
     if path.exists() {
         return Ok(());
@@ -58,7 +55,7 @@ pub fn persist_default_snapshot(
 pub fn persist_apply_success(
     paths: &ServicePaths,
     applied: &AppliedPowerProfileSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.active_power_profile = Some(applied.profile_id.clone());
         snapshot.processor_state = Some(applied.processor_state.clone());
@@ -76,7 +73,7 @@ pub fn persist_apply_success(
 pub fn persist_gpu_tuning_apply_success(
     paths: &ServicePaths,
     applied: &AppliedGpuTuningSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.gpu_tuning_apply_supported = true;
         snapshot.active_gpu_tuning = Some(applied.tuning.clone());
@@ -89,7 +86,7 @@ pub fn persist_gpu_tuning_apply_success(
 pub fn persist_fan_apply_success(
     paths: &ServicePaths,
     applied: &AppliedFanControlSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.fan_apply_supported = true;
         snapshot.fan_curve_apply_supported = true;
@@ -114,7 +111,7 @@ pub fn persist_fan_apply_success(
 pub fn persist_boot_logo_apply_success(
     paths: &ServicePaths,
     applied: &AppliedBootLogoSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.boot_logo_apply_supported = true;
         snapshot.last_boot_logo_applied_at_unix = Some(applied.applied_at_unix);
@@ -127,7 +124,7 @@ pub fn persist_boot_logo_apply_success(
 pub fn persist_telemetry_settings(
     paths: &ServicePaths,
     nvidia_telemetry_enabled: bool,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.nvidia_telemetry_enabled = nvidia_telemetry_enabled;
     })
@@ -136,16 +133,13 @@ pub fn persist_telemetry_settings(
 pub fn persist_fan_speed_calibration(
     paths: &ServicePaths,
     calibration: FanSpeedCalibrationSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.fan_speed_calibration = calibration;
     })
 }
 
-pub fn persist_apply_error(
-    paths: &ServicePaths,
-    detail: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn persist_apply_error(paths: &ServicePaths, detail: &str) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.last_error = Some(detail.into());
         snapshot.last_apply_detail =
@@ -159,10 +153,7 @@ pub fn persist_apply_error(
     })
 }
 
-pub fn persist_gpu_tuning_apply_error(
-    paths: &ServicePaths,
-    detail: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn persist_gpu_tuning_apply_error(paths: &ServicePaths, detail: &str) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.last_gpu_tuning_error = Some(detail.into());
         snapshot.last_gpu_tuning_detail =
@@ -170,10 +161,7 @@ pub fn persist_gpu_tuning_apply_error(
     })
 }
 
-pub fn persist_fan_apply_error(
-    paths: &ServicePaths,
-    detail: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn persist_fan_apply_error(paths: &ServicePaths, detail: &str) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.fan_apply_supported = false;
         snapshot.fan_curve_apply_supported = false;
@@ -188,10 +176,7 @@ pub fn persist_fan_apply_error(
     })
 }
 
-pub fn persist_boot_logo_apply_error(
-    paths: &ServicePaths,
-    detail: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn persist_boot_logo_apply_error(paths: &ServicePaths, detail: &str) -> Result<(), DynError> {
     update_snapshot(paths, |snapshot| {
         snapshot.boot_logo_apply_supported = true;
         snapshot.last_boot_logo_error = Some(detail.into());
@@ -209,7 +194,7 @@ static SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
 fn update_snapshot(
     paths: &ServicePaths,
     mutate: impl FnOnce(&mut ControlSnapshot),
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let _guard = SNAPSHOT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -218,10 +203,7 @@ fn update_snapshot(
     persist_snapshot(paths, &snapshot)
 }
 
-fn persist_snapshot(
-    paths: &ServicePaths,
-    snapshot: &ControlSnapshot,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn persist_snapshot(paths: &ServicePaths, snapshot: &ControlSnapshot) -> Result<(), DynError> {
     crate::paths::write_text_atomically(
         &paths.worker_snapshot("control"),
         &serde_json::to_string_pretty(snapshot)?,

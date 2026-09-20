@@ -3,6 +3,7 @@ use std::{fs, path::Path, sync::Mutex};
 use serde_json::{json, Value};
 
 use super::models::{PipeRequest, PipeResponse, SupervisorSnapshot};
+use crate::DynError;
 use crate::{
     paths::ServicePaths,
     workers::{control, unix_timestamp},
@@ -97,7 +98,7 @@ pub fn process_request(
     }
 }
 
-fn respond(result: Result<Value, Box<dyn std::error::Error + Send + Sync>>) -> PipeResponse {
+fn respond(result: Result<Value, DynError>) -> PipeResponse {
     match result {
         Ok(payload) => PipeResponse::Ok { payload },
         Err(error) => PipeResponse::Error {
@@ -110,7 +111,7 @@ fn respond(result: Result<Value, Box<dyn std::error::Error + Send + Sync>>) -> P
 fn authorized_write(
     paths: &ServicePaths,
     write_token: Option<String>,
-    apply: impl FnOnce() -> Result<Value, Box<dyn std::error::Error + Send + Sync>>,
+    apply: impl FnOnce() -> Result<Value, DynError>,
 ) -> PipeResponse {
     if let Err(message) = require_write_authorization(paths, write_token.as_deref()) {
         return PipeResponse::Error { message };
@@ -187,10 +188,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn build_service_status(
-    paths: &ServicePaths,
-    pipe_path: &str,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+fn build_service_status(paths: &ServicePaths, pipe_path: &str) -> Result<Value, DynError> {
     let supervisor_raw = fs::read_to_string(paths.supervisor_snapshot())?;
     let supervisor = serde_json::from_str::<SupervisorSnapshot>(&supervisor_raw)?;
     let worker_problem = critical_worker_problem(&supervisor.workers);
@@ -254,9 +252,7 @@ fn critical_worker_problem(workers: &[super::models::WorkerStatusSnapshot]) -> O
     None
 }
 
-fn read_snapshot(
-    path: impl AsRef<Path>,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+fn read_snapshot(path: impl AsRef<Path>) -> Result<Value, DynError> {
     let raw = fs::read_to_string(path)?;
     Ok(serde_json::from_str::<Value>(
         raw.trim_start_matches('\u{feff}'),

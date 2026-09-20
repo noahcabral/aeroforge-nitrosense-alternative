@@ -1,6 +1,7 @@
 use crate::workers::acer_hid_device::{
     open_system_usage_device, SystemUsageDevice, REPORT_ID, REPORT_LEN,
 };
+use crate::DynError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemUsageMode {
@@ -38,16 +39,13 @@ pub struct AcerHidWriteResult {
     pub response_prefix: Option<String>,
 }
 
-pub fn apply_system_usage_mode(
-    mode: SystemUsageMode,
-) -> Result<AcerHidWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_system_usage_mode(mode: SystemUsageMode) -> Result<AcerHidWriteResult, DynError> {
     let device = open_system_usage_device()?;
     let request = build_system_usage_mode_request(mode);
     send_feature_report(&device, "system-usage-mode", mode.label(), &request, true)
 }
 
-pub fn apply_turbo_oc_profile_hint(
-) -> Result<Vec<AcerHidWriteResult>, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_turbo_oc_profile_hint() -> Result<Vec<AcerHidWriteResult>, DynError> {
     let device = open_system_usage_device()?;
     let app_status = build_app_status_request();
     let profile_select = build_oc_profile_select_request(0);
@@ -69,7 +67,7 @@ fn send_feature_report(
     label: &str,
     request: &[u8; REPORT_LEN],
     read_response: bool,
-) -> Result<AcerHidWriteResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AcerHidWriteResult, DynError> {
     device.set_feature(request)?;
 
     let response_prefix = if read_response {

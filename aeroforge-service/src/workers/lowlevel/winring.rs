@@ -25,6 +25,7 @@ use windows_sys::Win32::{
 };
 
 use crate::paths::ServicePaths;
+use crate::DynError;
 
 pub const RELATION_PROCESSOR_CORE: i32 = 0;
 
@@ -91,7 +92,7 @@ pub struct PackagePowerLimitApplyResult {
 }
 
 impl WinRingContext {
-    pub fn load(paths: &ServicePaths) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load(paths: &ServicePaths) -> Result<Self, DynError> {
         if !winring_enabled() {
             cleanup_stale_staged_drivers(paths);
             return Err(
@@ -110,7 +111,7 @@ impl WinRingContext {
         })
     }
 
-    pub fn read_tj_max(&self) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn read_tj_max(&self) -> Result<Option<u8>, DynError> {
         let Some(value) = self.read_msr(IA32_TEMPERATURE_TARGET, 1)? else {
             return Ok(None);
         };
@@ -119,10 +120,7 @@ impl WinRingContext {
         Ok((tj_max > 0).then_some(tj_max))
     }
 
-    pub fn read_package_temp(
-        &self,
-        tj_max_c: Option<u8>,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn read_package_temp(&self, tj_max_c: Option<u8>) -> Result<Option<u8>, DynError> {
         self.read_digital_thermal_temp(IA32_PACKAGE_THERM_STATUS, 1, tj_max_c)
     }
 
@@ -130,13 +128,11 @@ impl WinRingContext {
         &self,
         affinity_mask: usize,
         tj_max_c: Option<u8>,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<u8>, DynError> {
         self.read_digital_thermal_temp(IA32_THERM_STATUS, affinity_mask, tj_max_c)
     }
 
-    pub fn read_rapl_readback(
-        &self,
-    ) -> Result<Option<RaplReadback>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn read_rapl_readback(&self) -> Result<Option<RaplReadback>, DynError> {
         let Some(unit_raw) = self.read_msr(MSR_RAPL_POWER_UNIT, 1)? else {
             return Ok(None);
         };
@@ -160,8 +156,7 @@ impl WinRingContext {
     pub fn apply_package_power_limit(
         &self,
         write: PackagePowerLimitWrite,
-    ) -> Result<Option<PackagePowerLimitApplyResult>, Box<dyn std::error::Error + Send + Sync>>
-    {
+    ) -> Result<Option<PackagePowerLimitApplyResult>, DynError> {
         let Some(unit_raw) = self.read_msr(MSR_RAPL_POWER_UNIT, 1)? else {
             return Ok(None);
         };
@@ -201,7 +196,7 @@ impl WinRingContext {
         register: u32,
         affinity_mask: usize,
         tj_max_c: Option<u8>,
-    ) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<u8>, DynError> {
         let Some(tj_max_c) = tj_max_c else {
             return Ok(None);
         };
@@ -219,11 +214,7 @@ impl WinRingContext {
         Ok(Some(tj_max_c.saturating_sub(delta_to_tj_max)))
     }
 
-    fn read_msr(
-        &self,
-        register: u32,
-        affinity_mask: usize,
-    ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_msr(&self, register: u32, affinity_mask: usize) -> Result<Option<u64>, DynError> {
         let current_thread = unsafe { GetCurrentThread() };
         let previous_mask = unsafe { SetThreadAffinityMask(current_thread, affinity_mask) };
         if previous_mask == 0 {
@@ -238,12 +229,7 @@ impl WinRingContext {
         result
     }
 
-    fn write_msr(
-        &self,
-        register: u32,
-        value: u64,
-        affinity_mask: usize,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn write_msr(&self, register: u32, value: u64, affinity_mask: usize) -> Result<(), DynError> {
         let current_thread = unsafe { GetCurrentThread() };
         let previous_mask = unsafe { SetThreadAffinityMask(current_thread, affinity_mask) };
         if previous_mask == 0 {
@@ -310,7 +296,7 @@ pub(crate) fn compose_package_power_limit_write(
     current_raw: u64,
     write: PackagePowerLimitWrite,
     power_unit_w: f64,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<u64, DynError> {
     let mut target = current_raw;
 
     if let Some(pl1_w) = write.pl1_w {
@@ -345,7 +331,7 @@ pub(crate) fn verify_package_power_limit_write(
     target_raw: u64,
     after_raw: u64,
     write: PackagePowerLimitWrite,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     if write.pl1_w.is_some()
         && (after_raw & POWER_LIMIT_RAW_MASK) != (target_raw & POWER_LIMIT_RAW_MASK)
     {
@@ -369,10 +355,7 @@ pub(crate) fn verify_package_power_limit_write(
     Ok(())
 }
 
-fn encode_power_limit_raw(
-    watts: f32,
-    power_unit_w: f64,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+fn encode_power_limit_raw(watts: f32, power_unit_w: f64) -> Result<u64, DynError> {
     if !watts.is_finite() || watts <= 0.0 {
         return Err(format!("Invalid CPU package power limit {watts}W.").into());
     }
@@ -412,7 +395,7 @@ struct DeviceHandle {
 }
 
 impl DeviceHandle {
-    fn open(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn open(path: &str) -> Result<Self, DynError> {
         let path_wide = to_wide_string(path);
         let handle = unsafe {
             CreateFileW(
@@ -433,10 +416,7 @@ impl DeviceHandle {
         Ok(Self { handle })
     }
 
-    fn read_msr(
-        &self,
-        register: u32,
-    ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_msr(&self, register: u32) -> Result<Option<u64>, DynError> {
         let mut output = 0u64;
         let mut bytes_returned = 0u32;
         let ok = unsafe {
@@ -459,11 +439,7 @@ impl DeviceHandle {
         Ok(Some(output))
     }
 
-    fn write_msr(
-        &self,
-        register: u32,
-        value: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn write_msr(&self, register: u32, value: u64) -> Result<(), DynError> {
         let mut input = MsrWriteInput {
             register,
             eax: (value & 0xffff_ffff) as u32,
@@ -501,9 +477,7 @@ impl Drop for DeviceHandle {
     }
 }
 
-fn resolve_driver_binary(
-    paths: &ServicePaths,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+fn resolve_driver_binary(paths: &ServicePaths) -> Result<PathBuf, DynError> {
     if let Ok(driver_path) = env::var(WINRING_DRIVER_PATH_ENV) {
         let driver_path = PathBuf::from(driver_path.trim());
         if is_usable_driver_path(&driver_path) {
@@ -555,9 +529,7 @@ fn is_usable_driver_path(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-fn ensure_driver_service(
-    driver_path: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn ensure_driver_service(driver_path: &Path) -> Result<(), DynError> {
     let manager = ServiceHandle::open_manager()?;
     let service =
         match ServiceHandle::create_kernel_driver(&manager, WINRING_SERVICE_NAME, driver_path) {

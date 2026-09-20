@@ -12,6 +12,7 @@ use std::{
 
 use models::{PipeRequest, PipeResponse};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{unix_timestamp, WorkerEvent, WorkerEventSender, WorkerRegistration, WorkerState},
@@ -62,7 +63,7 @@ pub fn run(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let _ = event_tx.send(WorkerEvent {
         worker: "ipc-worker",
         state: WorkerState::Running,
@@ -109,10 +110,7 @@ pub fn run(
     Ok(())
 }
 
-fn handle_client(
-    pipe: pipe::NamedPipeInstance,
-    paths: &ServicePaths,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn handle_client(pipe: pipe::NamedPipeInstance, paths: &ServicePaths) -> Result<(), DynError> {
     let mut file = pipe.into_file();
     let mut reader = std::io::BufReader::new((&mut file).take(MAX_REQUEST_BYTES));
     let mut line = String::new();

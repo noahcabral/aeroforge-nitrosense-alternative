@@ -20,6 +20,7 @@ use std::{
 use serde::Serialize;
 
 use crate::paths::{write_log_line, ServicePaths};
+use crate::DynError;
 
 const WORKER_RESTART_DELAY: Duration = Duration::from_secs(2);
 
@@ -33,7 +34,7 @@ impl ServiceHost {
         Self { paths, stop_flag }
     }
 
-    pub fn start(self) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn start(self) -> Result<Vec<JoinHandle<()>>, DynError> {
         let mut handles = Vec::new();
         let (event_tx, event_rx) = mpsc::channel();
 
@@ -96,11 +97,7 @@ pub struct WorkerRegistration {
     pub runner: WorkerRunner,
 }
 
-type WorkerRunner = fn(
-    ServicePaths,
-    Arc<AtomicBool>,
-    WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type WorkerRunner = fn(ServicePaths, Arc<AtomicBool>, WorkerEventSender) -> Result<(), DynError>;
 
 impl WorkerRegistration {
     pub const fn new(name: &'static str, runner: WorkerRunner) -> Self {
@@ -152,7 +149,7 @@ fn spawn_worker(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<JoinHandle<()>, DynError> {
     let name = registration.name;
     // Best effort: an unwritable log must not keep a hardware worker from starting.
     let _ = write_log_line(&paths.service_log(), "INFO", &format!("Starting {name}."));
@@ -251,7 +248,7 @@ fn spawn_supervisor(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_rx: Receiver<WorkerEvent>,
-) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<JoinHandle<()>, DynError> {
     let _ = write_log_line(
         &paths.service_log(),
         "INFO",
@@ -298,7 +295,7 @@ fn spawn_supervisor(
 fn persist_supervisor_snapshot(
     paths: &ServicePaths,
     workers: &BTreeMap<String, WorkerStatusSnapshot>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let snapshot = SupervisorSnapshot {
         service: "AeroForgeService",
         worker_count: workers.len(),
@@ -324,8 +321,8 @@ pub fn run_periodic_worker(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_tx: WorkerEventSender,
-    tick: fn(&ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tick: fn(&ServicePaths) -> Result<(), DynError>,
+) -> Result<(), DynError> {
     while !stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
         tick(&paths)?;
         let _ = event_tx.send(WorkerEvent {

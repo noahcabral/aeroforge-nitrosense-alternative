@@ -10,6 +10,7 @@ mod system;
 
 use models::{LowLevelSnapshot, TelemetrySnapshot};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
@@ -26,7 +27,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     run_periodic_worker(
         "telemetry-worker",
         std::time::Duration::from_millis(333),
@@ -37,7 +38,7 @@ fn run(
     )
 }
 
-fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn tick(paths: &ServicePaths) -> Result<(), DynError> {
     let heartbeat = system::next_heartbeat();
     let power = power::read_power_snapshot().unwrap_or_default();
     let cpu_usage = cpu::read_cpu_usage_percent().unwrap_or(0);
@@ -153,9 +154,7 @@ fn log_nvidia_telemetry_state(paths: &ServicePaths, enabled: bool) {
     let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
 }
 
-fn read_low_level_snapshot(
-    paths: &ServicePaths,
-) -> Result<LowLevelSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn read_low_level_snapshot(paths: &ServicePaths) -> Result<LowLevelSnapshot, DynError> {
     let raw = std::fs::read_to_string(paths.worker_snapshot("lowlevel"))?;
     Ok(serde_json::from_str::<LowLevelSnapshot>(&raw)?)
 }

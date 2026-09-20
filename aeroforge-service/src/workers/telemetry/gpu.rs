@@ -21,6 +21,7 @@ use super::{
     models::GpuSnapshot,
 };
 use crate::paths::{system32_path, write_log_line, ServicePaths};
+use crate::DynError;
 
 // NVML constants
 
@@ -343,7 +344,7 @@ fn log_active_transition(paths: &ServicePaths, cache: &mut GpuTelemetryCache, ac
 
 // NVML snapshot
 
-fn query_nvml_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_nvml_snapshot() -> Result<GpuSnapshot, DynError> {
     if let Some(api) = NVML_API.get_or_init(load_nvml_api).as_ref() {
         if let Ok(snapshot) = read_nvml_snapshot(api) {
             return Ok(snapshot);
@@ -417,9 +418,7 @@ fn load_nvml_api() -> Option<NvmlApi> {
     }
 }
 
-fn read_nvml_snapshot(
-    api: &NvmlApi,
-) -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn read_nvml_snapshot(api: &NvmlApi) -> Result<GpuSnapshot, DynError> {
     // Per-query init/shutdown: no persistent NVML session, GPU can enter RTD3.
     nvml_call(unsafe { (api.init_v2)() }, "nvmlInit_v2")?;
 
@@ -549,7 +548,7 @@ fn sanitize_power_w(w: f32) -> Option<f32> {
     }
 }
 
-fn nvml_call(code: i32, name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn nvml_call(code: i32, name: &str) -> Result<(), DynError> {
     if code == NVML_SUCCESS {
         Ok(())
     } else {
@@ -559,7 +558,7 @@ fn nvml_call(code: i32, name: &str) -> Result<(), Box<dyn std::error::Error + Se
 
 // nvidia-smi fallback
 
-fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_nvidia_smi_snapshot() -> Result<GpuSnapshot, DynError> {
     let fields = "temperature.gpu,clocks.current.graphics,utilization.gpu,memory.used,memory.total,power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit";
     let arg = format!("--query-gpu={fields}");
 

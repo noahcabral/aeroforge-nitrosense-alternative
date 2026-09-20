@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::paths::{command_failure_detail, powershell_command};
+use crate::DynError;
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -85,36 +86,24 @@ pub fn decode_gm_output_byte(value: u64) -> u8 {
     }
 }
 
-pub fn apply_gaming_profile(
-    input: u64,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_gaming_profile(input: u64) -> Result<AcerWmiMethodResult, DynError> {
     invoke_acer_gaming_u64_method("SetGamingProfile", input)
 }
 
-pub fn apply_gaming_misc_setting(
-    setting: u8,
-    value: u8,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_gaming_misc_setting(setting: u8, value: u8) -> Result<AcerWmiMethodResult, DynError> {
     let input = u64::from(setting) | (u64::from(value) << 8);
     invoke_acer_gaming_u64_method("SetGamingMiscSetting", input)
 }
 
-pub fn read_gaming_misc_setting(
-    setting: u8,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_gaming_misc_setting(setting: u8) -> Result<AcerWmiMethodResult, DynError> {
     invoke_acer_gaming_u64_method("GetGamingMiscSetting", u64::from(setting))
 }
 
-pub fn apply_fan_behavior(
-    input: u64,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_fan_behavior(input: u64) -> Result<AcerWmiMethodResult, DynError> {
     invoke_acer_gaming_u64_method("SetGamingFanBehavior", input)
 }
 
-pub fn apply_fan_speed(
-    selector: u8,
-    percent: u8,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn apply_fan_speed(selector: u8, percent: u8) -> Result<AcerWmiMethodResult, DynError> {
     invoke_acer_gaming_u64_method("SetGamingFanSpeed", fan_speed_input(selector, percent))
 }
 
@@ -123,8 +112,7 @@ pub fn fan_speed_input(selector: u8, percent: u8) -> u64 {
     (u64::from(clamped) << 8) | u64::from(selector)
 }
 
-pub fn read_firmware_sensor_snapshot(
-) -> Result<AcerFirmwareSensorReadback, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_firmware_sensor_snapshot() -> Result<AcerFirmwareSensorReadback, DynError> {
     if SYSINFO_CIM_FALLBACK.load(Ordering::Relaxed) {
         return read_firmware_sensor_snapshot_cim(Vec::new());
     }
@@ -176,9 +164,7 @@ pub fn read_firmware_sensor_snapshot(
     })
 }
 
-pub fn read_gaming_sys_info(
-    input: u32,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_gaming_sys_info(input: u32) -> Result<AcerWmiMethodResult, DynError> {
     invoke_acer_gaming_u64_method("GetGamingSysInfo", u64::from(input))
 }
 
@@ -206,7 +192,7 @@ struct ComApartment {
 }
 
 impl ComApartment {
-    fn initialize() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn initialize() -> Result<Self, DynError> {
         let hr = unsafe { CoInitializeEx(null_mut(), COINIT_MULTITHREADED) };
         if !hresult_ok(hr) && hr != RPC_E_CHANGED_MODE {
             return Err(format!("CoInitializeEx failed with 0x{:08X}", hr as u32).into());
@@ -252,7 +238,7 @@ impl Drop for ComApartment {
 fn invoke_acer_gaming_u64_method(
     method: &'static str,
     input: u64,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AcerWmiMethodResult, DynError> {
     match invoke_acer_gaming_u64_method_com(method, input) {
         Ok(result) => Ok(result),
         Err(com_error) => invoke_acer_gaming_u64_method_cim(method, input, com_error.to_string()),
@@ -262,7 +248,7 @@ fn invoke_acer_gaming_u64_method(
 fn invoke_acer_gaming_u64_method_com(
     method: &'static str,
     input: u64,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AcerWmiMethodResult, DynError> {
     GamingFunctionSession::open()?.invoke_u64(method, input)
 }
 
@@ -278,7 +264,7 @@ struct GamingFunctionSession {
 }
 
 impl GamingFunctionSession {
-    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn open() -> Result<Self, DynError> {
         let com = ComApartment::initialize()?;
         let locator = WbemLocator::create()?;
         let services = locator.connect(ACER_WMI_NAMESPACE)?;
@@ -295,7 +281,7 @@ impl GamingFunctionSession {
         &self,
         method: &'static str,
         input: u64,
-    ) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<AcerWmiMethodResult, DynError> {
         let input_signature = self.class_object.get_method_input_signature(method)?;
         let input_instance = input_signature.spawn_instance()?;
         input_instance.put_u64(GM_INPUT, input)?;
@@ -323,7 +309,7 @@ fn invoke_acer_gaming_u64_method_cim(
     method: &'static str,
     input: u64,
     com_error: String,
-) -> Result<AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AcerWmiMethodResult, DynError> {
     let script = r#"
 $method = $env:AEROFORGE_CIM_METHOD
 $inputValue = [UInt64]$env:AEROFORGE_CIM_INPUT
@@ -383,7 +369,7 @@ fn read_sysinfo_raw_com(
 
 fn read_firmware_sensor_snapshot_cim(
     com_errors: Vec<String>,
-) -> Result<AcerFirmwareSensorReadback, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AcerFirmwareSensorReadback, DynError> {
     let script = r#"
 $gaming = Get-CimInstance -Namespace root\wmi -ClassName AcerGamingFunction -ErrorAction Stop | Select-Object -First 1
 if (-not $gaming) { throw 'AcerGamingFunction instance was not found.' }
@@ -490,7 +476,7 @@ fn decode_sysinfo_sensor(value: Option<u64>) -> Option<u16> {
 struct BStr(*mut u16);
 
 impl BStr {
-    fn new(value: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn new(value: &str) -> Result<Self, DynError> {
         let wide: Vec<u16> = value.encode_utf16().collect();
         let ptr = unsafe { SysAllocStringLen(wide.as_ptr(), wide.len() as u32) };
         if ptr.is_null() {
@@ -515,7 +501,7 @@ impl Drop for BStr {
 struct WbemLocator(*mut IWbemLocator);
 
 impl WbemLocator {
-    fn create() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn create() -> Result<Self, DynError> {
         let mut locator: *mut IWbemLocator = null_mut();
         let hr = unsafe {
             CoCreateInstance(
@@ -533,10 +519,7 @@ impl WbemLocator {
         Ok(Self(locator))
     }
 
-    fn connect(
-        &self,
-        namespace: &str,
-    ) -> Result<WbemServices, Box<dyn std::error::Error + Send + Sync>> {
+    fn connect(&self, namespace: &str) -> Result<WbemServices, DynError> {
         let namespace = BStr::new(namespace)?;
         let mut services: *mut IWbemServices = null_mut();
         let hr = unsafe {
@@ -586,10 +569,7 @@ impl Drop for WbemLocator {
 struct WbemServices(*mut IWbemServices);
 
 impl WbemServices {
-    fn get_object(
-        &self,
-        object_path: &str,
-    ) -> Result<WbemClassObject, Box<dyn std::error::Error + Send + Sync>> {
+    fn get_object(&self, object_path: &str) -> Result<WbemClassObject, DynError> {
         let path = BStr::new(object_path)?;
         let mut object: *mut IWbemClassObject = null_mut();
         let hr = unsafe {
@@ -614,7 +594,7 @@ impl WbemServices {
         object_path: &str,
         method: &str,
         input_params: *mut IWbemClassObject,
-    ) -> Result<ExecMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ExecMethodResult, DynError> {
         let object_path = BStr::new(object_path)?;
         let method = BStr::new(method)?;
         let mut output_params: *mut IWbemClassObject = null_mut();
@@ -658,10 +638,7 @@ impl WbemClassObject {
         self.0
     }
 
-    fn get_method_input_signature(
-        &self,
-        method: &str,
-    ) -> Result<WbemClassObject, Box<dyn std::error::Error + Send + Sync>> {
+    fn get_method_input_signature(&self, method: &str) -> Result<WbemClassObject, DynError> {
         let method = BStr::new(method)?;
         let mut input_signature: *mut IWbemClassObject = null_mut();
         let hr = unsafe {
@@ -680,7 +657,7 @@ impl WbemClassObject {
         Ok(WbemClassObject(input_signature))
     }
 
-    fn spawn_instance(&self) -> Result<WbemClassObject, Box<dyn std::error::Error + Send + Sync>> {
+    fn spawn_instance(&self) -> Result<WbemClassObject, DynError> {
         let mut instance: *mut IWbemClassObject = null_mut();
         let hr = unsafe { ((*(*self.0).vtable).spawn_instance)(self.0, 0, &mut instance) };
         hresult(hr, "IWbemClassObject::SpawnInstance")?;
@@ -690,11 +667,7 @@ impl WbemClassObject {
         Ok(WbemClassObject(instance))
     }
 
-    fn put_u64(
-        &self,
-        name: &str,
-        value: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn put_u64(&self, name: &str, value: u64) -> Result<(), DynError> {
         let name = BStr::new(name)?;
         if let Ok(value32) = u32::try_from(value) {
             let mut variant = Variant::u32(value32);
@@ -749,10 +722,7 @@ impl WbemClassObject {
         Ok(())
     }
 
-    fn try_get_u64(
-        &self,
-        name: &str,
-    ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    fn try_get_u64(&self, name: &str) -> Result<Option<u64>, DynError> {
         let name = BStr::new(name)?;
         let mut variant = Variant::empty();
         let mut cim_type = 0i32;
@@ -792,7 +762,7 @@ fn hresult_ok(hr: i32) -> bool {
     hr >= 0
 }
 
-fn hresult(hr: i32, context: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn hresult(hr: i32, context: &str) -> Result<(), DynError> {
     if hresult_ok(hr) {
         Ok(())
     } else if let Some(classification) = classify_wmi_error_detail(&format!("0x{:08X}", hr as u32))
@@ -859,7 +829,7 @@ impl Variant {
         }
     }
 
-    fn wmi_u64(value: u64) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn wmi_u64(value: u64) -> Result<Self, DynError> {
         let text = value.to_string();
         let wide: Vec<u16> = text.encode_utf16().collect();
         let ptr = unsafe { SysAllocStringLen(wide.as_ptr(), wide.len() as u32) };
@@ -890,7 +860,7 @@ impl Variant {
         self
     }
 
-    fn to_u64(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    fn to_u64(&self) -> Result<Option<u64>, DynError> {
         let value = match self.vt {
             VT_EMPTY | VT_NULL => None,
             VT_BSTR => {

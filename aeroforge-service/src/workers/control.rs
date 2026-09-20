@@ -12,6 +12,7 @@ mod rapl_power;
 mod smart_charge;
 mod state;
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, unix_timestamp, WorkerEventSender, WorkerRegistration},
@@ -32,8 +33,6 @@ pub use models::{
     ApplyGpuTuningRequest, ApplyPowerProfileRequest, ApplySmartChargeRequest,
     ApplyTelemetrySettingsRequest, FanProfileId, FanSpeedCalibrationSnapshot,
 };
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const WORKER_NAME: &str = "control-worker";
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -59,7 +58,7 @@ pub fn registration() -> WorkerRegistration {
 pub fn apply_power_profile(
     paths: &ServicePaths,
     request: ApplyPowerProfileRequest,
-) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedPowerProfileSnapshot, DynError> {
     record_apply(
         paths,
         "control-power",
@@ -72,7 +71,7 @@ pub fn apply_power_profile(
 pub fn apply_gpu_tuning(
     paths: &ServicePaths,
     request: ApplyGpuTuningRequest,
-) -> Result<AppliedGpuTuningSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedGpuTuningSnapshot, DynError> {
     record_apply(
         paths,
         "control-gpu-tuning",
@@ -85,7 +84,7 @@ pub fn apply_gpu_tuning(
 pub fn apply_fan_profile(
     paths: &ServicePaths,
     request: ApplyFanProfileRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
         return Err(
             "Fan speed calibration is running. Wait for it to finish before changing fan modes."
@@ -132,7 +131,7 @@ pub fn apply_fan_profile(
 pub fn apply_boot_logo(
     paths: &ServicePaths,
     request: ApplyBootLogoRequest,
-) -> Result<AppliedBootLogoSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedBootLogoSnapshot, DynError> {
     record_apply(
         paths,
         "control-boot-logo",
@@ -145,7 +144,7 @@ pub fn apply_boot_logo(
 pub fn apply_smart_charging(
     paths: &ServicePaths,
     request: ApplySmartChargeRequest,
-) -> Result<AppliedSmartChargeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedSmartChargeSnapshot, DynError> {
     match smart_charge::apply_smart_charging(paths, request) {
         Ok(applied) => {
             let _ = write_log_line(
@@ -170,7 +169,7 @@ pub fn apply_smart_charging(
 pub fn apply_telemetry_settings(
     paths: &ServicePaths,
     request: ApplyTelemetrySettingsRequest,
-) -> Result<AppliedTelemetrySettingsSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedTelemetrySettingsSnapshot, DynError> {
     state::persist_telemetry_settings(paths, request.nvidia_telemetry_enabled)?;
 
     let detail = if request.nvidia_telemetry_enabled {
@@ -191,7 +190,7 @@ pub fn apply_telemetry_settings(
 pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
         return Err(
             "Fan speed calibration is running. Wait for it to finish before changing fan curves."
@@ -210,7 +209,7 @@ pub fn apply_custom_fan_curves(
 fn apply_custom_fan_curves_unlocked(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     record_fan_apply(paths, fan::apply_custom_fan_curves(paths, request))
 }
 
@@ -252,7 +251,7 @@ fn record_apply<T>(
 
 pub fn start_fan_speed_calibration(
     paths: &ServicePaths,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     if FAN_CALIBRATION_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -277,7 +276,7 @@ pub fn start_fan_speed_calibration(
     };
     // Until the worker thread owns the flag, any early failure must release it or every
     // later fan apply is rejected as "calibration is running" until the service restarts.
-    let release_on_error = |result: Result<(), Box<dyn std::error::Error + Send + Sync>>| {
+    let release_on_error = |result: Result<(), DynError>| {
         if result.is_err() {
             FAN_CALIBRATION_RUNNING.store(false, Ordering::SeqCst);
         }
@@ -292,7 +291,7 @@ pub fn start_fan_speed_calibration(
     let spawned = thread::Builder::new()
         .name("aeroforge-fan-calibration".into())
         .spawn(move || {
-            let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let result = (|| -> Result<(), DynError> {
                 let _fan_apply_guard = FAN_APPLY_LOCK
                     .get_or_init(|| Mutex::new(()))
                     .lock()
@@ -348,7 +347,7 @@ pub fn start_fan_speed_calibration(
 
 pub fn cancel_fan_speed_calibration(
     paths: &ServicePaths,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     if !FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
         return clear_stale_fan_speed_calibration(paths);
     }
@@ -376,7 +375,7 @@ pub fn cancel_fan_speed_calibration(
 /// which the UI shows as "Running" with no thread behind it.
 fn clear_stale_fan_speed_calibration(
     paths: &ServicePaths,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     let mut calibration = state::load_snapshot(paths)?.fan_speed_calibration;
     if calibration.running {
         let now = unix_timestamp();
@@ -395,7 +394,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     state::persist_default_snapshot(&paths)?;
     if let Err(error) = clear_stale_fan_speed_calibration(&paths) {
         let _ = write_log_line(
@@ -422,7 +421,7 @@ fn run(
     )
 }
 
-fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn tick(paths: &ServicePaths) -> Result<(), DynError> {
     state::persist_default_snapshot(paths)?;
 
     if FAN_CALIBRATION_RUNNING.load(Ordering::SeqCst) {
@@ -563,9 +562,7 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
     Ok(())
 }
 
-fn run_due_startup_reconcile(
-    paths: &ServicePaths,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+fn run_due_startup_reconcile(paths: &ServicePaths) -> Result<bool, DynError> {
     let mut state = STARTUP_RECONCILE_STATE
         .get_or_init(|| {
             Mutex::new(StartupReconcileState {
@@ -668,9 +665,7 @@ fn fan_target_changed(current: Option<u8>, next: Option<u8>) -> bool {
     }
 }
 
-pub fn restore_startup_state(
-    paths: &ServicePaths,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn restore_startup_state(paths: &ServicePaths) -> Result<(), DynError> {
     let snapshot = state::load_snapshot(paths)?;
     let power_profile = snapshot
         .active_power_profile

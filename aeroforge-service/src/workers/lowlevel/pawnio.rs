@@ -4,6 +4,7 @@ use libloading::Library;
 use windows_sys::Win32::Foundation::HANDLE;
 
 use crate::paths::ServicePaths;
+use crate::DynError;
 
 use super::winring::{
     self, PackagePowerLimitApplyResult, PackagePowerLimitWrite, RaplReadback,
@@ -44,7 +45,7 @@ struct PawnIoApi {
 }
 
 impl PawnIoContext {
-    pub fn load(paths: &ServicePaths) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load(paths: &ServicePaths) -> Result<Self, DynError> {
         let explicit_enabled = pawnio_env_flag().unwrap_or(false);
         if pawnio_env_disabled() {
             return Err("PawnIO MSR/RAPL path is disabled by AEROFORGE_ENABLE_PAWNIO=0.".into());
@@ -121,9 +122,7 @@ impl PawnIoContext {
         })
     }
 
-    pub fn read_rapl_readback(
-        &self,
-    ) -> Result<Option<RaplReadback>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn read_rapl_readback(&self) -> Result<Option<RaplReadback>, DynError> {
         let unit_raw = self.read_msr(MSR_RAPL_POWER_UNIT)?;
         let units = winring::decode_rapl_units(unit_raw);
         let package_energy_raw = self.read_msr(MSR_PKG_ENERGY_STATUS)?;
@@ -144,8 +143,7 @@ impl PawnIoContext {
     pub fn apply_package_power_limit(
         &self,
         write: PackagePowerLimitWrite,
-    ) -> Result<Option<PackagePowerLimitApplyResult>, Box<dyn std::error::Error + Send + Sync>>
-    {
+    ) -> Result<Option<PackagePowerLimitApplyResult>, DynError> {
         let unit_raw = self.read_msr(MSR_RAPL_POWER_UNIT)?;
         let units = winring::decode_rapl_units(unit_raw);
         let before_raw = self.read_msr(MSR_PKG_POWER_LIMIT)?;
@@ -177,15 +175,11 @@ impl PawnIoContext {
         }))
     }
 
-    fn read_msr(&self, register: u32) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_msr(&self, register: u32) -> Result<u64, DynError> {
         Ok(self.execute_fixed(IOCTL_READ_MSR, &[register as u64], 1)?[0])
     }
 
-    fn write_msr(
-        &self,
-        register: u32,
-        value: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn write_msr(&self, register: u32, value: u64) -> Result<(), DynError> {
         let _ = self.execute_fixed(IOCTL_WRITE_MSR, &[register as u64, value], 0)?;
         Ok(())
     }
@@ -195,7 +189,7 @@ impl PawnIoContext {
         name: &str,
         input: &[u64],
         output_count: usize,
-    ) -> Result<Vec<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<u64>, DynError> {
         let c_name = CString::new(name)?;
         let mut output = vec![0u64; output_count];
         let mut returned = 0usize;
@@ -250,9 +244,7 @@ fn pawnio_env_disabled() -> bool {
     pawnio_env_flag() == Some(false)
 }
 
-fn resolve_dll_path(
-    paths: &ServicePaths,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+fn resolve_dll_path(paths: &ServicePaths) -> Result<PathBuf, DynError> {
     if let Ok(value) = env::var(PAWNIO_DLL_ENV) {
         let path = PathBuf::from(value.trim());
         if path.is_file() {
@@ -278,9 +270,7 @@ fn resolve_dll_path(
     .into())
 }
 
-fn resolve_module_path(
-    paths: &ServicePaths,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+fn resolve_module_path(paths: &ServicePaths) -> Result<PathBuf, DynError> {
     if let Ok(value) = env::var(PAWNIO_MODULE_ENV) {
         let path = PathBuf::from(value.trim());
         if path.is_file() {
@@ -333,10 +323,7 @@ fn service_driver_dir(paths: &ServicePaths) -> PathBuf {
     paths.service_root().join("drivers")
 }
 
-fn hresult_to_result(
-    value: i32,
-    operation: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn hresult_to_result(value: i32, operation: &str) -> Result<(), DynError> {
     if value >= 0 {
         Ok(())
     } else {

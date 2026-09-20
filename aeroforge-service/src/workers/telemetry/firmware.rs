@@ -9,6 +9,7 @@ use super::{
 };
 use crate::paths::ServicePaths;
 use crate::workers::control::acer_wmi;
+use crate::DynError;
 
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
 // made by faxcon
@@ -147,8 +148,7 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
     snapshot
 }
 
-fn query_firmware_sensor_snapshot(
-) -> Result<FirmwareSensorSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_firmware_sensor_snapshot() -> Result<FirmwareSensorSnapshot, DynError> {
     if let Ok(acer) = acer_wmi::read_firmware_sensor_snapshot() {
         return Ok(FirmwareSensorSnapshot {
             thermal_zone_temp_c: None,
@@ -178,8 +178,7 @@ fn query_firmware_sensor_snapshot(
     })
 }
 
-fn query_windows_thermal_zone_temp_c(
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn query_windows_thermal_zone_temp_c() -> Result<Option<u8>, DynError> {
     let script = r#"
 $thermalZone = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1
 $result = [ordered]@{

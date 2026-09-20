@@ -12,6 +12,7 @@ use super::{
     models::{CpuThermalSnapshot, FirmwareSensorSnapshot, LowLevelSnapshot},
 };
 use crate::paths::ServicePaths;
+use crate::DynError;
 
 static CPU_USAGE_SAMPLER: OnceLock<Mutex<CpuUsageSampler>> = OnceLock::new();
 static CPU_CLOCK_CACHE: OnceLock<Arc<Mutex<CpuClockCache>>> = OnceLock::new();
@@ -89,7 +90,7 @@ impl RefreshState for CpuClockCache {
     }
 }
 
-pub fn read_cpu_usage_percent() -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+pub fn read_cpu_usage_percent() -> Result<u8, DynError> {
     let sampler = CPU_USAGE_SAMPLER.get_or_init(|| Mutex::new(CpuUsageSampler { last: None }));
     let current = read_cpu_times()?;
     let mut guard = sampler.lock().expect("cpu usage sampler lock poisoned");
@@ -166,7 +167,7 @@ pub fn build_cpu_thermal_snapshot(
     }
 }
 
-fn read_cpu_times() -> Result<CpuTimes, Box<dyn std::error::Error + Send + Sync>> {
+fn read_cpu_times() -> Result<CpuTimes, DynError> {
     let mut idle = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
@@ -183,7 +184,7 @@ fn read_cpu_times() -> Result<CpuTimes, Box<dyn std::error::Error + Send + Sync>
     })
 }
 
-fn query_cpu_clock_mhz() -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+fn query_cpu_clock_mhz() -> Result<u16, DynError> {
     let processor_count = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1);

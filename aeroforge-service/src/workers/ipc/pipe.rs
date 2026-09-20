@@ -21,6 +21,7 @@ use windows_sys::Win32::{
 };
 
 use crate::paths::{write_log_line, ServicePaths};
+use crate::DynError;
 
 const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 
@@ -32,7 +33,7 @@ static PIPE_NAME_OWNED: AtomicBool = AtomicBool::new(false);
 pub fn create_pipe_instance(
     paths: &ServicePaths,
     pipe_path: &str,
-) -> Result<NamedPipeInstance, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<NamedPipeInstance, DynError> {
     let name = to_wide_string(pipe_path);
     let security = PipeSecurityDescriptor::new(PIPE_SDDL)?;
     let claiming_name = !PIPE_NAME_OWNED.load(Ordering::SeqCst);
@@ -73,9 +74,7 @@ pub fn create_pipe_instance(
     Ok(NamedPipeInstance { handle })
 }
 
-pub fn connect_client(
-    pipe: &NamedPipeInstance,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn connect_client(pipe: &NamedPipeInstance) -> Result<(), DynError> {
     let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) };
     if connected == 0 {
         let error = std::io::Error::last_os_error();
@@ -103,7 +102,7 @@ struct PipeSecurityDescriptor {
 }
 
 impl PipeSecurityDescriptor {
-    fn new(sddl: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn new(sddl: &str) -> Result<Self, DynError> {
         let mut descriptor: *mut core::ffi::c_void = std::ptr::null_mut();
         let sddl_wide = to_wide_string(sddl);
         let converted = unsafe {

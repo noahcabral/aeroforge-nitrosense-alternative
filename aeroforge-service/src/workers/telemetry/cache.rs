@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::telemetry::system::sanitize_log_message,
@@ -32,14 +33,8 @@ where
     TState: RefreshState + Send + 'static,
     TStoredValue: Clone,
     TQueryValue: Send + 'static,
-    TQuery: Fn() -> Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>
-        + Send
-        + Copy
-        + 'static,
-    TApply: Fn(&mut TState, &Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>)
-        + Send
-        + Copy
-        + 'static,
+    TQuery: Fn() -> Result<TQueryValue, DynError> + Send + Copy + 'static,
+    TApply: Fn(&mut TState, &Result<TQueryValue, DynError>) + Send + Copy + 'static,
     TRead: Fn(&TState) -> TStoredValue,
     TNeedsSync: Fn(&TState) -> bool,
 {
@@ -91,7 +86,7 @@ fn finalize_refresh<TState, TQueryValue>(
     paths: &ServicePaths,
     component_name: &str,
     state: &mut TState,
-    result: &Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>,
+    result: &Result<TQueryValue, DynError>,
 ) where
     TState: RefreshState,
 {

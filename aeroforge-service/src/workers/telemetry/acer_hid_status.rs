@@ -4,6 +4,7 @@ use super::models::AcerHidStatusSnapshot;
 use crate::workers::acer_hid_device::{
     open_system_usage_device, SystemUsageDevice, REPORT_ID, REPORT_LEN,
 };
+use crate::DynError;
 
 const STATUS_GROUP: u8 = 8;
 
@@ -11,8 +12,7 @@ pub fn read_status_snapshot() -> AcerHidStatusSnapshot {
     query_status_snapshot().unwrap_or_default()
 }
 
-fn query_status_snapshot() -> Result<AcerHidStatusSnapshot, Box<dyn std::error::Error + Send + Sync>>
-{
+fn query_status_snapshot() -> Result<AcerHidStatusSnapshot, DynError> {
     let device = open_system_usage_device()?;
 
     Ok(AcerHidStatusSnapshot {

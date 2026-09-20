@@ -1,3 +1,4 @@
+use crate::DynError;
 use crate::{
     paths::ServicePaths,
     workers::lowlevel::{self, winring},
@@ -26,7 +27,7 @@ fn apply_profile_package_limit_inner(
     paths: &ServicePaths,
     profile_id: &PowerProfileId,
     custom_base_profile: Option<&CustomPowerBaseId>,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String, DynError> {
     let context = lowlevel::load_msr_provider(paths)?;
     let Some(readback) = context.read_rapl_readback()? else {
         return Ok("CPU RAPL readback unavailable; package power limits were not changed.".into());

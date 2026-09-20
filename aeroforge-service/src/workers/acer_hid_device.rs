@@ -11,6 +11,8 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+use crate::DynError;
+
 use windows_sys::Win32::{
     Devices::{
         DeviceAndDriverInstallation::{
@@ -39,7 +41,7 @@ const SYSTEM_USAGE_DEVICE_MARKER: &str = "hid#1025174b&col01#";
 pub(super) const REPORT_ID: u8 = 0xA0;
 pub(super) const REPORT_LEN: usize = 65;
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type BoxError = DynError;
 
 static CACHED_DEVICE_PATH: Mutex<Option<String>> = Mutex::new(None);
 // A feature-report exchange is a set followed by a get on the same EC command

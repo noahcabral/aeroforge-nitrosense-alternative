@@ -6,6 +6,7 @@ use std::{
 use libloading::Library;
 
 use crate::paths::{system32_path, write_log_line, ServicePaths};
+use crate::DynError;
 
 use super::models::GpuTuningState;
 
@@ -91,7 +92,7 @@ pub fn apply_gpu_tuning(paths: &ServicePaths, tuning: &GpuTuningState) -> NvmlGp
 }
 
 impl NvmlApi {
-    fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn load() -> Result<Self, DynError> {
         let library = unsafe { Library::new(system32_path("nvml.dll")) }?;
 
         unsafe {
@@ -117,7 +118,7 @@ impl NvmlApi {
         core_log_path: &Path,
         memory_log_path: &Path,
         tuning: &GpuTuningState,
-    ) -> Result<NvmlGpuTuningReport, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<NvmlGpuTuningReport, DynError> {
         self.require_ok(unsafe { (self.init_v2)() }, "nvmlInit_v2")?;
 
         let result = (|| {
@@ -202,7 +203,7 @@ impl NvmlApi {
         domain_label: &str,
         clock_type: u32,
         requested: i32,
-    ) -> Result<DomainResult, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<DomainResult, DynError> {
         let current_info = match self.read_clock_offsets(device, clock_type) {
             Ok(info) => info,
             Err(error) => {
@@ -278,7 +279,7 @@ impl NvmlApi {
         &self,
         device: NvmlDevice,
         clock_type: u32,
-    ) -> Result<NvmlClockOffsetV1, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<NvmlClockOffsetV1, DynError> {
         let mut info = NvmlClockOffsetV1 {
             version: std::mem::size_of::<NvmlClockOffsetV1>() as u32 | NVML_CLOCK_OFFSET_V1,
             clock_type,
@@ -304,7 +305,7 @@ impl NvmlApi {
         unsafe { (self.device_set_clock_offsets)(device, &mut info) }
     }
 
-    fn first_device(&self) -> Result<NvmlDevice, Box<dyn std::error::Error + Send + Sync>> {
+    fn first_device(&self) -> Result<NvmlDevice, DynError> {
         let mut device_count = 0u32;
         self.require_ok(
             unsafe { (self.device_get_count_v2)(&mut device_count) },
@@ -338,11 +339,7 @@ impl NvmlApi {
         String::from_utf8_lossy(&bytes).trim().to_string()
     }
 
-    fn require_ok(
-        &self,
-        status: i32,
-        operation: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn require_ok(&self, status: i32, operation: &str) -> Result<(), DynError> {
         if status == NVML_SUCCESS {
             return Ok(());
         }

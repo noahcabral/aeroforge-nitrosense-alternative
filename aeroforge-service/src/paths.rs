@@ -10,6 +10,8 @@ use std::{
     },
 };
 
+use crate::DynError;
+
 #[derive(Clone, Debug)]
 pub struct ServicePaths {
     pub logs_dir: PathBuf,
@@ -17,7 +19,7 @@ pub struct ServicePaths {
 }
 
 impl ServicePaths {
-    pub fn discover() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn discover() -> Result<Self, DynError> {
         let program_data = env::var_os("ProgramData")
             .map(PathBuf::from)
             .ok_or("ProgramData is not set")?;
@@ -25,7 +27,7 @@ impl ServicePaths {
         Self::from_root(root)
     }
 
-    pub fn discover_console() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn discover_console() -> Result<Self, DynError> {
         if let Some(root) = env::var_os("AEROFORGE_SERVICE_ROOT").map(PathBuf::from) {
             return Self::from_root(root);
         }
@@ -36,7 +38,7 @@ impl ServicePaths {
         Self::from_root(local_app_data.join("AeroForge").join("ServiceConsole"))
     }
 
-    pub(crate) fn from_root(root: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn from_root(root: PathBuf) -> Result<Self, DynError> {
         let logs_dir = root.join("logs");
         let state_dir = root.join("state");
 
@@ -77,12 +79,16 @@ impl ServicePaths {
     /// CreateProcess and LoadLibrary search the application directory first, so
     /// without this any local user could drop a `powershell.exe` next to the
     /// service binary and have it run as SYSTEM.
-    pub fn harden_service_root(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn harden_service_root(&self) -> Result<(), DynError> {
         let root = self.service_root();
         let output = system32_command("icacls")
             .arg(&root)
             .args(["/inheritance:r", "/grant:r"])
-            .args(["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])
+            .args([
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+                "*S-1-5-32-545:(OI)(CI)RX",
+            ])
             .output()?;
         if !output.status.success() {
             return Err(format!(
@@ -152,11 +158,7 @@ const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
 /// rename a fresh, near-empty file over the generation that was just rotated out.
 static LOG_ROTATE_LOCK: Mutex<()> = Mutex::new(());
 
-pub fn write_log_line(
-    log_path: &Path,
-    level: &str,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn write_log_line(log_path: &Path, level: &str, message: &str) -> Result<(), DynError> {
     let line = format!(
         "{} [{}] {}\n",
         crate::workers::unix_timestamp(),
@@ -183,13 +185,12 @@ pub fn write_log_line(
 
 /// Write JSON/text snapshots atomically so readers never observe a partial file.
 /// Each call gets its own temp file so two writers of the same path never share one.
-pub fn write_text_atomically(
-    path: &Path,
-    content: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn write_text_atomically(path: &Path, content: &str) -> Result<(), DynError> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    let parent = path.parent().ok_or("snapshot path has no parent directory")?;
+    let parent = path
+        .parent()
+        .ok_or("snapshot path has no parent directory")?;
     fs::create_dir_all(parent)?;
 
     let temp_path = parent.join(format!(
@@ -212,10 +213,7 @@ pub fn write_text_atomically(
 }
 
 #[cfg(windows)]
-fn replace_file(
-    source: &Path,
-    target: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn replace_file(source: &Path, target: &Path) -> Result<(), DynError> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -256,10 +254,7 @@ fn replace_file(
 }
 
 #[cfg(not(windows))]
-fn replace_file(
-    source: &Path,
-    target: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn replace_file(source: &Path, target: &Path) -> Result<(), DynError> {
     fs::rename(source, target)?;
     Ok(())
 }
@@ -277,7 +272,10 @@ mod tests {
         write_log_line(&log_path, "INFO", "after rotation").expect("write");
 
         let rotated = temp.path().join("control-fan.log.1");
-        assert_eq!(fs::metadata(&rotated).expect("rotated").len(), LOG_ROTATE_BYTES);
+        assert_eq!(
+            fs::metadata(&rotated).expect("rotated").len(),
+            LOG_ROTATE_BYTES
+        );
         let fresh = fs::read_to_string(&log_path).expect("fresh log");
         assert!(fresh.ends_with("[INFO] after rotation\n"));
         assert!(fresh.len() < 128);
