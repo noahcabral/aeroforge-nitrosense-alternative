@@ -802,10 +802,15 @@ fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
     });
     let result_code = result as isize;
     if result_code <= 32 {
-        return Err(io::Error::other(format!(
-            "Windows refused to launch the setup installer with elevation. ShellExecuteW returned {result_code}."
-        ))
-        .into());
+        // SE_ERR_ACCESSDENIED is also what a cancelled UAC prompt returns.
+        let reason = if result_code == 5 {
+            "The administrator prompt was declined or blocked, so the update was not installed."
+        } else {
+            "Windows refused to launch the setup installer with elevation."
+        };
+        return Err(
+            io::Error::other(format!("{reason} ShellExecuteW returned {result_code}.")).into(),
+        );
     }
 
     Ok(())
