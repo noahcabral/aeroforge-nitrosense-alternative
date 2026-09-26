@@ -257,7 +257,7 @@ pub async fn show_thermal_warning_notification(
 }
 
 #[cfg(windows)]
-fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
+pub(crate) fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
     let title = normalize_notification_text(title, 80);
     let body = normalize_notification_text(body, 220);
     let script = build_windows_notification_script(&title, &body);
@@ -270,7 +270,7 @@ fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn show_desktop_notification(_title: &str, _body: &str) -> Result<(), String> {
+pub(crate) fn show_desktop_notification(_title: &str, _body: &str) -> Result<(), String> {
     Err("Windows notifications are only available on Windows builds.".into())
 }
 

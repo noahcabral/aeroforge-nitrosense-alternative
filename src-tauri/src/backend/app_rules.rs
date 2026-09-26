@@ -107,6 +107,7 @@ pub fn start(app: AppHandle) {
     thread::spawn(move || {
         // None = nothing applied yet this session; Some(None) = defaults applied.
         let mut applied: Option<Option<AppRule>> = None;
+        let mut failures = 0u32;
         loop {
             thread::sleep(POLL_INTERVAL);
             let rules = app.state::<AppRuleStore>().rules();
@@ -134,8 +135,20 @@ pub fn start(app: AppHandle) {
                         None => log::info!("App rules idle; restored default power and fan."),
                     }
                     applied = Some(wanted);
+                    failures = 0;
                 }
-                Err(error) => log::warn!("App rule apply failed: {error}"),
+                Err(error) => {
+                    log::warn!("App rule apply failed: {error}");
+                    failures += 1;
+                    // Early failures are usually the service still starting; speak up once
+                    // after ~30 s of retries, then stay quiet until an apply succeeds.
+                    if failures == 10 {
+                        let _ = super::commands::show_desktop_notification(
+                            "AeroForge app profile not applied",
+                            &format!("Power and fan could not be switched: {error}"),
+                        );
+                    }
+                }
             }
         }
     });
