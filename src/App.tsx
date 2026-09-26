@@ -53,12 +53,10 @@ import {
   stageUpdateDownload,
   startFanSpeedCalibration,
   type CapabilitySnapshot,
-  type ControlLayerStatus,
   type ControlSnapshot,
   type BackendPollSnapshot,
   type BootArtId,
   type CustomPowerBaseId,
-  type FeatureSupport,
   type HardwareReadinessSnapshot,
   type LiveControlSnapshot,
   type ServiceStatus,
@@ -139,6 +137,37 @@ import {
   parsePortableSettings,
   serializePortableSettings,
 } from './lib/settingsPortable'
+import {
+  buildControlSnapshotForPersistence,
+  buildCustomOcStrap,
+  builtInOcProfileSlots,
+  defaultCustomOcSlot,
+  defaultGpuOverclock,
+  fromBackendCurveSet,
+  fromBackendGpuTuningState,
+  fromBackendOcPreset,
+  mergeControlsWithLiveSnapshot,
+  nitroSenseExtremeGpuOverclock,
+  toBackendCurveSet,
+  toBackendGpuTuningState,
+  toBackendOcPreset,
+  type GpuTuningState,
+  type OcProfileSlot,
+} from './lib/controlMapping'
+import {
+  buildCpuPowerDashboardSummary,
+  buildCpuThermalSummary,
+  buildGpuPowerDashboardSummary,
+  buildHardwareReadinessTitle,
+  describeFeatureSupport,
+  describeTelemetrySource,
+  formatStageFitDetail,
+  formatStageFitValue,
+  hasUsableTelemetry,
+  summarizeLayerAttention,
+  type StageFitSnapshot,
+  type StageFitTarget,
+} from './lib/status'
 
 type ControlTab = 'home' | 'power' | 'fans' | 'personal' | 'debug'
 type PersonalSection = 'updates' | 'charge' | 'screen' | 'config' | 'boot' | 'backup'
@@ -169,21 +198,6 @@ type TrayControlErrorPayload = {
 type DragState = {
   target: CurveTarget
   index: number
-}
-
-type StageFitTarget = 'home' | 'power' | 'fans'
-
-type StageFitSnapshot = {
-  tab: StageFitTarget
-  scale: number
-  scaledHeight: number
-  naturalWidth: number
-  naturalHeight: number
-  availableWidth: number
-  availableHeight: number
-  windowWidth: number
-  windowHeight: number
-  updatedAt: string
 }
 
 type PowerProfile = {
@@ -231,23 +245,6 @@ type FinalizeCustomCurveOptions = {
   activateCustom?: boolean
   fanSyncLockState?: boolean
   statusMessage?: string
-}
-
-type GpuTuningState = {
-  coreClock: number
-  memoryClock: number
-  voltageOffset: number
-  powerLimit: number
-  tempLimit: number
-}
-
-type OcProfileSlot = {
-  id: string
-  label: string
-  name: string
-  strap: string
-  settings: GpuTuningState
-  isCustom?: boolean
 }
 
 type FanControlPreset = ControlSnapshot['fanPresets'][number]
@@ -417,84 +414,6 @@ const presetCurves: Record<FanProfile['id'], CurveSet> = {
   },
 }
 
-const defaultGpuOverclock: GpuTuningState = {
-  coreClock: 0,
-  memoryClock: 0,
-  voltageOffset: 0,
-  powerLimit: 100,
-  tempLimit: 83,
-}
-
-const nitroSenseExtremeGpuOverclock: GpuTuningState = {
-  coreClock: 100,
-  memoryClock: 200,
-  voltageOffset: 0,
-  powerLimit: 100,
-  tempLimit: 83,
-}
-
-const builtInOcProfileSlots: OcProfileSlot[] = [
-  {
-    id: 'silent-uv',
-    label: 'P1',
-    name: 'Acer Quiet',
-    strap: 'NitroSense quiet GPU tune',
-    settings: {
-      ...defaultGpuOverclock,
-    },
-  },
-  {
-    id: 'daily',
-    label: 'P2',
-    name: 'Acer Default',
-    strap: 'NitroSense default GPU tune',
-    settings: {
-      ...defaultGpuOverclock,
-    },
-  },
-  {
-    id: 'creator',
-    label: 'P3',
-    name: 'Acer Performance',
-    strap: 'NitroSense performance offset',
-    settings: {
-      ...nitroSenseExtremeGpuOverclock,
-    },
-  },
-  {
-    id: 'arena',
-    label: 'P4',
-    name: 'Acer Turbo',
-    strap: 'NitroSense turbo offset',
-    settings: {
-      ...nitroSenseExtremeGpuOverclock,
-    },
-  },
-]
-
-const defaultCustomOcSlot: OcProfileSlot = {
-  id: 'custom-user',
-  label: 'P5',
-  name: 'Custom Preset',
-  strap: 'User-saved GPU tuning',
-  settings: {
-    ...defaultGpuOverclock,
-  },
-  isCustom: true,
-}
-
-function buildCustomOcStrap(settings: GpuTuningState) {
-  const core = settings.coreClock >= 0 ? `+${settings.coreClock}` : `${settings.coreClock}`
-  const memory =
-    settings.memoryClock >= 0 ? `+${settings.memoryClock}` : `${settings.memoryClock}`
-  const voltage =
-    settings.voltageOffset >= 0
-      ? `+${settings.voltageOffset}mV`
-      : `${settings.voltageOffset}mV`
-
-  return `Core ${core} / Mem ${memory} / ${voltage}`
-}
-
 const navigationTabs: { id: ControlTab; label: string }[] = [
   { id: 'home', label: 'Home' },
   { id: 'power', label: 'Power' },
@@ -585,176 +504,6 @@ function waitForNextPaint() {
   })
 }
 
-function formatStageFitValue(snapshot: StageFitSnapshot | undefined) {
-  if (!snapshot) {
-    return null
-  }
-
-  return `${snapshot.tab} ${snapshot.scale.toFixed(3)} / ${Math.round(snapshot.scaledHeight)}px`
-}
-
-function formatStageFitDetail(snapshot: StageFitSnapshot | undefined) {
-  if (!snapshot) {
-    return null
-  }
-
-  return `natural ${Math.round(snapshot.naturalWidth)}x${Math.round(
-    snapshot.naturalHeight,
-  )}, available ${Math.round(snapshot.availableWidth)}x${Math.round(
-    snapshot.availableHeight,
-  )}, window ${snapshot.windowWidth}x${snapshot.windowHeight} at ${snapshot.updatedAt}`
-}
-
-function hasUsableTelemetry(snapshot: TelemetrySnapshot | null | undefined) {
-  if (!snapshot) {
-    return false
-  }
-
-  return Boolean(
-    snapshot.cpuTempC > 0 ||
-      snapshot.cpuTempAverageC != null ||
-      snapshot.gpuTempC > 0 ||
-      snapshot.systemTempC > 0 ||
-      snapshot.cpuUsagePercent > 0 ||
-      snapshot.gpuUsagePercent > 0 ||
-      snapshot.gpuMemoryUsagePercent != null ||
-      snapshot.gpuPowerLimitW != null ||
-      snapshot.gpuPowerDrawW != null ||
-      snapshot.cpuPackagePowerW != null ||
-      snapshot.cpuPl1W != null ||
-      snapshot.cpuPl2W != null ||
-      snapshot.cpuClockMhz > 0 ||
-      snapshot.gpuClockMhz > 0 ||
-      snapshot.cpuFanRpm > 0 ||
-      snapshot.gpuFanRpm > 0 ||
-      snapshot.batteryPercent > 0 ||
-      snapshot.cpuName ||
-      snapshot.gpuName ||
-      snapshot.systemModel,
-  )
-}
-
-function describeTelemetrySource(
-  serviceConnected: boolean,
-  telemetry: TelemetrySnapshot | null | undefined,
-) {
-  if (serviceConnected) {
-    return 'Service pipe'
-  }
-
-  return hasUsableTelemetry(telemetry) ? 'Cached service state' : 'No telemetry'
-}
-
-function describeFeatureSupport(
-  feature: FeatureSupport | null | undefined,
-  unsupportedDetail: string,
-  stagedDetail?: string,
-) {
-  if (!feature) {
-    return null
-  }
-
-  if (!feature.available) {
-    return unsupportedDetail
-  }
-
-  if (!feature.writable) {
-    return stagedDetail ?? unsupportedDetail
-  }
-
-  return null
-}
-
-function buildHardwareReadinessTitle(snapshot: HardwareReadinessSnapshot) {
-  if (snapshot.ready) {
-    return 'Hardware controls ready'
-  }
-  if (!snapshot.service.installed) {
-    return 'AeroForge service is not installed'
-  }
-  if (!snapshot.service.running) {
-    return 'AeroForge service is not running'
-  }
-  if (snapshot.wmi.disabled) {
-    return 'Windows Management Instrumentation is disabled'
-  }
-  if (!snapshot.wmi.service.running) {
-    return 'Windows Management Instrumentation is stopped'
-  }
-  if (!snapshot.acer.acerGamingWmiPresent) {
-    return 'Acer firmware control path is unavailable'
-  }
-
-  return 'Hardware controls need attention'
-}
-
-function formatLayerState(state: ControlLayerStatus['state']) {
-  switch (state) {
-    case 'applied':
-      return 'Applied'
-    case 'failed':
-      return 'Failed'
-    case 'skipped':
-      return 'Skipped'
-    case 'unavailable':
-      return 'Unavailable'
-    case 'unknown':
-      return 'Unknown'
-  }
-}
-
-function summarizeLayerAttention(statuses: ControlLayerStatus[] | null | undefined) {
-  const attention = (statuses ?? []).filter((status) =>
-    ['failed', 'unavailable', 'unknown'].includes(status.state),
-  )
-  if (attention.length === 0) {
-    return null
-  }
-
-  return attention.map((status) => `${status.label}: ${formatLayerState(status.state)}`).join(' | ')
-}
-
-function buildCpuThermalSummary(
-  lowestCoreTemp: number | null | undefined,
-  highestCoreTemp: number | null | undefined,
-  cpuUsage: number | null | undefined,
-) {
-  const thermalRange =
-    lowestCoreTemp != null && highestCoreTemp != null
-      ? `Low ${lowestCoreTemp}C / High ${highestCoreTemp}C`
-      : null
-  const usageLabel = cpuUsage != null ? `Usage ${cpuUsage}%` : null
-
-  return [thermalRange, usageLabel].filter(Boolean).join(' • ')
-}
-
-function buildPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-) {
-  const temperatureLabel = temperatureC != null ? `Temp ${temperatureC}C` : null
-  const usageLabel = usagePercent != null ? `Usage ${usagePercent}%` : null
-
-  return [temperatureLabel, usageLabel].filter(Boolean).join(' | ')
-}
-
-function buildCpuPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-  packagePowerW: number | null | undefined,
-  pl1W: number | null | undefined,
-  pl2W: number | null | undefined,
-) {
-  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const powerLabel = packagePowerW != null ? `Power ${formatWattValue(packagePowerW, 1)}` : null
-  const limitLabel = buildCpuPowerLimitLabel(
-    formatWattValue(pl1W, 1),
-    formatWattValue(pl2W, 1),
-  )
-
-  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
-}
-
 function buildPowerTargetFallback(
   profileId: PowerProfile['id'],
   customBase: CustomPowerBaseId,
@@ -795,19 +544,6 @@ function buildPowerTargetFallback(
   }
 }
 
-function buildGpuPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-  powerDrawW: number | null | undefined,
-  powerLimitW: number | null | undefined,
-) {
-  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const powerLabel = powerDrawW != null ? `Power ${formatWattValue(powerDrawW, 1)}` : null
-  const limitLabel = powerLimitW != null ? `Limit ${formatWattValue(powerLimitW, 1)}` : null
-
-  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
-}
-
 function getProcessorStateForPowerProfile(
   profileId: PowerProfile['id'],
   customProcessorState: { min: number; max: number },
@@ -837,162 +573,6 @@ function applyPowerControlSnapshot(
     min: controls.customProcessorState.minPercent,
     max: controls.customProcessorState.maxPercent,
   })
-}
-
-function fromBackendGpuTuningState(
-  tuning: ControlSnapshot['gpuTuning'],
-): GpuTuningState {
-  return {
-    coreClock: tuning.coreClockMhz,
-    memoryClock: tuning.memoryClockMhz,
-    voltageOffset: tuning.voltageOffsetMv,
-    powerLimit: tuning.powerLimitPercent,
-    tempLimit: tuning.tempLimitC,
-  }
-}
-
-function toBackendGpuTuningState(tuning: GpuTuningState): ControlSnapshot['gpuTuning'] {
-  return {
-    coreClockMhz: tuning.coreClock,
-    memoryClockMhz: tuning.memoryClock,
-    voltageOffsetMv: tuning.voltageOffset,
-    powerLimitPercent: tuning.powerLimit,
-    tempLimitC: tuning.tempLimit,
-  }
-}
-
-function fromBackendOcPreset(preset: ControlSnapshot['ocPresets'][number]): OcProfileSlot {
-  return {
-    id: preset.id,
-    label: preset.label,
-    name: preset.name,
-    strap: preset.strap,
-    settings: fromBackendGpuTuningState(preset.settings),
-    isCustom: preset.isCustom,
-  }
-}
-
-function toBackendOcPreset(slot: OcProfileSlot): ControlSnapshot['ocPresets'][number] {
-  return {
-    id: slot.id,
-    label: slot.label,
-    name: slot.name,
-    strap: slot.strap,
-    settings: toBackendGpuTuningState(slot.settings),
-    isCustom: Boolean(slot.isCustom),
-  }
-}
-
-function toBackendCurveSet(curves: CurveSet): ControlSnapshot['fanCurves'] {
-  const normalizedCurves = duplicateCurveSet(curves)
-  return {
-    cpu: normalizedCurves.cpu.map((point) => ({
-      tempC: point.temp,
-      speedPercent: point.speed,
-    })),
-    gpu: normalizedCurves.gpu.map((point) => ({
-      tempC: point.temp,
-      speedPercent: point.speed,
-    })),
-  }
-}
-
-function fromBackendCurveSet(curves: ControlSnapshot['fanCurves']): CurveSet {
-  return duplicateCurveSet({
-    cpu: curves.cpu.map((point) => ({
-      temp: point.tempC,
-      speed: point.speedPercent,
-    })),
-    gpu: curves.gpu.map((point) => ({
-      temp: point.tempC,
-      speed: point.speedPercent,
-    })),
-  })
-}
-
-function mergeControlsWithLiveSnapshot(
-  controls: ControlSnapshot,
-  liveControls: LiveControlSnapshot | null,
-): ControlSnapshot {
-  if (!liveControls) {
-    return controls
-  }
-
-  return {
-    ...controls,
-    customProcessorState:
-      controls.activePowerProfile === 'custom' &&
-      liveControls.activePowerProfile === 'custom' &&
-      liveControls.processorState
-        ? liveControls.processorState
-        : controls.customProcessorState,
-    customPowerBase: controls.customPowerBase,
-  }
-}
-
-function buildControlSnapshotForPersistence(input: {
-  activePowerProfile: PowerProfile['id']
-  activeFanProfile: FanProfile['id']
-  customProcessorState: { min: number; max: number }
-  customPowerBase: CustomPowerBaseId
-  gpuOverclock: GpuTuningState
-  ocProfileSlots: OcProfileSlot[]
-  activeOcSlot: string
-  ocApplyState: 'staged' | 'live'
-  ocTuningLocked: boolean
-  customCurves: CurveSet
-  fanPresets: FanControlPreset[]
-  powerPresets: PowerControlPreset[]
-  quickPresets: QuickControlPreset[]
-  fanSyncLockEnabled: boolean
-  smartChargingEnabled: boolean
-  processorStateControlEnabled: boolean
-  nvidiaTelemetryEnabled: boolean
-  keepUiPrewarmed: boolean
-  autoRefreshRateOnBatteryEnabled: boolean
-  autoRefreshRateRestoreHz: number | null
-  autoPerformanceEnabled: boolean
-  usbPowerEnabled: boolean
-  blueLightFilterEnabled: boolean
-  selectedBootArt: string
-  customBootFilename: string
-  updateChannel: UpdateChannel
-  checkForUpdatesOnLaunch: boolean
-}): ControlSnapshot {
-  return {
-    activePowerProfile: input.activePowerProfile,
-    activeFanProfile: input.activeFanProfile,
-    customProcessorState: {
-      minPercent: input.customProcessorState.min,
-      maxPercent: input.customProcessorState.max,
-    },
-    customPowerBase: input.customPowerBase,
-    gpuTuning: toBackendGpuTuningState(input.gpuOverclock),
-    ocPresets: input.ocProfileSlots.map(toBackendOcPreset),
-    activeOcSlot: input.activeOcSlot,
-    ocApplyState: input.ocApplyState,
-    ocTuningLocked: input.ocTuningLocked,
-    fanCurves: toBackendCurveSet(input.customCurves),
-    fanPresets: input.fanPresets,
-    powerPresets: input.powerPresets,
-    quickPresets: input.quickPresets,
-    fanSyncLockEnabled: input.fanSyncLockEnabled,
-    personalSettings: {
-      smartChargingEnabled: input.smartChargingEnabled,
-      usbPowerEnabled: input.usbPowerEnabled,
-      processorStateControlEnabled: input.processorStateControlEnabled,
-      nvidiaTelemetryEnabled: input.nvidiaTelemetryEnabled,
-      keepUiPrewarmed: input.keepUiPrewarmed,
-      blueLightFilterEnabled: input.blueLightFilterEnabled,
-      autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
-      autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
-      autoPerformanceEnabled: input.autoPerformanceEnabled,
-      selectedBootArt: input.selectedBootArt as ControlSnapshot['personalSettings']['selectedBootArt'],
-      customBootFilename: input.customBootFilename,
-      updateChannel: input.updateChannel,
-      checkForUpdatesOnLaunch: input.checkForUpdatesOnLaunch,
-    },
-  }
 }
 
 function applyBackendControlSnapshot(
