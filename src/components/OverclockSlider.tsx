@@ -6,8 +6,6 @@ type OverclockSliderProps = {
   max: number
   step: number
   disabled?: boolean
-  statusLabel?: string
-  note?: string
   onChange: (value: number) => void
 }
 
@@ -19,8 +17,6 @@ export function OverclockSlider({
   max,
   step,
   disabled = false,
-  statusLabel,
-  note,
   onChange,
 }: OverclockSliderProps) {
   return (
@@ -28,10 +24,9 @@ export function OverclockSlider({
       <div className="power-setting__header">
         <div className="power-setting__title">
           <span>{label}</span>
-          {statusLabel && <em className="power-setting__badge">{statusLabel}</em>}
         </div>
         <strong>
-          {value > 0 && unit !== 'C' ? '+' : ''}
+          {value > 0 ? '+' : ''}
           {value}
           {unit}
         </strong>
@@ -51,6 +46,7 @@ export function OverclockSlider({
       <input
         className="power-setting__input"
         type="number"
+        aria-label={`${label} (${unit})`}
         min={min}
         max={max}
         step={step}
@@ -58,8 +54,6 @@ export function OverclockSlider({
         disabled={disabled}
         onChange={(event) => onChange(Number(event.target.value))}
       />
-
-      {note && <small className="power-setting__note">{note}</small>}
     </label>
   )
 }

@@ -1578,19 +1578,6 @@
   font-size: 1.1rem;
 }
 
-.power-setting__badge {
-  padding: 0.15rem 0.45rem;
-  border-radius: 999px;
-  background: rgba(255, 115, 82, 0.14);
-  border: 1px solid rgba(255, 115, 82, 0.26);
-  color: #ffad96;
-  font-size: 0.68rem;
-  font-style: normal;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .power-setting--select {
   gap: 0.9rem;
 }
@@ -1641,12 +1628,6 @@
 .power-setting__slider:disabled,
 .power-setting__input:disabled {
   cursor: not-allowed;
-}
-
-.power-setting__note {
-  margin: -0.15rem 0 0;
-  color: var(--text-dim);
-  line-height: 1.45;
 }
 
 .power-oc-panel {
