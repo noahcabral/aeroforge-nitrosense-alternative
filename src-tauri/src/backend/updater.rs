@@ -52,7 +52,7 @@ impl UpdaterStore {
         let current = self
             .status
             .read()
-            .expect("updater status lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         apply_runtime_fields(current)
     }
@@ -61,7 +61,10 @@ impl UpdaterStore {
         let runtime_status = apply_runtime_fields(status);
         // Held across the file write so concurrent saves reach disk in the
         // same order they reach memory.
-        let mut guard = self.status.write().expect("updater status lock poisoned");
+        let mut guard = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::state::write_text_atomically(
             &self.status_file,
             &serde_json::to_string_pretty(&runtime_status)?,
@@ -445,7 +448,10 @@ fn github_client() -> Result<Client, DynError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("AeroForgeControlUpdater/0.11.0"),
+        HeaderValue::from_static(concat!(
+            "AeroForgeControlUpdater/",
+            env!("CARGO_PKG_VERSION")
+        )),
     );
     headers.insert(
         ACCEPT,

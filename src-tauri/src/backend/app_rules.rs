@@ -51,12 +51,18 @@ impl AppRuleStore {
     }
 
     pub fn rules(&self) -> Vec<AppRule> {
-        self.rules.read().expect("app rules lock poisoned").clone()
+        self.rules
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn save(&self, rules: Vec<AppRule>) -> Result<Vec<AppRule>, String> {
         let rules = normalize_rules(rules);
-        let mut current = self.rules.write().expect("app rules lock poisoned");
+        let mut current = self
+            .rules
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let json = serde_json::to_string_pretty(&rules).map_err(|error| error.to_string())?;
         write_text_atomically(&self.file, &json).map_err(|error| error.to_string())?;
         *current = rules;
@@ -70,7 +76,12 @@ fn normalize_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
     rules
         .into_iter()
         .filter_map(|mut rule| {
-            let name = rule.exe_name.trim().rsplit(['\\', '/']).next()?.to_lowercase();
+            let name = rule
+                .exe_name
+                .trim()
+                .rsplit(['\\', '/'])
+                .next()?
+                .to_lowercase();
             if name.is_empty() {
                 return None;
             }

@@ -65,14 +65,14 @@ impl BackendState {
     pub fn controls(&self) -> ControlSnapshot {
         self.controls
             .read()
-            .expect("backend controls lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
     pub fn telemetry(&self) -> TelemetrySnapshot {
         self.telemetry
             .read()
-            .expect("backend telemetry lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -105,7 +105,7 @@ impl BackendState {
         let mut controls = self
             .controls
             .write()
-            .expect("backend controls lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *controls = snapshot;
         persist_controls(&self.config_file, &controls).map_err(|error| error.to_string())?;
         Ok(controls.clone())

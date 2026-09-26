@@ -42,7 +42,9 @@ where
     let mut should_run_sync = false;
 
     {
-        let mut guard = cache.lock().expect("refresh cache lock poisoned");
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stale = guard
             .last_refresh()
             .map(|instant| instant.elapsed() >= refresh_interval)
@@ -60,7 +62,9 @@ where
 
     if should_run_sync {
         let result = query();
-        let mut guard = cache.lock().expect("refresh cache lock poisoned");
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         apply(&mut guard, &result);
         finalize_refresh(paths, component_name, &mut *guard, &result);
         return read(&guard);
@@ -72,13 +76,17 @@ where
         let component_name = component_name.to_string();
         std::thread::spawn(move || {
             let result = query();
-            let mut guard = cache.lock().expect("refresh cache lock poisoned");
+            let mut guard = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             apply(&mut guard, &result);
             finalize_refresh(&paths, &component_name, &mut *guard, &result);
         });
     }
 
-    let guard = cache.lock().expect("refresh cache lock poisoned");
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     read(&guard)
 }
 

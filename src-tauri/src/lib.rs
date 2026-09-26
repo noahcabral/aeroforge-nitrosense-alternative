@@ -5,7 +5,8 @@ use std::env;
 use backend::{
     app_rules::{self, AppRuleStore},
     blue_light, commands, nitro_guard, nitro_key, service_pipe, single_instance, smart_charge,
-    state::BackendState, tray,
+    state::BackendState,
+    tray,
 };
 use tauri::{Emitter, Manager};
 

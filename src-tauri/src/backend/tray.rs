@@ -396,7 +396,9 @@ fn should_open_from_tray_click(event: &TrayIconEvent) -> bool {
     }
 }
 
-pub(crate) fn default_processor_state_for_profile(profile_id: &PowerProfileId) -> ProcessorStateSettings {
+pub(crate) fn default_processor_state_for_profile(
+    profile_id: &PowerProfileId,
+) -> ProcessorStateSettings {
     match profile_id {
         PowerProfileId::BatteryGuard => ProcessorStateSettings {
             min_percent: 5,
