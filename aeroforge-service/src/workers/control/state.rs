@@ -14,7 +14,9 @@ pub fn load_snapshot(paths: &ServicePaths) -> Result<ControlSnapshot, DynError> 
     }
 
     let mut last_error: Option<String> = None;
+    let mut content_bad = false;
     for attempt in 0..6 {
+        content_bad = true;
         match fs::read_to_string(&path) {
             Ok(raw) if raw.trim().is_empty() => {
                 last_error = Some("control snapshot was empty".into());
@@ -29,6 +31,7 @@ pub fn load_snapshot(paths: &ServicePaths) -> Result<ControlSnapshot, DynError> 
                 return Ok(ControlSnapshot::default_snapshot("control-worker"));
             }
             Err(error) => {
+                content_bad = false;
                 last_error = Some(format!("control snapshot could not be read: {error}"));
             }
         }
@@ -36,6 +39,22 @@ pub fn load_snapshot(paths: &ServicePaths) -> Result<ControlSnapshot, DynError> 
         if attempt < 5 {
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    // Writes are atomic, so content still bad after retries is real corruption.
+    // Set it aside and start from defaults instead of failing every later write.
+    if content_bad && fs::rename(&path, path.with_extension("json.corrupt")).is_ok() {
+        let _ = crate::paths::write_log_line(
+            &paths.component_log("control-worker"),
+            "WARN",
+            &format!(
+                "{}; moved it to control.json.corrupt and reset to defaults.",
+                last_error
+                    .as_deref()
+                    .unwrap_or("control snapshot was unreadable")
+            ),
+        );
+        return Ok(ControlSnapshot::default_snapshot("control-worker"));
     }
 
     Err(last_error
@@ -212,4 +231,32 @@ fn persist_snapshot(paths: &ServicePaths, snapshot: &ControlSnapshot) -> Result<
 
 fn json_without_bom(raw: &str) -> &str {
     raw.trim_start_matches('\u{feff}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workers::control::models::PowerProfileId;
+
+    #[test]
+    fn corrupt_snapshot_is_quarantined_and_defaults_load() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = ServicePaths {
+            logs_dir: temp.path().join("logs"),
+            state_dir: temp.path().join("state"),
+        };
+        fs::create_dir_all(&paths.state_dir).expect("state dir");
+        let path = paths.worker_snapshot("control");
+        fs::write(&path, "{ not json").expect("corrupt");
+
+        let loaded = load_snapshot(&paths).expect("defaults");
+        assert!(matches!(
+            loaded.active_power_profile,
+            Some(PowerProfileId::Balanced)
+        ));
+        assert!(!path.exists());
+        assert!(path.with_extension("json.corrupt").exists());
+        persist_default_snapshot(&paths).expect("fresh default");
+        assert!(load_snapshot(&paths).is_ok());
+    }
 }
