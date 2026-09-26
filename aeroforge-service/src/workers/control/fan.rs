@@ -1715,8 +1715,9 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
 mod tests {
     use super::{
         calibration_overheat, clamp_custom_curve_fan_percent, classify_fan_verification_status,
-        cool_fan_curve_set, hottest_temperature, interpolate_curve_speed, quiet_auto_target_rpm,
-        sanitize_curve_points, CurrentTemperatures, FanCurvePoint, FanVerification,
+        cool_fan_curve_set, hottest_temperature, interpolate_curve_speed, next_quiet_auto_percent,
+        quiet_auto_target_rpm, quiet_auto_thermal_warning, sanitize_curve_points,
+        CurrentTemperatures, FanCurvePoint, FanVerification, QuietAutoFanMap,
         FAN_SPEED_CALIBRATION_ABORT_TEMP_C, QUIET_AUTO_ELEVATED_RPM, QUIET_AUTO_IDLE_RPM,
     };
     use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
@@ -1876,5 +1877,73 @@ mod tests {
             })
             .collect();
         assert!(sanitize_curve_points(flood).len() <= 32);
+    }
+
+    #[test]
+    fn quiet_auto_closed_loop_steps_clamps_and_remembers() {
+        let idle = QUIET_AUTO_IDLE_RPM;
+        let elevated = QUIET_AUTO_ELEVATED_RPM;
+        let mut map = QuietAutoFanMap::default();
+
+        // Target flip with nothing stored starts from the per-target default.
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, idle, None, true),
+            MIN_MANUAL_FAN_PERCENT
+        );
+        assert_eq!(next_quiet_auto_percent(&mut map, elevated, None, true), 8);
+
+        // Step size follows the RPM error: >700 +6, >350 +4, >120 +2, <-700 -4, <-220 -2.
+        map.last_percent = Some(10);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 701), false),
+            16
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 351), false),
+            20
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 121), false),
+            22
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated + 701), false),
+            18
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated + 221), false),
+            16
+        );
+        // Inside the band nothing moves, and that percent is remembered for this target.
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated), false),
+            16
+        );
+        assert_eq!(map.elevated_percent, Some(16));
+        // Missing readback holds the last request.
+        assert_eq!(next_quiet_auto_percent(&mut map, elevated, None, false), 16);
+
+        // Clamps: floor 2, idle cap 25, elevated cap 35.
+        map.last_percent = Some(34);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(0), false),
+            35
+        );
+        map.last_percent = Some(24);
+        assert_eq!(next_quiet_auto_percent(&mut map, idle, Some(0), false), 25);
+        map.last_percent = Some(3);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, idle, Some(idle + 2000), false),
+            2
+        );
+        // Out-of-band readings are never remembered.
+        assert_eq!(map.idle_percent, None);
+    }
+
+    #[test]
+    fn quiet_auto_thermal_warning_trips_at_ninety() {
+        assert!(quiet_auto_thermal_warning(Some(("cpu", 90)), 1).active);
+        assert!(!quiet_auto_thermal_warning(Some(("cpu", 89)), 1).active);
+        assert!(!quiet_auto_thermal_warning(None, 1).active);
     }
 }
