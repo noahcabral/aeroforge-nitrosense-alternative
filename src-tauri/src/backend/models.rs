@@ -147,7 +147,7 @@ pub struct ServiceHealResult {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PowerProfileId {
     BatteryGuard,
@@ -166,7 +166,7 @@ pub enum CustomPowerBaseId {
     Turbo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FanProfileId {
     Auto,

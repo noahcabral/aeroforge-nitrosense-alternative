@@ -104,7 +104,7 @@ fn terminate_nitro_processes() -> Result<usize, DynError> {
 }
 
 #[cfg(windows)]
-fn wide_to_string(buffer: &[u16]) -> String {
+pub(super) fn wide_to_string(buffer: &[u16]) -> String {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
     let length = buffer

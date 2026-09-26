@@ -3,6 +3,7 @@ pub mod backend;
 use std::env;
 
 use backend::{
+    app_rules::{self, AppRuleStore},
     blue_light, commands, nitro_guard, nitro_key, service_pipe, single_instance, smart_charge,
     state::BackendState, tray,
 };
@@ -45,7 +46,9 @@ pub fn run() {
             commands::apply_custom_fan_curves,
             commands::start_fan_speed_calibration,
             commands::cancel_fan_speed_calibration,
-            commands::apply_boot_logo
+            commands::apply_boot_logo,
+            commands::get_app_rules,
+            commands::save_app_rules
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -68,7 +71,7 @@ pub fn run() {
         })
         .setup(move |app| {
             let config_root = app.path().app_config_dir()?;
-            let backend_state = BackendState::load(config_root)
+            let backend_state = BackendState::load(config_root.clone())
                 .map_err(|error| -> Box<dyn std::error::Error> { error })?;
             let saved_blue_light_state = backend_state
                 .controls()
@@ -82,8 +85,10 @@ pub fn run() {
                 .controls()
                 .personal_settings
                 .nvidia_telemetry_enabled;
+            app.manage(AppRuleStore::load(&config_root));
             app.manage(backend_state);
             nitro_guard::start();
+            app_rules::start(app.handle().clone());
             nitro_key::start(app.handle().clone());
 
             if let Err(error) = tray::setup(app) {

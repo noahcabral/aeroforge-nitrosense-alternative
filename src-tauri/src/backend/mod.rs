@@ -1,3 +1,4 @@
+pub mod app_rules;
 pub mod blue_light;
 pub mod boot_logo;
 pub mod commands;

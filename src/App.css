@@ -2398,6 +2398,30 @@
   border-top: 1px solid rgba(236, 120, 46, 0.14);
 }
 
+.personal-setting-block.app-rules {
+  display: grid;
+  align-items: stretch;
+}
+
+.app-rules__row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) repeat(2, minmax(8rem, 12rem)) auto;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+form.app-rules__row {
+  grid-template-columns: 1fr auto;
+}
+
+.app-rules__exe {
+  display: flex;
+  align-items: center;
+  min-height: 3rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .charge-limit-chip {
   min-width: 5.5rem;
   padding: 0.95rem 1rem;

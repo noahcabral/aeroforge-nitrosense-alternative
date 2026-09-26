@@ -527,6 +527,20 @@ export async function applyCustomFanCurves(curves: FanCurveSet) {
   return invoke<FanControlApplyResult>('apply_custom_fan_curves', { curves })
 }
 
+export type AppRule = {
+  exeName: string
+  powerProfile: PowerProfileId
+  fanProfile: FanProfileId
+}
+
+export async function getAppRules() {
+  return invoke<AppRule[]>('get_app_rules')
+}
+
+export async function saveAppRules(rules: AppRule[]) {
+  return invoke<AppRule[]>('save_app_rules', { rules })
+}
+
 export async function startFanSpeedCalibration() {
   return invoke<FanSpeedCalibrationSnapshot>('start_fan_speed_calibration')
 }

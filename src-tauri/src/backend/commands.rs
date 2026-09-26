@@ -7,6 +7,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 
 use super::{
+    app_rules::{AppRule, AppRuleStore},
     blue_light, boot_logo, cpu_clock, display_refresh, hardware_readiness,
     models::{
         ApplyState, BackendBootstrap, BackendPollSnapshot, BackendPollTimings,
@@ -645,4 +646,17 @@ fn parse_boot_art_id(value: &str) -> super::models::BootArtId {
         "slate" => super::models::BootArtId::Slate,
         _ => super::models::BootArtId::Custom,
     }
+}
+
+#[tauri::command]
+pub fn get_app_rules(store: State<'_, AppRuleStore>) -> Vec<AppRule> {
+    store.rules()
+}
+
+#[tauri::command]
+pub fn save_app_rules(
+    rules: Vec<AppRule>,
+    store: State<'_, AppRuleStore>,
+) -> Result<Vec<AppRule>, String> {
+    store.save(rules)
 }

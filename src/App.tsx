@@ -9,6 +9,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
 import aeroforgeMark from './assets/aeroforge-mark.webp'
+import { AppRulesPanel } from './components/AppRulesPanel'
 import { BootSplashPreview } from './components/BootSplashPreview'
 import { CurveTemplateBar } from './components/CurveTemplateBar'
 import { FanCurvePanel } from './components/FanCurvePanel'
@@ -6219,6 +6220,8 @@ function App() {
                             <small>{fanCalibrationPointCount} recorded calibration points.</small>
                           </div>
                         </div>
+
+                        <AppRulesPanel powerOptions={powerProfiles} fanOptions={fanProfiles} />
 
                         <div className="personal-setting-block">
                           <div>
