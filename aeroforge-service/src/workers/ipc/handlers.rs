@@ -146,12 +146,12 @@ fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Res
     let _guard = TOKEN_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let token_path = paths.state_dir.join("ipc-write-token.txt");
+    let token_path = paths.ipc_write_token();
     if let Ok(existing) = fs::read_to_string(&token_path) {
         let existing = existing.trim();
         // Reclaim when the on-disk token is missing shape (corrupt install / partial wipe).
         if existing.is_empty() || !is_valid_write_token(existing) {
-            write_token_file(&token_path, token)?;
+            write_token_file(paths, token)?;
             return Ok(());
         }
         if constant_time_eq(existing.as_bytes(), token.as_bytes()) {
@@ -163,12 +163,22 @@ fn require_write_authorization(paths: &ServicePaths, token: Option<&str>) -> Res
         );
     }
 
-    write_token_file(&token_path, token)?;
+    write_token_file(paths, token)?;
     Ok(())
 }
 
-fn write_token_file(token_path: &Path, token: &str) -> Result<(), String> {
-    crate::paths::write_text_atomically(token_path, token).map_err(|error| error.to_string())
+fn write_token_file(paths: &ServicePaths, token: &str) -> Result<(), String> {
+    let token_path = paths.ipc_write_token();
+    crate::paths::write_text_atomically(&token_path, token).map_err(|error| error.to_string())?;
+    // Best effort: the service root ACL is re-applied to the pin at every start.
+    if let Err(error) = crate::paths::restrict_to_system_and_admins(&token_path) {
+        let _ = crate::paths::write_log_line(
+            &paths.service_log(),
+            "WARN",
+            &format!("Could not restrict IPC write token permissions: {error}"),
+        );
+    }
+    Ok(())
 }
 
 fn is_valid_write_token(token: &str) -> bool {

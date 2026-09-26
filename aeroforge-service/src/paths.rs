@@ -80,26 +80,48 @@ impl ServicePaths {
     /// without this any local user could drop a `powershell.exe` next to the
     /// service binary and have it run as SYSTEM.
     pub fn harden_service_root(&self) -> Result<(), DynError> {
-        let root = self.service_root();
-        let output = system32_command("icacls")
-            .arg(&root)
-            .args(["/inheritance:r", "/grant:r"])
-            .args([
+        restrict_acl(
+            &self.service_root(),
+            &[
                 "*S-1-5-18:(OI)(CI)F",
                 "*S-1-5-32-544:(OI)(CI)F",
                 "*S-1-5-32-545:(OI)(CI)RX",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "icacls on {} failed: {}",
-                root.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-            .into());
+            ],
+        )?;
+        // Also repairs installs whose pin was written before it was locked down.
+        let token = self.ipc_write_token();
+        if token.exists() {
+            restrict_to_system_and_admins(&token)?;
         }
         Ok(())
     }
+
+    pub fn ipc_write_token(&self) -> PathBuf {
+        self.state_dir.join("ipc-write-token.txt")
+    }
+}
+
+/// The IPC write-token pin must not inherit the service root's Users:RX, or
+/// any local account could read it and send hardware writes over the pipe.
+pub fn restrict_to_system_and_admins(path: &Path) -> Result<(), DynError> {
+    restrict_acl(path, &["*S-1-5-18:F", "*S-1-5-32-544:F"])
+}
+
+fn restrict_acl(path: &Path, grants: &[&str]) -> Result<(), DynError> {
+    let output = system32_command("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .args(grants)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "icacls on {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Absolute path of a Windows system directory file, e.g. `System32\powercfg.exe`.
@@ -262,6 +284,36 @@ fn replace_file(source: &Path, target: &Path) -> Result<(), DynError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_pin_acl_drops_users() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let token = temp.path().join("ipc-write-token.txt");
+        fs::write(&token, "pin").expect("seed token");
+
+        restrict_to_system_and_admins(&token).expect("icacls");
+
+        // /save emits SDDL with locale-free SID aliases (SY, BA, BU, AU).
+        let saved = temp.path().join("acl.txt");
+        let output = system32_command("icacls")
+            .arg(&token)
+            .arg("/save")
+            .arg(&saved)
+            .output()
+            .expect("icacls /save");
+        assert!(output.status.success());
+        let raw = fs::read(&saved).expect("read acl");
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let sddl = String::from_utf16_lossy(&units);
+        assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
+        assert!(
+            !sddl.contains(";;;BU)") && !sddl.contains(";;;AU)"),
+            "{sddl}"
+        );
+    }
 
     #[test]
     fn write_log_line_rotates_once_the_cap_is_reached() {
