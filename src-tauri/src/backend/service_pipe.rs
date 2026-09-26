@@ -602,7 +602,7 @@ pub fn ensure_service_running() -> Result<String, DynError> {
     match (service_state.as_deref(), worker_problem) {
         (Some("RUNNING"), Some(problem)) => {
             stop_service_best_effort()?;
-            wait_for_service_state("STOPPED", Duration::from_secs(8)).ok();
+            wait_for_service_state("STOPPED", Duration::from_secs(8))?;
             start_service()?;
             wait_for_service_state("RUNNING", Duration::from_secs(12))?;
             Ok(format!(
@@ -610,7 +610,11 @@ pub fn ensure_service_running() -> Result<String, DynError> {
             ))
         }
         (Some("RUNNING"), None) => Ok(format!("{SERVICE_NAME} is already running.")),
-        (Some(_), _) => {
+        (Some(state), _) => {
+            // sc start is refused (1061) while the previous instance is still stopping.
+            if state == "STOP_PENDING" {
+                wait_for_service_state("STOPPED", Duration::from_secs(8))?;
+            }
             start_service()?;
             wait_for_service_state("RUNNING", Duration::from_secs(12))?;
             Ok(format!("Started {SERVICE_NAME}."))
