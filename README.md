@@ -17,7 +17,8 @@ Laptop fan control and battery / power management for Acer Nitro hardware. Three
 - Fan profile switching
 - Smart charging toggle with an 80% charge cap preview
 - Personal > Config: fan speed calibration (0-100% in 5% steps with RPM readback) and the "Keep AeroForge Prewarmed" toggle
-- Boot splash image swapping with preset art and custom upload preview
+- Personal > Config > App Profiles: per-app power and fan modes that apply while a listed executable runs and revert to the saved defaults when it exits (polled every 3 s by the desktop shell, so only while AeroForge is running)
+- Boot splash image swapping with preset art and custom upload preview (the panel is currently disabled in the UI; the service write path is kept)
 
 ## Tech stack
 
@@ -204,7 +205,7 @@ Current read-only telemetry coverage:
 - Windows power status for battery percentage and AC state
 - Windows system CPU time sampling for CPU usage
 - standard Windows processor queries for current CPU clock
-- NVIDIA GPU temperature, utilization, clocks, and VRAM are read through NVML only while Windows reports active dedicated-GPU memory use, plus a short cooldown window. Windows counters are used only as the wake gate, not as displayed utilization. NVIDIA power draw and power-limit readback remain disabled by default to avoid the more aggressive polling path; maintainers can opt into that diagnostic power telemetry with `AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1`.
+- NVIDIA GPU temperature, utilization, clocks, and VRAM are read through NVML only while Windows reports active dedicated-GPU memory use, plus a short cooldown window. The wake gate is a CPU-only scan (every 5 s) of running processes' loaded modules for NVIDIA user-mode driver DLLs (D3D, OpenGL/Vulkan, CUDA), so an idle dGPU is never woken just to be polled. NVIDIA power draw and power-limit readback remain disabled by default to avoid the more aggressive polling path; maintainers can opt into that diagnostic power telemetry with `AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1`.
 - direct `AcerGamingFunction.GetGamingSysInfo` reads for CPU/GPU/system temperatures and CPU/GPU fan RPMs when available
 - direct HID status reads for CPU and GPU fan speed on supported Nitro hardware
 - ACPI thermal-zone data as fallback platform thermals on supported systems

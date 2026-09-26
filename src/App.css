@@ -2669,15 +2669,6 @@ form.app-rules__row {
   line-height: 1.45;
 }
 
-.chip {
-  padding: 0.65rem 0.95rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: var(--text-muted);
-  font-size: 0.88rem;
-}
-
 .metric-card {
   padding: 0.58rem 0.72rem;
   border-radius: 18px;
@@ -2822,12 +2813,6 @@ form.app-rules__row {
 
 .curve-chart__point:active {
   cursor: grabbing;
-}
-
-.curve-actions {
-  display: grid;
-  gap: 0.7rem;
-  margin-top: 0.5rem;
 }
 
 .button {
@@ -3014,13 +2999,6 @@ form.app-rules__row {
   display: flex;
   justify-content: space-between;
   color: var(--text-soft);
-}
-
-.branding-preview {
-  padding: 1rem;
-  border-radius: 24px;
-  background: linear-gradient(180deg, rgba(12, 16, 24, 0.96), rgba(7, 10, 15, 0.96));
-  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .branding-preview__placeholder,
