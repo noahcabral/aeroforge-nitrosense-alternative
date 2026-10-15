@@ -9,15 +9,9 @@ $bridgeExe = Join-Path $releaseDir 'aeroforge-update-bridge.exe'
 $setupExe = Join-Path $releaseDir "bundle\nsis\AeroForge Control_$version`_x64-setup.exe"
 
 function Resolve-CargoPath {
-  $fallbacks = @(
-    'C:\Users\noah\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe',
-    'C:\Users\noah\.cargo\bin\cargo.exe'
-  )
-
-  foreach ($candidate in $fallbacks) {
-    if (Test-Path -LiteralPath $candidate) {
-      return $candidate
-    }
+  # Explicit override first, then PATH, then the standard rustup install locations.
+  if ($env:AEROFORGE_CARGO -and (Test-Path -LiteralPath $env:AEROFORGE_CARGO)) {
+    return $env:AEROFORGE_CARGO
   }
 
   $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
@@ -25,7 +19,21 @@ function Resolve-CargoPath {
     return $cargoCommand.Source
   }
 
-  throw 'Unable to locate cargo.exe. Install or repair the Rust toolchain path first.'
+  $fallbacks = @()
+  if ($env:CARGO_HOME) {
+    $fallbacks += (Join-Path $env:CARGO_HOME 'bin\cargo.exe')
+  }
+  if ($env:USERPROFILE) {
+    $fallbacks += (Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe')
+  }
+
+  foreach ($candidate in $fallbacks) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  throw 'Unable to locate cargo.exe. Install the Rust toolchain from https://rustup.rs or set AEROFORGE_CARGO to the full path of cargo.exe.'
 }
 
 if (-not (Test-Path -LiteralPath $setupExe)) {

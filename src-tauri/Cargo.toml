@@ -1,6 +1,6 @@
 [package]
 name = "aeroforge-control"
-version = "0.16.3"
+version = "0.16.4"
 description = "Premium laptop fan control and power management desktop shell."
 authors = ["Noah"]
 license = ""
@@ -30,6 +30,7 @@ path = "src/bin/aeroforge_hotkey_helper.rs"
 [[bin]]
 name = "aeroforge-update-bridge"
 path = "src/bin/aeroforge_update_bridge.rs"
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
@@ -38,7 +39,7 @@ tauri-build = { version = "2.5.6", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.10.3", features = [] }
+tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 semver = "1.0"
@@ -53,6 +54,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Security_Cryptography",
+  "Win32_System_Com",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",

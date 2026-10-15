@@ -265,7 +265,7 @@ def main() -> int:
     parser.add_argument("--seconds", type=int, default=25, help="How long to trace before detaching")
     parser.add_argument(
         "--out",
-        default=r"C:\Users\noah\Desktop\afterburner-nvapi-runtime.json",
+        default="afterburner-nvapi-runtime.json",
         help="Path to write trace JSON",
     )
     args = parser.parse_args()

@@ -2,10 +2,8 @@
 use std::{
     collections::HashSet,
     env,
-    fs::OpenOptions,
-    io::Write,
     mem::size_of,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -14,6 +12,8 @@ use std::{
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use super::DynError;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -61,6 +61,8 @@ const DEBOUNCE_MS: u64 = 750;
 static NITRO_KEY_SENDER: OnceLock<Mutex<mpsc::Sender<()>>> = OnceLock::new();
 #[cfg(windows)]
 static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+static ON_PRESS: OnceLock<fn()> = OnceLock::new();
 
 pub fn start(app_handle: tauri::AppHandle) {
     #[cfg(windows)]
@@ -95,7 +97,7 @@ fn start_windows(app_handle: AppHandle) {
 
     let listener_log_path = log_path;
     thread::spawn(move || {
-        if let Err(error) = run_raw_input_loop(listener_log_path.clone()) {
+        if let Err(error) = run_raw_input_loop(notify_press, listener_log_path.clone()) {
             log::warn!("Nitro key raw-input listener stopped: {error}");
             write_listener_log(
                 &listener_log_path,
@@ -103,6 +105,15 @@ fn start_windows(app_handle: AppHandle) {
             );
         }
     });
+}
+
+#[cfg(windows)]
+fn notify_press() {
+    if let Some(sender) = NITRO_KEY_SENDER.get() {
+        if let Ok(sender) = sender.lock() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -181,7 +192,7 @@ fn current_directory_hotkey_helper_path() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn ensure_hotkey_helper_startup(helper_path: &PathBuf, log_path: &Option<PathBuf>) {
+fn ensure_hotkey_helper_startup(helper_path: &Path, log_path: &Option<PathBuf>) {
     let key_path = to_wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let mut run_key = std::ptr::null_mut();
     let create_result = unsafe {
@@ -267,10 +278,15 @@ fn bring_main_window_forward(app_handle: &AppHandle, log_path: &Option<PathBuf>)
     }
 }
 
+/// Runs a raw-input message loop on the calling thread and calls `on_press`
+/// for each debounced Nitro key press. One listener per process; the app and
+/// the hotkey helper share this so the HID plumbing lives in one place.
 #[cfg(windows)]
-fn run_raw_input_loop(
-    log_path: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_raw_input_loop(on_press: fn(), log_path: Option<PathBuf>) -> Result<(), DynError> {
+    if ON_PRESS.set(on_press).is_err() {
+        return Err("raw-input listener is already running in this process".into());
+    }
+
     let class_name = to_wide("AeroForgeNitroKeyRawInputWindow");
     let window_name = to_wide("AeroForge Nitro Key Listener");
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -426,8 +442,10 @@ fn add_registration(
 fn read_raw_input_device_info(
     handle: windows_sys::Win32::Foundation::HANDLE,
 ) -> Option<RID_DEVICE_INFO> {
-    let mut info = RID_DEVICE_INFO::default();
-    info.cbSize = size_of::<RID_DEVICE_INFO>() as u32;
+    let mut info = RID_DEVICE_INFO {
+        cbSize: size_of::<RID_DEVICE_INFO>() as u32,
+        ..Default::default()
+    };
     let mut info_size = info.cbSize;
     let result = unsafe {
         GetRawInputDeviceInfoW(
@@ -519,37 +537,21 @@ fn restore_native_window_to_foreground(hwnd: SysHwnd) -> String {
 
 #[cfg(windows)]
 fn handle_raw_input(lparam: LPARAM) {
-    let mut raw_size = 0u32;
-    let header_size = size_of::<RAWINPUTHEADER>() as u32;
-    let first_result = unsafe {
-        GetRawInputData(
-            lparam as _,
-            RID_INPUT,
-            std::ptr::null_mut(),
-            &mut raw_size,
-            header_size,
-        )
-    };
-    if first_result == u32::MAX || raw_size == 0 {
-        return;
-    }
-
-    let mut buffer = vec![0u8; raw_size as usize];
+    // Keyboard reports always fit a RAWINPUT; a HID report that does not is
+    // rejected by the size check and would be ignored below anyway. Reading
+    // into the struct itself also keeps the read aligned, unlike a byte buffer.
+    let mut raw_input = unsafe { std::mem::zeroed::<RAWINPUT>() };
+    let mut raw_size = size_of::<RAWINPUT>() as u32;
     let read_result = unsafe {
         GetRawInputData(
             lparam as _,
             RID_INPUT,
-            buffer.as_mut_ptr().cast(),
+            (&mut raw_input as *mut RAWINPUT).cast(),
             &mut raw_size,
-            header_size,
+            size_of::<RAWINPUTHEADER>() as u32,
         )
     };
-    if read_result == u32::MAX {
-        return;
-    }
-
-    let raw_input = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
-    if raw_input.header.dwType != RIM_TYPEKEYBOARD {
+    if read_result == u32::MAX || raw_input.header.dwType != RIM_TYPEKEYBOARD {
         return;
     }
 
@@ -563,10 +565,8 @@ fn handle_raw_input(lparam: LPARAM) {
         return;
     }
 
-    if let Some(sender) = NITRO_KEY_SENDER.get() {
-        if let Ok(sender) = sender.lock() {
-            let _ = sender.send(());
-        }
+    if let Some(on_press) = ON_PRESS.get() {
+        on_press();
     }
 }
 
@@ -591,23 +591,7 @@ fn to_wide(value: &str) -> Vec<u16> {
 
 #[cfg(windows)]
 fn write_listener_log(path: &Option<PathBuf>, message: &str) {
-    let Some(path) = path else {
-        return;
-    };
-
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(path) = path {
+        super::log_file::append_line(path, message);
     }
-
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", timestamp_seconds());
-    }
-}
-
-#[cfg(windows)]
-fn timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

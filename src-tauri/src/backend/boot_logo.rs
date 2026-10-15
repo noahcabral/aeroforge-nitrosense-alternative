@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::DynError;
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const MAX_BOOT_LOGO_BYTES: usize = 16 * 1024 * 1024;
@@ -11,7 +13,7 @@ pub fn save_uploaded_boot_logo(
     config_root: &Path,
     file_name: &str,
     image_base64: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PathBuf, DynError> {
     let payload = image_base64
         .split_once(',')
         .map(|(_, data)| data)
@@ -42,9 +44,7 @@ pub fn save_uploaded_boot_logo(
     Ok(output_path)
 }
 
-fn safe_boot_logo_extension(
-    file_name: &str,
-) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>> {
+fn safe_boot_logo_extension(file_name: &str) -> Result<&'static str, DynError> {
     let extension = Path::new(file_name)
         .extension()
         .and_then(|value| value.to_str())

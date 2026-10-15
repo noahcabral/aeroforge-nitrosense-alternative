@@ -115,7 +115,7 @@ Function VerifyAeroForgeCleanForInstall
   FileWrite $9 "  $$children = @(Get-ChildItem -LiteralPath $$InstallDir -Force -ErrorAction SilentlyContinue)$\r$\n"
   FileWrite $9 "  if ($$children.Count -gt 0) { [void]$$issues.Add('Install directory is not empty: ' + $$InstallDir) }$\r$\n"
   FileWrite $9 "}$\r$\n"
-  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $_ }; exit 20 }$\r$\n"
+  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $$_ }; exit 20 }$\r$\n"
   FileWrite $9 "exit 0$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\VerifyAeroForgeClean.ps1" "$INSTDIR"' $8
@@ -177,7 +177,7 @@ FunctionEnd
 Function RequireRebootForCleanInstall
   Call ScheduleAeroForgeInstallerAfterReboot
   ${If} $8 != 0
-    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not fully remove the previous install, and could not schedule setup to resume after reboot. Please manually uninstall AeroForge Control, reboot, then run this installer again.$\r$\n$\r$\nDiagnostic log:$\r$\n$COMMONAPPDATA\AeroForge\PendingInstall\resume-schedule.log"
+    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not fully remove the previous install, and could not schedule setup to resume after reboot. Please manually uninstall AeroForge Control, reboot, then run this installer again.$\r$\n$\r$\nDiagnostic log:$\r$\nC:\ProgramData\AeroForge\PendingInstall\resume-schedule.log"
     Abort
   ${EndIf}
 
@@ -372,18 +372,18 @@ Function InstallAeroForgeService
 
     aeroforge_pawnio_prompt_done:
     StrCmp $AeroForgeInstallPawnIO "1" 0 aeroforge_service_without_pawnio
-      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -InstallPawnIO -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -InstallPawnIO -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
       Goto aeroforge_service_installed
 
     aeroforge_service_without_pawnio:
-      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+      ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
 
     aeroforge_service_installed:
     ${If} $8 = 0
       Return
     ${EndIf}
 
-    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not install AeroForgeService. The service installer exited with code $8.$\r$\n$\r$\nOpen this log for the exact Windows service error:$\r$\n$COMMONAPPDATA\AeroForge\Service\logs\installer-service.log"
+    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not install AeroForgeService. The service installer exited with code $8.$\r$\n$\r$\nOpen this log for the exact Windows service error:$\r$\nC:\ProgramData\AeroForge\Service\logs\installer-service.log"
     Abort
 
   aeroforge_service_missing:
@@ -403,12 +403,12 @@ FunctionEnd
 
 Function un.UninstallAeroForgeService
   IfFileExists "$INSTDIR\Install-AeroForgeBundledService.ps1" 0 aeroforge_service_uninstall_fallback
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -Uninstall -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
+    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$INSTDIR\Install-AeroForgeBundledService.ps1" -Uninstall -ServiceSource "$INSTDIR\aeroforge-service.exe"' $8
     ${If} $8 = 0
       Return
     ${EndIf}
 
-    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not remove AeroForgeService. The service uninstaller exited with code $8.$\r$\n$\r$\nOpen this log for the exact Windows service error:$\r$\n$COMMONAPPDATA\AeroForge\Service\logs\installer-service.log"
+    MessageBox MB_ICONSTOP|MB_OK "AeroForge Control could not remove AeroForgeService. The service uninstaller exited with code $8.$\r$\n$\r$\nOpen this log for the exact Windows service error:$\r$\nC:\ProgramData\AeroForge\Service\logs\installer-service.log"
     Abort
 
   aeroforge_service_uninstall_fallback:
@@ -473,7 +473,7 @@ Function un.VerifyAeroForgeRemoved
   FileWrite $9 "foreach ($$path in @((Join-Path $$serviceRoot 'bin\aeroforge-service.exe'), (Join-Path $$serviceRoot 'drivers\IntelMSR.bin'), (Join-Path $$serviceRoot 'state'))) {$\r$\n"
   FileWrite $9 "  if (Test-Path -LiteralPath $$path) { [void]$$issues.Add('Service runtime residue remains: ' + $$path) }$\r$\n"
   FileWrite $9 "}$\r$\n"
-  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $_ }; exit 20 }$\r$\n"
+  FileWrite $9 "if ($$issues.Count -gt 0) { $$issues | ForEach-Object { Write-Output $$_ }; exit 20 }$\r$\n"
   FileWrite $9 "exit 0$\r$\n"
   FileClose $9
   ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\VerifyAeroForgeRemoved.ps1" "$INSTDIR"' $8

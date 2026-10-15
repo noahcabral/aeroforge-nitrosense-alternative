@@ -10,7 +10,7 @@ If AeroForge breaks, behaves oddly, or you want to report a bug or leave feedbac
 
 This GitHub repository is not monitored for support, bug reports, or pull requests. Please do not open pull requests; use the Discord above for feedback and issue reports.
 
-Premium-feeling frontend prototype for a laptop fan control and battery or power management application. The project now includes a Tauri desktop shell around the React UI and a Windows service for hardware-facing control paths.
+Laptop fan control and battery / power management for Acer Nitro hardware. Three tiers: a React UI, a Tauri desktop shell (Rust) that owns persistence and the tray, and a Windows service (Rust) that performs the hardware-facing WMI, HID, NVML and power writes.
 
 ## Included UI flows
 
@@ -18,14 +18,25 @@ Premium-feeling frontend prototype for a laptop fan control and battery or power
 - Power profile switching
 - Fan profile switching
 - Smart charging toggle with an 80% charge cap preview
-- Boot splash image swapping with preset art and custom upload preview
+- Personal > Config: fan speed calibration (0-100% in 5% steps with RPM readback) and the "Keep AeroForge Prewarmed" toggle
+- Personal > Config > App Profiles: per-app power and fan modes that apply while a listed executable runs and revert to the saved defaults when it exits (polled every 3 s by the desktop shell, so only while AeroForge is running)
+- Boot splash image swapping with preset art and custom upload preview (the panel is currently disabled in the UI; the service write path is kept)
 
 ## Tech stack
 
 - React 19
-- TypeScript
-- Vite
+- TypeScript (strict)
+- Vite + Vitest
 - Tauri 2
+- Rust (Tauri shell and Windows service)
+
+## Repository layout
+
+- `src/` React UI. `src/lib/` holds pure, tested modules (curve math, preset and settings import/export, formatting, keyboard shortcuts); `src/components/` holds presentational components.
+- `src-tauri/` Tauri shell: Tauri commands, control-state persistence, tray, updater, Nitro key helper.
+- `aeroforge-service/` Windows service: supervisor plus capability, persistence, telemetry and named-pipe IPC workers.
+- `scripts/` install, packaging, release and support-bundle scripts.
+- `third_party/` NVAPI headers and the bundled PawnIO runtime.
 
 ## Run locally
 
@@ -40,6 +51,17 @@ npm.cmd run dev
 npm.cmd run build
 ```
 
+## Tests and lint
+
+```powershell
+npm.cmd test
+npm.cmd run lint
+cargo test --manifest-path aeroforge-service/Cargo.toml
+cargo test --lib --manifest-path src-tauri/Cargo.toml
+```
+
+Frontend tests live beside the module they cover (`src/lib/*.test.ts`) and run in plain Node; `npm.cmd run test:watch` keeps them running while you edit.
+
 ## Run as a desktop app
 
 ```powershell
@@ -48,15 +70,29 @@ npm.cmd run tauri:dev
 
 ## Windows prerequisites for Tauri
 
+- Node.js 22.12 or newer
 - Rust toolchain via `rustup`
 - Visual Studio Build Tools with MSVC and Windows SDK components
 - WebView2 runtime
+
+The build hooks find `node.exe` and `cargo.exe` on `PATH` first, then in the standard installer locations. If either lives somewhere unusual, set `AEROFORGE_NODE` or `AEROFORGE_CARGO` to the full executable path.
+
+## Working from a cloud-synced folder
+
+If the checkout lives on Google Drive, OneDrive or a similar virtual filesystem:
+
+- Vite keeps its dependency cache in the OS temp directory (`AEROFORGE_VITE_CACHE_DIR` overrides it) and the dev server skips the Rust `target/` trees when watching, because walking tens of thousands of build artifacts through a cloud filesystem stalls the server.
+- `npm install` can fail with `EBADF` or `UNKNOWN: write` because cloud filesystems reject the way npm's tar extractor writes files. Run the install in a local folder with a copy of `package.json` and `package-lock.json`, then copy the new packages plus `node_modules/.package-lock.json` back.
+- Cargo prints "hard linking files in the incremental compilation cache failed" on cloud mounts and falls back to copying. It is harmless but slows rebuilds. The in-tree `target/` folders are still used because the packaging scripts and `tauri.conf.json` reference them by path.
+- Cloud mounts do not support directory junctions or symlinks, so `node_modules` cannot be redirected to local disk. For day-to-day development a local clone is faster; use the cloud folder or GitHub as the backup.
 
 ## Package the desktop app
 
 ```powershell
 npm.cmd run tauri:build
 ```
+
+This builds the frontend, the Windows service and the hotkey helper (`scripts/Run-BeforeBuild.ps1`) before compiling the shell, because Tauri validates the bundled resource executables at compile time. The installer lands in `src-tauri\target\release\bundle\nsis\`.
 
 ## Create a portable folder
 
@@ -67,7 +103,7 @@ npm.cmd run portable:build
 This creates:
 
 - `portable\AeroForge Control Portable\`
-- `portable\AeroForge-Control-Portable-0.16.3.zip`
+- `portable\AeroForge-Control-Portable-<version>.zip` (version taken from `package.json`)
 
 ## Install the Nitro key helper
 
@@ -113,14 +149,15 @@ NVIDIA command-line polling itself is waking the dGPU. Maintainers can add
 `-OutputRoot "C:\Temp\AeroForgeDebug"` to place the bundle somewhere other than
 the Desktop, or run `-ListOptions` to print every supported switch.
 
-## Notes for backend wiring later
+## Frontend architecture notes
 
-- `src/App.tsx` centralizes the mock state for all primary controls.
-- Fan curves are represented as temperature and speed points for both CPU and GPU zones.
-- Boot image upload uses `URL.createObjectURL()` for local preview only.
-- Charge-limit controls are safe UI state changes only.
-- `src-tauri/src/backend/` now contains the typed backend contract, capability snapshot, control snapshot, telemetry snapshot, and persistence-backed desktop state models exposed through Tauri commands.
-- The backend now persists AeroForge-owned control state to disk and routes power, GPU tuning, and fan writes through the AeroForge service.
+- `src/App.tsx` is still the single owner of UI state for every tab; it talks to the Tauri shell through `src/lib/backend.ts`, which is the typed contract mirrored by `src-tauri/src/backend/models.rs`.
+- Fan curves are temperature/speed points for the CPU and GPU zones. `src/lib/curves.ts` owns the invariants (sorted, at least 2C apart, non-decreasing speed) and every curve that reaches the service passes through `normalizeCurvePoints`.
+- Boot image upload uses `URL.createObjectURL()` for the preview; `src/lib/bootLogo.ts` renders the firmware payload.
+- `src-tauri/src/backend/` holds the typed backend contract, capability snapshot, control snapshot, telemetry snapshot, and persistence-backed desktop state exposed through Tauri commands. Power, GPU tuning, and fan writes are routed through the AeroForge service.
+- Hooks under `src/hooks/` own self-contained state: `useToasts`, `usePerformanceLog`, `useFrameStats` (rAF driver over the tested `lib/frameSampler`), `useDebugLog`. Remaining split, in order: the backend polling/bootstrap loop into a hook; each tab's JSX into a component under `src/components/`; the fan-curve editor owning drag state so a drag only re-renders the chart.
+- Backend responses are applied to UI state only for the fields that command is authoritative for (`applyAuthoritativeSnapshot`); bootstrap, tray events and settings import apply the whole snapshot. Persistence is gated until the bootstrap snapshot has loaded so an early click cannot write defaults over saved presets.
+- Stage auto-scaling (`measureStageFit`) currently runs only in dev builds; the gate looks like a debugging leftover and is left as-is pending a decision.
 
 ## AeroForge Windows service
 
@@ -135,6 +172,7 @@ Current shape:
 - a supervisor snapshot at `ProgramData\\AeroForge\\Service\\state\\supervisor.json`
 - local IPC over `\\.\pipe\AeroForgeService` instead of localhost ports
 - no dependency on Acer localhost services or other vendor IPC
+- the desktop app gives up on a pipe request after 60 seconds and reports the stuck service instead of leaving the UI waiting
 
 Current fan control path:
 
@@ -142,9 +180,12 @@ Current fan control path:
 - the service calls `ROOT\\WMI` `AcerGamingFunction` directly on supported Acer Nitro hardware
 - `SetGamingFanBehavior` receives Acer behavior inputs for auto, max, and mixed custom fan profiles
 - `SetGamingFanSpeed` receives per-fan target inputs for CPU and GPU fan percentages
-- when Custom is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
+- when Custom or Cool is active, the service re-reads telemetry and reapplies the curve-derived CPU/GPU speed targets every 5 seconds
+- Quiet Auto: with the BatteryGuard power profile and Auto fan profile both active, the service runs a closed-loop fan policy from the calibration table every 5 seconds and raises a thermal warning (surfaced as a Windows notification) when the CPU or GPU runs hot; if no temperature can be read it holds the last target rather than dropping to idle
+- fan speed calibration steps every 5% target, waits for RPM to settle, and writes the percent-to-RPM table into the service config; the previous fan profile is restored afterwards, on cancel, or if a step fails; a step is aborted if the CPU or GPU reaches 95 °C while the fans are held at the test speed
 - RPM movement is verified separately through direct Acer sensor telemetry rather than trusting the write call alone
 - no NitroSense websocket, AcerAgentService PSSDK socket, or PredatorSense pipe dependency is used for AeroForge fan writes
+- service component logs under `%ProgramData%\AeroForge\Service\logs` rotate to `<name>.log.1` at 4 MB, so the periodic fan workers cannot grow them without bound
 
 Current power control path:
 
@@ -166,11 +207,19 @@ Current read-only telemetry coverage:
 - Windows power status for battery percentage and AC state
 - Windows system CPU time sampling for CPU usage
 - standard Windows processor queries for current CPU clock
-- NVIDIA GPU temperature, utilization, clocks, and VRAM are read through NVML only while Windows reports active dedicated-GPU memory use, plus a short cooldown window. Windows counters are used only as the wake gate, not as displayed utilization. NVIDIA power draw and power-limit readback remain disabled by default to avoid the more aggressive polling path; maintainers can opt into that diagnostic power telemetry with `AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1`.
+- NVIDIA GPU temperature, utilization, clocks, and VRAM are read through NVML only while Windows reports active dedicated-GPU memory use, plus a short cooldown window. The wake gate is a CPU-only scan (every 5 s) of running processes' loaded modules for NVIDIA user-mode driver DLLs (D3D, OpenGL/Vulkan, CUDA), so an idle dGPU is never woken just to be polled. NVIDIA power draw and power-limit readback remain disabled by default to avoid the more aggressive polling path; maintainers can opt into that diagnostic power telemetry with `AEROFORGE_ENABLE_NVIDIA_TELEMETRY=1`.
 - direct `AcerGamingFunction.GetGamingSysInfo` reads for CPU/GPU/system temperatures and CPU/GPU fan RPMs when available
 - direct HID status reads for CPU and GPU fan speed on supported Nitro hardware
 - ACPI thermal-zone data as fallback platform thermals on supported systems
 - independent CPU-package and system-board thermal separation is still incomplete until AeroForge adds deeper EC or ACPI decoding
+
+Trust model:
+
+- The service runs as SYSTEM. `C:\ProgramData\AeroForge\Service` is restricted to SYSTEM and Administrators (full) and Users (read/execute); both installers set this and the service re-applies it at startup. Child tools (`powercfg`, `powershell`, `reg`, `nvidia-smi`) and `nvapi64.dll` are launched or loaded by absolute System32 path so nothing dropped next to the service binary can shadow them.
+- The named pipe grants Authenticated Users read/write, so on a shared machine any signed-in local user can change fan and power state. The write token in `state\ipc-write-token.txt` is world-readable and does not change that; it exists to keep the desktop app and service in sync, not as an access control. Restricting control to one account would need the token created service-side with a per-user ACL, or the pipe SDDL narrowed.
+- Every mutating pipe request, including fan calibration start/cancel, carries the write token; requests without it are rejected.
+- Requests are capped at 32 MB, concurrent clients at 16, fan curves at 32 points; the pipe name is never shared with another process.
+- Updates are verified against the release's SHA256 sidecar (integrity in transit, not authenticity). Signing releases (minisign/Authenticode with a pinned key) is the missing piece for authenticity. The updater currently follows `noahcabral/aeroforge-nitrosense-alternative`; `scripts/Publish-GitHubRelease.ps1` publishes to this checkout's `origin`.
 
 Clean-room boundary:
 

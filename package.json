@@ -1,12 +1,17 @@
 {
   "name": "aeroforge-control",
   "private": true,
-  "version": "0.16.3",
+  "version": "0.16.4",
   "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
@@ -37,6 +42,7 @@
     "globals": "^17.4.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.0",
-    "vite": "^8.0.4"
+    "vite": "^8.0.4",
+    "vitest": "^5.0.0"
   }
 }

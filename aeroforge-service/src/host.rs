@@ -18,6 +18,7 @@ use windows_service::{
     service_dispatcher,
 };
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers,
@@ -27,8 +28,8 @@ define_windows_service!(ffi_service_main, service_main);
 
 const SERVICE_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn run_console_host() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let paths = ServicePaths::discover()?;
+pub fn run_console_host() -> Result<(), DynError> {
+    let paths = ServicePaths::discover_console()?;
     let shutdown_log = paths.clone();
     write_log_line(
         &paths.service_log(),
@@ -68,26 +69,33 @@ pub fn run_console_host() -> Result<(), Box<dyn std::error::Error + Send + Sync>
     Ok(())
 }
 
-pub fn run_windows_service_host(
-    service_name: &'static str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run_windows_service_host(service_name: &'static str) -> Result<(), DynError> {
     service_dispatcher::start(service_name, ffi_service_main)?;
     Ok(())
 }
 
 fn service_main(_arguments: Vec<OsString>) {
-    if let Err(error) = run_service() {
-        let _ = eprintln!("AeroForge service failed: {error}");
-    }
+    // stderr goes nowhere under the SCM; run_service logs its own failures.
+    let _ = run_service();
 }
 
-fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_service() -> Result<(), DynError> {
     let paths = ServicePaths::discover()?;
-    write_log_line(
+    // Log writes are best effort here: a full or locked log must not keep the
+    // service (and with it fan/power control) from starting or stopping.
+    let _ = write_log_line(
         &paths.service_log(),
         "INFO",
         "Starting AeroForge Windows service host.",
-    )?;
+    );
+    // Idempotent; also repairs installs made before the installer set this ACL.
+    if let Err(error) = paths.harden_service_root() {
+        let _ = write_log_line(
+            &paths.service_log(),
+            "WARN",
+            &format!("Could not restrict service directory permissions: {error}"),
+        );
+    }
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_signal = stop_flag.clone();
@@ -116,42 +124,56 @@ fn run_service() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         process_id: None,
     })?;
 
-    let host = workers::ServiceHost::new(paths.clone(), stop_flag.clone());
-    let join_handles = host.start()?;
+    let host = workers::ServiceHost::new(paths.clone(), stop_flag);
+    let result = host.start().and_then(|join_handles| {
+        let _ = shutdown_rx.recv();
 
-    let _ = shutdown_rx.recv();
+        let _ = write_log_line(
+            &paths.service_log(),
+            "INFO",
+            "Stop signal received. Shutting down workers.",
+        );
 
-    write_log_line(
-        &paths.service_log(),
-        "INFO",
-        "Stop signal received. Shutting down workers.",
-    )?;
+        status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::StopPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 1,
+            wait_hint: SERVICE_WORKER_SHUTDOWN_TIMEOUT,
+            process_id: None,
+        })?;
 
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::StopPending,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 1,
-        wait_hint: SERVICE_WORKER_SHUTDOWN_TIMEOUT,
-        process_id: None,
-    })?;
+        workers::wake_ipc_listener();
 
-    workers::wake_ipc_listener();
+        wait_for_worker_shutdown(join_handles, SERVICE_WORKER_SHUTDOWN_TIMEOUT, &paths);
+        Ok(())
+    });
 
-    wait_for_worker_shutdown(join_handles, SERVICE_WORKER_SHUTDOWN_TIMEOUT, &paths);
-
+    // Once the handler is registered the SCM expects a Stopped report either way;
+    // returning early would leave it waiting and then log 1067 with no detail.
+    let exit_code = match &result {
+        Ok(()) => ServiceExitCode::Win32(0),
+        Err(error) => {
+            let _ = write_log_line(
+                &paths.service_log(),
+                "ERROR",
+                &format!("Service host failed: {error}"),
+            );
+            ServiceExitCode::ServiceSpecific(1)
+        }
+    };
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
+        exit_code,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
     })?;
 
-    Ok(())
+    result
 }
 
 fn wait_for_worker_shutdown(

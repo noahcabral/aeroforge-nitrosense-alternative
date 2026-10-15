@@ -1,5 +1,7 @@
 use std::{thread, time::Duration};
 
+use super::DynError;
+
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(windows)]
 const NITRO_ROOT: &str = r"c:\program files\nitrosense\";
@@ -33,7 +35,7 @@ fn sweep_once() {
 }
 
 #[cfg(windows)]
-fn terminate_nitro_processes() -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+fn terminate_nitro_processes() -> Result<usize, DynError> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         System::{
@@ -102,7 +104,7 @@ fn terminate_nitro_processes() -> Result<usize, Box<dyn std::error::Error + Send
 }
 
 #[cfg(windows)]
-fn wide_to_string(buffer: &[u16]) -> String {
+pub(super) fn wide_to_string(buffer: &[u16]) -> String {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 
     let length = buffer

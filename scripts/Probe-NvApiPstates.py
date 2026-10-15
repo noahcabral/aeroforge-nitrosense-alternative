@@ -225,7 +225,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read NVAPI Pstates20 information for local GPU correlation.")
     parser.add_argument(
         "--out",
-        default=r"C:\Users\noah\Desktop\nvapi-pstates-probe.json",
+        default="nvapi-pstates-probe.json",
         help="Path to write probe JSON",
     )
     args = parser.parse_args()

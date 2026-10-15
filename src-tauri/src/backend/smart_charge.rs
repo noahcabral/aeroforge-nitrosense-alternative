@@ -1,13 +1,10 @@
-use std::{
-    fs, io,
-    os::windows::process::CommandExt,
-    path::Path,
-    process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use super::now_unix;
+use super::DynError;
+use std::{fs, io, path::Path, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector as NativeTlsConnector;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -15,15 +12,16 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 
-type DynError = Box<dyn std::error::Error + Send + Sync>;
+use super::process::hidden_command;
 
 const CARE_CENTER_URL: &str = "wss://127.0.0.1:4343/";
 const CARE_CENTER_AUTH_DATA: &str = "OO24T5iPpUKxfxjPZW4ddo3uGeIJXC+ZbJPzCNGMBenvnZ7J9xQjpykAdgAL1a9HocmZsOHxisitF9B0t7msCayFnVDZA79rADTRjUNWQaLEQA6wSpLrLo/Fu/gHH7BM";
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\CC\settings.json";
 const CARE_CENTER_TIMEOUT: Duration = Duration::from_secs(5);
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SmartChargeApplyPayload {
     pub enabled: bool,
     pub battery_healthy: u8,
@@ -31,13 +29,36 @@ pub struct SmartChargeApplyPayload {
     pub detail: String,
 }
 
-pub async fn sync_saved_state(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
-    apply_smart_charging(enabled).await
+/// Service first (it already holds the write token and needs no elevation);
+/// the desktop BatteryControl/Care Center paths only when the service could
+/// not do it. Every caller wants exactly this order, so it lives once.
+pub async fn apply_with_desktop_fallback(enabled: bool) -> Result<SmartChargeApplyPayload, String> {
+    let service = tauri::async_runtime::spawn_blocking(move || {
+        super::service_pipe::apply_smart_charging(enabled)
+    })
+    .await
+    .map_err(|error| format!("Smart charging apply worker failed: {error}"))?;
+    match service {
+        Ok(applied) => Ok(applied),
+        Err(service_error) => apply_smart_charging(enabled)
+            .await
+            .map_err(|desktop_error| {
+                format!(
+                    "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
+                )
+            }),
+    }
 }
 
-pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
-    match apply_battery_control_direct(enabled) {
-        Ok(payload) => return Ok(payload),
+async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
+    // The direct path spawns PowerShell for a few seconds; keep that off the
+    // async runtime so other commands are not stalled behind it.
+    let direct =
+        tauri::async_runtime::spawn_blocking(move || apply_battery_control_direct(enabled))
+            .await
+            .map_err(|error| io::Error::other(format!("BatteryControl worker failed: {error}")))?;
+    match direct {
+        Ok(payload) => Ok(payload),
         Err(direct_error) => {
             let fallback = apply_care_center_smart_charging(enabled).await;
             match fallback {
@@ -46,14 +67,12 @@ pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPaylo
                         "Direct BatteryControl path was unavailable: {direct_error}. {}",
                         payload.detail
                     );
-                    return Ok(payload);
+                    Ok(payload)
                 }
-                Err(fallback_error) => {
-                    return Err(io::Error::other(format!(
+                Err(fallback_error) => Err(io::Error::other(format!(
                         "Direct BatteryControl path failed: {direct_error}. Acer Care Center fallback failed: {fallback_error}"
                     ))
-                    .into());
-                }
+                .into()),
             }
         }
     }
@@ -61,9 +80,11 @@ pub async fn apply_smart_charging(enabled: bool) -> Result<SmartChargeApplyPaylo
 
 fn apply_battery_control_direct(enabled: bool) -> Result<SmartChargeApplyPayload, DynError> {
     let requested_health_status = if enabled { 1u8 } else { 0u8 };
-    let script = r#"
-$status = [byte]$args[0]
-$battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
+    // `-Command` appends extra arguments to the script text instead of binding
+    // them to $args (which left $status at 0), so splice the value in directly.
+    let script = format!(
+        "$status = [byte]{requested_health_status}\n{}",
+        r#"$battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
 function Emit-AeroForgeResult {
@@ -345,17 +366,16 @@ foreach ($attempt in $functionDataAttempts) {
 }
 
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
-"#;
+"#
+    );
 
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
+    let output = hidden_command("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
-            &requested_health_status.to_string(),
+            &script,
         ])
         .output()?;
 
@@ -764,17 +784,6 @@ fn persist_battery_healthy(battery_healthy: u8) -> Result<(), DynError> {
         .ok_or_else(|| io::Error::other("Care Center settings.json was not a JSON object."))?;
     object.insert("BatteryHealthy".into(), Value::from(battery_healthy));
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(path, serde_json::to_string_pretty(&root)?)?;
+    super::state::write_text_atomically(path, &serde_json::to_string_pretty(&root)?)?;
     Ok(())
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

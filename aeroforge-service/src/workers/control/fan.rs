@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::{env, io, thread, time::Duration};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::unix_timestamp,
@@ -14,9 +15,9 @@ use super::{
     },
     models::{
         AppliedFanControlSnapshot, ApplyCustomFanCurvesRequest, ApplyFanProfileRequest,
-        ControlSnapshot, FanCurvePoint, FanCurveSet, FanProfileId, FanSpeedCalibrationPoint,
-        FanSpeedCalibrationSnapshot, PowerProfileId, QuietAutoFanCalibration, QuietAutoFanMap,
-        QuietAutoThermalWarning,
+        ControlLayerStatus, ControlSnapshot, FanCurvePoint, FanCurveSet, FanProfileId,
+        FanSpeedCalibrationPoint, FanSpeedCalibrationSnapshot, PowerProfileId,
+        QuietAutoFanCalibration, QuietAutoFanMap, QuietAutoThermalWarning,
     },
     nvidia_power::{format_power_limit_delta, read_power_readback},
     state,
@@ -32,13 +33,20 @@ const QUIET_AUTO_ELEVATED_MAX_PERCENT: u8 = 35;
 const QUIET_AUTO_ELEVATED_DEFAULT_PERCENT: u8 = 8;
 const QUIET_AUTO_RPM_LOW_TOLERANCE: u16 = 120;
 const QUIET_AUTO_RPM_HIGH_TOLERANCE: u16 = 220;
-const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
+/// Firmware reports 0 for an idle/absent sensor (dGPU powered down, first reads after
+/// resume) and sentinels above this for "unsupported"; neither is a temperature.
+const QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C: u8 = 120;
+pub(super) const FAN_SPEED_CALIBRATION_SETTLE_SECS: u64 = 20;
 const FAN_SPEED_CALIBRATION_CANCEL_POLL_MS: u64 = 250;
+/// Calibration holds the fans at fixed (including 0%) speeds for 20 s a step; abort and
+/// restore the profile instead of letting a loaded machine cook through the low steps.
+const FAN_SPEED_CALIBRATION_ABORT_TEMP_C: u8 = 95;
+const FAN_SPEED_CALIBRATION_THERMAL_POLL_MS: u64 = 2000;
 
 pub fn apply_fan_profile(
     paths: &ServicePaths,
     request: ApplyFanProfileRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     match request.profile_id {
         FanProfileId::Auto => apply_firmware_wmi_fan_control(
             paths,
@@ -48,6 +56,7 @@ pub fn apply_fan_profile(
             None,
             "Auto fan profile requested through ROOT\\WMI AcerGamingFunction.",
         ),
+        FanProfileId::Cool => apply_cool_fan_profile(paths, false),
         FanProfileId::Max => apply_firmware_wmi_fan_control(
             paths,
             FanProfileId::Max,
@@ -63,38 +72,148 @@ pub fn apply_fan_profile(
     }
 }
 
+pub fn apply_cool_fan_profile(
+    paths: &ServicePaths,
+    quiet_success_log: bool,
+) -> Result<AppliedFanControlSnapshot, DynError> {
+    apply_curve_backed_fan_control(
+        paths,
+        FanProfileId::Cool,
+        cool_fan_curve_set(),
+        quiet_success_log,
+    )
+}
+
 pub fn apply_custom_fan_curves(
     paths: &ServicePaths,
     request: ApplyCustomFanCurvesRequest,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let curves = sanitize_fan_curves(request.curves);
-    let temperatures = read_current_temperatures(paths);
-    let cpu_temp = temperatures.cpu_temp_c.unwrap_or(65);
-    let gpu_temp = temperatures.gpu_temp_c.unwrap_or(65);
-    let requested_cpu_speed = interpolate_curve_speed(&curves.cpu, cpu_temp);
-    let requested_gpu_speed = interpolate_curve_speed(&curves.gpu, gpu_temp);
-    let cpu_speed = clamp_custom_curve_fan_percent(requested_cpu_speed, cpu_temp);
-    let gpu_speed = clamp_custom_curve_fan_percent(requested_gpu_speed, gpu_temp);
+) -> Result<AppliedFanControlSnapshot, DynError> {
+    apply_curve_backed_fan_control(
+        paths,
+        FanProfileId::Custom,
+        request.curves,
+        request.quiet_success_log,
+    )
+}
 
+fn apply_curve_backed_fan_control(
+    paths: &ServicePaths,
+    profile_id: FanProfileId,
+    curves: FanCurveSet,
+    quiet_success_log: bool,
+) -> Result<AppliedFanControlSnapshot, DynError> {
+    let targets = resolve_curve_backed_targets(paths, profile_id, curves);
+    apply_curve_backed_targets(paths, targets, quiet_success_log)
+}
+
+pub(crate) fn apply_curve_backed_targets(
+    paths: &ServicePaths,
+    targets: CurveBackedFanTargets,
+    quiet_success_log: bool,
+) -> Result<AppliedFanControlSnapshot, DynError> {
+    let profile_label = curve_backed_profile_label(&targets.profile_id);
     let context = format!(
-        "Custom fan curves compressed to current-temperature targets: CPU {cpu_temp}C -> requested {requested_cpu_speed}% / applied {cpu_speed}%, GPU {gpu_temp}C -> requested {requested_gpu_speed}% / applied {gpu_speed}%. Zero-percent targets are allowed only at 50C or below; above that AeroForge keeps the {MIN_MANUAL_FAN_PERCENT}% firmware safety floor. AcerGamingFunction accepts direct per-fan target speeds, not a full curve table."
+        "{profile_label} compressed to current-temperature targets: CPU {}C -> requested {}% / applied {}%, GPU {}C -> requested {}% / applied {}%. Zero-percent targets are allowed only at 50C or below; above that AeroForge keeps the {MIN_MANUAL_FAN_PERCENT}% firmware safety floor. AcerGamingFunction accepts direct per-fan target speeds, not a full curve table.",
+        targets.cpu_temp_c,
+        targets.requested_cpu_speed,
+        targets.cpu_speed_percent,
+        targets.gpu_temp_c,
+        targets.requested_gpu_speed,
+        targets.gpu_speed_percent,
     );
 
     apply_custom_wmi_fan_control(
         paths,
-        curves,
-        Some(cpu_speed),
-        Some(gpu_speed),
+        targets.profile_id,
+        targets.curves,
+        Some(targets.cpu_speed_percent),
+        Some(targets.gpu_speed_percent),
         &context,
-        !request.quiet_success_log,
+        !quiet_success_log,
     )
+}
+
+pub(crate) struct CurveBackedFanTargets {
+    pub profile_id: FanProfileId,
+    pub curves: FanCurveSet,
+    pub cpu_speed_percent: u8,
+    pub gpu_speed_percent: u8,
+    cpu_temp_c: u8,
+    gpu_temp_c: u8,
+    requested_cpu_speed: u8,
+    requested_gpu_speed: u8,
+}
+
+pub(crate) fn resolve_curve_backed_targets(
+    paths: &ServicePaths,
+    profile_id: FanProfileId,
+    curves: FanCurveSet,
+) -> CurveBackedFanTargets {
+    let curves = sanitize_fan_curves(curves);
+    let temperatures = read_current_temperatures(paths);
+    let cpu_temp_c = temperatures.cpu_temp_c.unwrap_or(65);
+    let gpu_temp_c = temperatures.gpu_temp_c.unwrap_or(65);
+    let requested_cpu_speed = interpolate_curve_speed(&curves.cpu, cpu_temp_c);
+    let requested_gpu_speed = interpolate_curve_speed(&curves.gpu, gpu_temp_c);
+    let cpu_speed_percent = clamp_custom_curve_fan_percent(requested_cpu_speed, cpu_temp_c);
+    let gpu_speed_percent = clamp_custom_curve_fan_percent(requested_gpu_speed, gpu_temp_c);
+
+    CurveBackedFanTargets {
+        profile_id,
+        curves,
+        cpu_speed_percent,
+        gpu_speed_percent,
+        cpu_temp_c,
+        gpu_temp_c,
+        requested_cpu_speed,
+        requested_gpu_speed,
+    }
+}
+
+pub(crate) fn cool_fan_curve_set() -> FanCurveSet {
+    let points = vec![
+        FanCurvePoint {
+            temp_c: 30,
+            speed_percent: 20,
+        },
+        FanCurvePoint {
+            temp_c: 50,
+            speed_percent: 35,
+        },
+        FanCurvePoint {
+            temp_c: 65,
+            speed_percent: 55,
+        },
+        FanCurvePoint {
+            temp_c: 75,
+            speed_percent: 78,
+        },
+        FanCurvePoint {
+            temp_c: 82,
+            speed_percent: 100,
+        },
+    ];
+
+    FanCurveSet {
+        cpu: points.clone(),
+        gpu: points,
+    }
+}
+
+fn curve_backed_profile_label(profile_id: &FanProfileId) -> &'static str {
+    match profile_id {
+        FanProfileId::Cool => "Cool fan mode's built-in adaptive curve",
+        FanProfileId::Custom => "Custom fan curves",
+        FanProfileId::Auto => "Auto fan profile",
+        FanProfileId::Max => "Max fan profile",
+    }
 }
 
 pub fn apply_quiet_auto_fan_policy(
     paths: &ServicePaths,
     previous: &ControlSnapshot,
     log_success: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     let now = unix_timestamp();
     let verification_before = build_fan_verification();
     let temperatures = read_current_temperatures(paths);
@@ -216,7 +335,7 @@ pub fn apply_quiet_auto_fan_policy(
                 "tempC": temp_c,
             })),
             "calibration": calibration.clone(),
-            "thermalWarning": warning.clone(),
+            "thermalWarning": warning,
         },
         "behavior": behavior_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
@@ -237,11 +356,18 @@ pub fn apply_quiet_auto_fan_policy(
         write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
     }
 
+    let layer_statuses = vec![
+        classify_behavior_sequence_status(&behavior_results),
+        classify_speed_status(&speed_results),
+        classify_fan_verification_status(&verification_after),
+    ];
+
     Ok(AppliedFanControlSnapshot {
         profile_id: FanProfileId::Auto,
         curves: None,
         cpu_speed_percent: Some(cpu_speed_percent),
         gpu_speed_percent: Some(gpu_speed_percent),
+        layer_statuses,
         readback,
         quiet_auto_fan_calibration: Some(calibration),
         quiet_auto_thermal_warning: Some(warning),
@@ -253,7 +379,7 @@ pub fn apply_quiet_auto_fan_policy(
 pub fn run_fan_speed_calibration(
     paths: &ServicePaths,
     cancel_requested: &dyn Fn() -> bool,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     let initial_snapshot = state::load_snapshot(paths)?;
     let started_at = unix_timestamp();
     let mut calibration = FanSpeedCalibrationSnapshot {
@@ -270,18 +396,61 @@ pub fn run_fan_speed_calibration(
     state::persist_fan_speed_calibration(paths, calibration.clone())?;
 
     let strategy = select_custom_fan_strategy(paths);
+    match run_fan_speed_calibration_steps(paths, &strategy, &mut calibration, cancel_requested) {
+        Ok(CalibrationStop::Completed) => {}
+        Ok(CalibrationStop::Canceled(percent)) => {
+            return finish_canceled_calibration(paths, &initial_snapshot, calibration, percent);
+        }
+        Err(error) => {
+            // Never leave the fans latched at a calibration step; restore before surfacing the failure.
+            if let Err(restore_error) =
+                restore_fan_profile_after_calibration(paths, &initial_snapshot)
+            {
+                let _ = write_log_line(
+                    &paths.component_log("control-fan"),
+                    "ERROR",
+                    &format!(
+                        "Fan profile restore after calibration failure also failed: {restore_error}"
+                    ),
+                );
+            }
+            return Err(error);
+        }
+    }
+
+    let restore_detail = restore_fan_profile_after_calibration(paths, &initial_snapshot)?;
+    let completed_at = unix_timestamp();
+    calibration.running = false;
+    calibration.current_percent = None;
+    calibration.updated_at_unix = Some(completed_at);
+    calibration.completed_at_unix = Some(completed_at);
+    calibration.last_error = None;
+    calibration.status = format!(
+        "Fan speed calibration complete: recorded {} points. {restore_detail}",
+        calibration.points.len()
+    );
+    state::persist_fan_speed_calibration(paths, calibration.clone())?;
+    Ok(calibration)
+}
+
+enum CalibrationStop {
+    Completed,
+    Canceled(Option<u8>),
+}
+
+fn run_fan_speed_calibration_steps(
+    paths: &ServicePaths,
+    strategy: &CustomFanStrategy,
+    calibration: &mut FanSpeedCalibrationSnapshot,
+    cancel_requested: &dyn Fn() -> bool,
+) -> Result<CalibrationStop, DynError> {
     if cancel_requested() {
-        return finish_canceled_calibration(paths, &initial_snapshot, calibration, None);
+        return Ok(CalibrationStop::Canceled(None));
     }
 
     for percent in (0u8..=100).step_by(5) {
         if cancel_requested() {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
+            return Ok(CalibrationStop::Canceled(Some(percent)));
         }
 
         calibration.current_percent = Some(percent);
@@ -289,24 +458,10 @@ pub fn run_fan_speed_calibration(
         calibration.status = format!("Testing {percent}% fan speed with firmware latch.");
         state::persist_fan_speed_calibration(paths, calibration.clone())?;
 
-        apply_calibration_speed_target(paths, &strategy, percent)?;
+        apply_calibration_speed_target(paths, strategy, percent)?;
 
-        if cancel_requested() {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
-        }
-
-        if !settle_fan_speed_calibration(cancel_requested) {
-            return finish_canceled_calibration(
-                paths,
-                &initial_snapshot,
-                calibration,
-                Some(percent),
-            );
+        if cancel_requested() || !settle_fan_speed_calibration(paths, percent, cancel_requested)? {
+            return Ok(CalibrationStop::Canceled(Some(percent)));
         }
 
         let verification = build_fan_verification();
@@ -325,26 +480,14 @@ pub fn run_fan_speed_calibration(
         state::persist_fan_speed_calibration(paths, calibration.clone())?;
     }
 
-    let restore_detail = restore_fan_profile_after_calibration(paths, &initial_snapshot)?;
-    let completed_at = unix_timestamp();
-    calibration.running = false;
-    calibration.current_percent = None;
-    calibration.updated_at_unix = Some(completed_at);
-    calibration.completed_at_unix = Some(completed_at);
-    calibration.last_error = None;
-    calibration.status = format!(
-        "Fan speed calibration complete: recorded {} points. {restore_detail}",
-        calibration.points.len()
-    );
-    state::persist_fan_speed_calibration(paths, calibration.clone())?;
-    Ok(calibration)
+    Ok(CalibrationStop::Completed)
 }
 
 fn apply_calibration_speed_target(
     paths: &ServicePaths,
     strategy: &CustomFanStrategy,
     percent: u8,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     write_log_line(
         &paths.component_log("control-fan"),
         "INFO",
@@ -418,7 +561,7 @@ fn reject_failed_calibration_speed_results(
     percent: u8,
     phase: &str,
     speed_results: &[super::acer_wmi::AcerWmiMethodResult],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     if let Some(rejected) = speed_results
         .iter()
         .find(|result| !wmi_output_accepted(result))
@@ -433,12 +576,28 @@ fn reject_failed_calibration_speed_results(
     Ok(())
 }
 
-fn settle_fan_speed_calibration(cancel_requested: &dyn Fn() -> bool) -> bool {
+/// Ok(false) means canceled; Err means the machine overheated at this step.
+fn settle_fan_speed_calibration(
+    paths: &ServicePaths,
+    percent: u8,
+    cancel_requested: &dyn Fn() -> bool,
+) -> Result<bool, DynError> {
     let total_ms = FAN_SPEED_CALIBRATION_SETTLE_SECS.saturating_mul(1000);
     let mut waited_ms = 0;
     while waited_ms < total_ms {
         if cancel_requested() {
-            return false;
+            return Ok(false);
+        }
+        // The telemetry worker refreshes its snapshot every 333 ms; reading that file is
+        // far cheaper than another WMI round trip per poll.
+        if waited_ms % FAN_SPEED_CALIBRATION_THERMAL_POLL_MS == 0 {
+            if let Some((sensor, temp_c)) = calibration_overheat(&read_current_temperatures(paths))
+            {
+                return Err(io::Error::other(format!(
+                    "Fan speed calibration aborted at {percent}%: {sensor} reached {temp_c}C (limit {FAN_SPEED_CALIBRATION_ABORT_TEMP_C}C). Let the machine cool or close the load, then run it again."
+                ))
+                .into());
+            }
         }
 
         let remaining_ms = total_ms.saturating_sub(waited_ms);
@@ -447,7 +606,22 @@ fn settle_fan_speed_calibration(cancel_requested: &dyn Fn() -> bool) -> bool {
         waited_ms = waited_ms.saturating_add(sleep_ms);
     }
 
-    !cancel_requested()
+    Ok(!cancel_requested())
+}
+
+fn calibration_overheat(temperatures: &CurrentTemperatures) -> Option<(&'static str, u8)> {
+    let mut hottest = None;
+    consider_temperature(
+        &mut hottest,
+        "CPU",
+        plausible_temp_c(temperatures.cpu_temp_c),
+    );
+    consider_temperature(
+        &mut hottest,
+        "GPU",
+        plausible_temp_c(temperatures.gpu_temp_c),
+    );
+    hottest.filter(|(_, temp_c)| *temp_c >= FAN_SPEED_CALIBRATION_ABORT_TEMP_C)
 }
 
 fn finish_canceled_calibration(
@@ -455,7 +629,7 @@ fn finish_canceled_calibration(
     initial_snapshot: &ControlSnapshot,
     mut calibration: FanSpeedCalibrationSnapshot,
     percent: Option<u8>,
-) -> Result<FanSpeedCalibrationSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<FanSpeedCalibrationSnapshot, DynError> {
     let restore_detail = restore_fan_profile_after_calibration(paths, initial_snapshot)?;
     let completed_at = unix_timestamp();
     calibration.running = false;
@@ -479,7 +653,7 @@ fn finish_canceled_calibration(
 fn restore_fan_profile_after_calibration(
     paths: &ServicePaths,
     previous: &ControlSnapshot,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String, DynError> {
     match previous
         .active_fan_profile
         .clone()
@@ -509,6 +683,10 @@ fn restore_fan_profile_after_calibration(
                 },
             )?;
             Ok(format!("Restored Max fan mode. {}", applied.detail))
+        }
+        FanProfileId::Cool => {
+            let applied = apply_cool_fan_profile(paths, false)?;
+            Ok(format!("Restored Cool fan mode. {}", applied.detail))
         }
         FanProfileId::Custom => {
             if let Some(curves) = previous.active_fan_curves.clone() {
@@ -553,7 +731,7 @@ fn apply_firmware_wmi_fan_control(
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     context: &str,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     write_log_line(
         &paths.component_log("control-fan"),
         "INFO",
@@ -576,6 +754,7 @@ fn apply_firmware_wmi_fan_control(
     let power_after = read_power_readback(paths);
     let power_detail = format_power_limit_delta(&power_before, &power_after);
 
+    let verification = build_fan_verification();
     let readback = Some(json!({
         "backend": "acer-gaming-wmi",
         "namespace": "ROOT\\WMI",
@@ -597,14 +776,14 @@ fn apply_firmware_wmi_fan_control(
                 "accepted": wmi_output_accepted(result),
             })
         }).collect::<Vec<_>>(),
-        "verification": build_fan_verification(),
+        "verification": verification,
         "nvidiaPower": {
-            "before": power_before.clone(),
-            "after": power_after.clone(),
+            "before": power_before,
+            "after": power_after,
         },
     }));
 
-    let verification = build_fan_verification_detail();
+    let verification_detail = verification.detail();
     let detail = format!(
         "{} {}",
         build_apply_detail(
@@ -613,10 +792,15 @@ fn apply_firmware_wmi_fan_control(
             behavior_input,
             cpu_speed_percent,
             gpu_speed_percent,
-            &verification,
+            &verification_detail,
         ),
         power_detail
     );
+    let layer_statuses = vec![
+        classify_wmi_method_status("fan-behavior", "Fan Behavior", &behavior_result),
+        classify_speed_status(&speed_results),
+        classify_fan_verification_status(&verification),
+    ];
     write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
 
     Ok(AppliedFanControlSnapshot {
@@ -624,6 +808,7 @@ fn apply_firmware_wmi_fan_control(
         curves,
         cpu_speed_percent,
         gpu_speed_percent,
+        layer_statuses,
         readback,
         quiet_auto_fan_calibration: None,
         quiet_auto_thermal_warning: None,
@@ -634,18 +819,20 @@ fn apply_firmware_wmi_fan_control(
 
 fn apply_custom_wmi_fan_control(
     paths: &ServicePaths,
+    profile_id: FanProfileId,
     curves: FanCurveSet,
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
     context: &str,
     log_success: bool,
-) -> Result<AppliedFanControlSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedFanControlSnapshot, DynError> {
     if log_success {
         write_log_line(
             &paths.component_log("control-fan"),
             "INFO",
             &format!(
-                "Applying custom fan curve by direct speed target. {}",
+                "Applying {} fan curve by direct speed target. {}",
+                profile_id.as_str(),
                 context
             ),
         )?;
@@ -708,6 +895,7 @@ fn apply_custom_wmi_fan_control(
         speed_results.extend(reinforcement);
     }
 
+    let verification = build_fan_verification();
     let readback = Some(json!({
         "backend": "acer-gaming-wmi",
         "namespace": "ROOT\\WMI",
@@ -717,27 +905,36 @@ fn apply_custom_wmi_fan_control(
         "strategyReason": strategy.reason,
         "behavior": behavior_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
         "speeds": speed_results.iter().map(wmi_result_json).collect::<Vec<_>>(),
-        "verification": build_fan_verification(),
+        "verification": verification,
     }));
 
-    let verification = build_fan_verification_detail();
+    let verification_detail = verification.detail();
     let detail = build_custom_apply_detail(
+        &profile_id,
         context,
         &strategy,
         &behavior_results,
         cpu_speed_percent,
         gpu_speed_percent,
-        &verification,
+        &verification_detail,
     );
+    let layer_statuses = vec![
+        classify_behavior_sequence_status(&behavior_results),
+        classify_speed_status(&speed_results),
+        classify_fan_verification_status(&verification),
+    ];
     if log_success {
         write_log_line(&paths.component_log("control-fan"), "INFO", &detail)?;
     }
 
+    // Only Custom owns the persisted curve set; Cool must not overwrite the user's saved curves.
+    let curves = matches!(profile_id, FanProfileId::Custom).then_some(curves);
     Ok(AppliedFanControlSnapshot {
-        profile_id: FanProfileId::Custom,
-        curves: Some(curves),
+        profile_id,
+        curves,
         cpu_speed_percent,
         gpu_speed_percent,
+        layer_statuses,
         readback,
         quiet_auto_fan_calibration: None,
         quiet_auto_thermal_warning: None,
@@ -751,7 +948,7 @@ fn apply_custom_behavior_latch(
     strategy: &CustomFanStrategy,
     behavior_input: u64,
     phase: &str,
-) -> Result<super::acer_wmi::AcerWmiMethodResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<super::acer_wmi::AcerWmiMethodResult, DynError> {
     let result = apply_fan_behavior(behavior_input)?;
     if !wmi_output_accepted(&result) {
         write_log_line(
@@ -769,7 +966,7 @@ fn apply_custom_behavior_latch(
 fn apply_direct_speed_targets(
     cpu_speed_percent: Option<u8>,
     gpu_speed_percent: Option<u8>,
-) -> Result<Vec<super::acer_wmi::AcerWmiMethodResult>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<super::acer_wmi::AcerWmiMethodResult>, DynError> {
     let mut speed_results = Vec::new();
     if let Some(cpu_speed) = cpu_speed_percent {
         speed_results.push(apply_fan_speed(FAN_SELECTOR_CPU, cpu_speed)?);
@@ -784,6 +981,7 @@ fn behavior_input_for_profile(profile_id: &FanProfileId) -> u64 {
     match profile_id {
         FanProfileId::Auto => FAN_BEHAVIOR_AUTO,
         FanProfileId::Max => FAN_BEHAVIOR_MAX,
+        FanProfileId::Cool => FAN_BEHAVIOR_CUSTOM_MIXED,
         FanProfileId::Custom => FAN_BEHAVIOR_CUSTOM_MIXED,
     }
 }
@@ -810,6 +1008,73 @@ fn wmi_result_json(result: &super::acer_wmi::AcerWmiMethodResult) -> Value {
     })
 }
 
+fn classify_wmi_method_status(
+    id: &'static str,
+    label: &'static str,
+    result: &super::acer_wmi::AcerWmiMethodResult,
+) -> ControlLayerStatus {
+    let detail = format!(
+        "{} input {} returned gmOutput {:?}.",
+        result.method, result.input, result.output
+    );
+    if wmi_output_accepted(result) {
+        ControlLayerStatus::applied(id, label, detail)
+    } else {
+        ControlLayerStatus::failed(id, label, detail)
+    }
+}
+
+fn classify_behavior_sequence_status(
+    results: &[super::acer_wmi::AcerWmiMethodResult],
+) -> ControlLayerStatus {
+    if results.is_empty() {
+        return ControlLayerStatus::skipped(
+            "fan-behavior",
+            "Fan Behavior",
+            "No SetGamingFanBehavior write was needed for this custom strategy.",
+        );
+    }
+    if let Some(rejected) = results.iter().find(|result| !wmi_output_accepted(result)) {
+        return classify_wmi_method_status("fan-behavior", "Fan Behavior", rejected);
+    }
+    ControlLayerStatus::applied(
+        "fan-behavior",
+        "Fan Behavior",
+        format!(
+            "{} SetGamingFanBehavior writes were accepted.",
+            results.len()
+        ),
+    )
+}
+
+fn classify_speed_status(results: &[super::acer_wmi::AcerWmiMethodResult]) -> ControlLayerStatus {
+    if results.is_empty() {
+        return ControlLayerStatus::skipped(
+            "fan-speed-targets",
+            "Fan Speed Targets",
+            "No explicit per-fan speed target was requested.",
+        );
+    }
+    if let Some(rejected) = results.iter().find(|result| !wmi_output_accepted(result)) {
+        return classify_wmi_method_status("fan-speed-targets", "Fan Speed Targets", rejected);
+    }
+    let detail = results
+        .iter()
+        .map(|result| format!("{} input {}", result.method, result.input))
+        .collect::<Vec<_>>()
+        .join("; ");
+    ControlLayerStatus::applied("fan-speed-targets", "Fan Speed Targets", detail)
+}
+
+fn classify_fan_verification_status(verification: &FanVerification) -> ControlLayerStatus {
+    let detail = verification.detail();
+    if verification.telemetry_available {
+        ControlLayerStatus::applied("fan-rpm-readback", "Fan RPM Readback", detail)
+    } else {
+        ControlLayerStatus::unavailable("fan-rpm-readback", "Fan RPM Readback", detail)
+    }
+}
+
 fn build_apply_detail(
     profile_id: &str,
     context: &str,
@@ -831,6 +1096,7 @@ fn build_apply_detail(
 }
 
 fn build_custom_apply_detail(
+    profile_id: &FanProfileId,
     context: &str,
     strategy: &CustomFanStrategy,
     behavior_results: &[super::acer_wmi::AcerWmiMethodResult],
@@ -863,7 +1129,8 @@ fn build_custom_apply_detail(
     };
 
     format!(
-        "Custom fan curve target was applied through direct AcerGamingFunction SetGamingFanSpeed calls. {behavior_detail} {context} {speed_detail} {verification}"
+        "{} fan curve target was applied through direct AcerGamingFunction SetGamingFanSpeed calls. {behavior_detail} {context} {speed_detail} {verification}",
+        profile_id.as_str()
     )
 }
 
@@ -914,8 +1181,8 @@ fn quiet_auto_target_rpm(
     match hottest {
         Some((_, temp_c)) if temp_c >= QUIET_AUTO_ELEVATE_TEMP_C => QUIET_AUTO_ELEVATED_RPM,
         Some((_, temp_c)) if temp_c <= QUIET_AUTO_IDLE_RESUME_TEMP_C => QUIET_AUTO_IDLE_RPM,
-        Some(_) => previous_target_rpm.unwrap_or(QUIET_AUTO_IDLE_RPM),
-        None => QUIET_AUTO_IDLE_RPM,
+        // Blind (no readback) holds the last target: dropping to idle while hot is unsafe.
+        Some(_) | None => previous_target_rpm.unwrap_or(QUIET_AUTO_IDLE_RPM),
     }
 }
 
@@ -1018,7 +1285,8 @@ fn quiet_auto_context(
     let thermal_context = hottest
         .map(|(sensor, temp_c)| format!("Hottest sensor {sensor} {temp_c}C."))
         .unwrap_or_else(|| {
-            "No current Acer temperature readback was available; using quiet idle target.".into()
+            "No current Acer temperature readback was available; holding the previous target."
+                .into()
         });
 
     format!(
@@ -1073,25 +1341,27 @@ fn hottest_temperature(
     consider_temperature(
         &mut hottest,
         "CPU",
-        verification
-            .cpu_temp_c
-            .and_then(u16_to_u8)
-            .or(temperatures.cpu_temp_c),
+        plausible_temp_c(verification.cpu_temp_c.and_then(u16_to_u8))
+            .or(plausible_temp_c(temperatures.cpu_temp_c)),
     );
     consider_temperature(
         &mut hottest,
         "GPU",
-        verification
-            .gpu_temp_c
-            .and_then(u16_to_u8)
-            .or(temperatures.gpu_temp_c),
+        plausible_temp_c(verification.gpu_temp_c.and_then(u16_to_u8))
+            .or(plausible_temp_c(temperatures.gpu_temp_c)),
     );
     consider_temperature(
         &mut hottest,
         "System",
-        verification.system_temp_c.and_then(u16_to_u8),
+        plausible_temp_c(verification.system_temp_c.and_then(u16_to_u8)),
     );
     hottest
+}
+
+/// A 0 or sentinel reading counts as blind (and falls through to the next source), so a
+/// glitch cannot drop a hot machine to the idle target.
+fn plausible_temp_c(temp_c: Option<u8>) -> Option<u8> {
+    temp_c.filter(|temp_c| (1..=QUIET_AUTO_MAX_PLAUSIBLE_TEMP_C).contains(temp_c))
 }
 
 fn consider_temperature(
@@ -1169,14 +1439,15 @@ fn select_custom_fan_strategy(paths: &ServicePaths) -> CustomFanStrategy {
         };
     }
 
-    if system_model.contains("anv15-52")
+    if system_model.contains("anv15-51")
+        || system_model.contains("anv15-52")
         || cpu_identity.contains("genuineintel")
         || cpu_identity.contains("intel")
     {
         return CustomFanStrategy {
             id: "custom-behavior-then-direct-speed",
             reason: format!(
-                "Acer Custom fan behavior latch selected for Intel/ANV15-family hardware so firmware stops treating direct speed targets like Auto. Model '{}', CPU '{}'.",
+                "Acer Custom fan behavior latch selected for Intel/ANV15-family hardware, including ANV15-51, so firmware stops treating direct speed targets like Auto. Model '{}', CPU '{}'.",
                 identity.system_model, cpu_identity
             ),
             behavior_input: Some(FAN_BEHAVIOR_CUSTOM_MIXED),
@@ -1228,21 +1499,6 @@ fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentity {
     }
 }
 
-fn build_fan_verification_detail() -> String {
-    let verification = build_fan_verification();
-    if verification.telemetry_available {
-        format!(
-            "Immediate fan telemetry readback {}.",
-            verification.describe()
-        )
-    } else {
-        format!(
-            "Immediate fan telemetry verification is unavailable on this machine. {}",
-            verification.describe()
-        )
-    }
-}
-
 fn build_fan_verification() -> FanVerification {
     let mut attempts = Vec::new();
     for attempt in 0..3 {
@@ -1291,6 +1547,17 @@ impl FanVerification {
             cpu_temp_c: snapshot.cpu_temp_c,
             gpu_temp_c: snapshot.gpu_temp_c,
             system_temp_c: snapshot.system_temp_c,
+        }
+    }
+
+    fn detail(&self) -> String {
+        if self.telemetry_available {
+            format!("Immediate fan telemetry readback {}.", self.describe())
+        } else {
+            format!(
+                "Immediate fan telemetry verification is unavailable on this machine. {}",
+                self.describe()
+            )
         }
     }
 
@@ -1370,8 +1637,11 @@ fn sanitize_fan_curves(curves: FanCurveSet) -> FanCurveSet {
 }
 
 fn sanitize_curve_points(points: Vec<FanCurvePoint>) -> Vec<FanCurvePoint> {
+    // The UI edits five points; anything beyond this is not a curve, it is a payload.
+    const MAX_CURVE_POINTS: usize = 32;
     let mut sanitized: Vec<FanCurvePoint> = points
         .into_iter()
+        .take(MAX_CURVE_POINTS)
         .map(|point| FanCurvePoint {
             temp_c: point.temp_c.clamp(30, 95),
             speed_percent: point.speed_percent.clamp(0, 100),
@@ -1439,4 +1709,241 @@ fn interpolate_curve_speed(points: &[FanCurvePoint], temp_c: u8) -> u8 {
     }
 
     points.last().map(|point| point.speed_percent).unwrap_or(60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        calibration_overheat, clamp_custom_curve_fan_percent, classify_fan_verification_status,
+        cool_fan_curve_set, hottest_temperature, interpolate_curve_speed, next_quiet_auto_percent,
+        quiet_auto_target_rpm, quiet_auto_thermal_warning, sanitize_curve_points,
+        CurrentTemperatures, FanCurvePoint, FanVerification, QuietAutoFanMap,
+        FAN_SPEED_CALIBRATION_ABORT_TEMP_C, QUIET_AUTO_ELEVATED_RPM, QUIET_AUTO_IDLE_RPM,
+    };
+    use crate::workers::control::acer_wmi::MIN_MANUAL_FAN_PERCENT;
+    use crate::workers::control::models::ControlLayerState;
+
+    #[test]
+    fn quiet_auto_target_holds_previous_when_readback_is_missing() {
+        assert_eq!(quiet_auto_target_rpm(None, None), QUIET_AUTO_IDLE_RPM);
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), None),
+            QUIET_AUTO_ELEVATED_RPM
+        );
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), Some(("cpu", 78))),
+            QUIET_AUTO_ELEVATED_RPM
+        );
+        assert_eq!(
+            quiet_auto_target_rpm(Some(QUIET_AUTO_ELEVATED_RPM), Some(("cpu", 70))),
+            QUIET_AUTO_IDLE_RPM
+        );
+    }
+
+    #[test]
+    fn hottest_temperature_ignores_zero_and_sentinel_readings() {
+        let verification = FanVerification {
+            telemetry_available: true,
+            cpu_temp_c: Some(0),
+            gpu_temp_c: Some(255),
+            system_temp_c: Some(0),
+            ..FanVerification::default()
+        };
+        let temperatures = CurrentTemperatures::default();
+        assert_eq!(hottest_temperature(&verification, &temperatures), None);
+
+        // A blind firmware read falls through to the telemetry snapshot.
+        let temperatures = CurrentTemperatures {
+            cpu_temp_c: Some(83),
+            gpu_temp_c: Some(0),
+        };
+        assert_eq!(
+            hottest_temperature(&verification, &temperatures),
+            Some(("CPU", 83))
+        );
+    }
+
+    #[test]
+    fn calibration_overheat_trips_on_hottest_plausible_sensor() {
+        let cool = CurrentTemperatures {
+            cpu_temp_c: Some(FAN_SPEED_CALIBRATION_ABORT_TEMP_C - 1),
+            gpu_temp_c: Some(0),
+        };
+        assert_eq!(calibration_overheat(&cool), None);
+
+        let hot = CurrentTemperatures {
+            cpu_temp_c: Some(70),
+            gpu_temp_c: Some(FAN_SPEED_CALIBRATION_ABORT_TEMP_C),
+        };
+        assert_eq!(
+            calibration_overheat(&hot),
+            Some(("GPU", FAN_SPEED_CALIBRATION_ABORT_TEMP_C))
+        );
+
+        let sentinel = CurrentTemperatures {
+            cpu_temp_c: Some(255),
+            gpu_temp_c: None,
+        };
+        assert_eq!(calibration_overheat(&sentinel), None);
+    }
+
+    #[test]
+    fn fan_verification_status_tracks_telemetry_availability() {
+        let missing = FanVerification::default();
+        assert_eq!(
+            classify_fan_verification_status(&missing).state,
+            ControlLayerState::Unavailable
+        );
+
+        let present = FanVerification {
+            telemetry_available: true,
+            cpu_fan_rpm: Some(2400),
+            ..FanVerification::default()
+        };
+        assert_eq!(
+            classify_fan_verification_status(&present).state,
+            ControlLayerState::Applied
+        );
+    }
+
+    #[test]
+    fn cool_curve_matches_adaptive_targets() {
+        let curves = cool_fan_curve_set();
+        let cpu_points = curves
+            .cpu
+            .iter()
+            .map(|point| (point.temp_c, point.speed_percent))
+            .collect::<Vec<_>>();
+        let gpu_points = curves
+            .gpu
+            .iter()
+            .map(|point| (point.temp_c, point.speed_percent))
+            .collect::<Vec<_>>();
+
+        let expected = vec![(30, 20), (50, 35), (65, 55), (75, 78), (82, 100)];
+        assert_eq!(cpu_points, expected);
+        assert_eq!(gpu_points, expected);
+    }
+
+    #[test]
+    fn cool_curve_interpolates_between_points() {
+        let curves = cool_fan_curve_set();
+
+        assert_eq!(interpolate_curve_speed(&curves.cpu, 30), 20);
+        assert_eq!(interpolate_curve_speed(&curves.cpu, 57), 44);
+        assert_eq!(interpolate_curve_speed(&curves.cpu, 82), 100);
+        assert_eq!(interpolate_curve_speed(&curves.cpu, 90), 100);
+    }
+
+    #[test]
+    fn custom_curve_sanitizer_sorts_clamps_and_keeps_speed_monotonic() {
+        let points = sanitize_curve_points(vec![
+            super::FanCurvePoint {
+                temp_c: 98,
+                speed_percent: 10,
+            },
+            super::FanCurvePoint {
+                temp_c: 29,
+                speed_percent: 40,
+            },
+            super::FanCurvePoint {
+                temp_c: 55,
+                speed_percent: 20,
+            },
+        ]);
+
+        let tuples = points
+            .iter()
+            .map(|point| (point.temp_c, point.speed_percent))
+            .collect::<Vec<_>>();
+        assert_eq!(tuples, vec![(30, 40), (55, 40), (95, 40)]);
+    }
+
+    #[test]
+    fn manual_zero_speed_gets_safety_floor_above_50c() {
+        assert_eq!(clamp_custom_curve_fan_percent(0, 49), 0);
+        assert_eq!(
+            clamp_custom_curve_fan_percent(0, 65),
+            MIN_MANUAL_FAN_PERCENT
+        );
+    }
+
+    #[test]
+    fn oversized_curve_payload_is_truncated_not_persisted() {
+        let flood: Vec<FanCurvePoint> = (0..10_000)
+            .map(|index| FanCurvePoint {
+                temp_c: 30 + (index % 60) as u8,
+                speed_percent: 50,
+            })
+            .collect();
+        assert!(sanitize_curve_points(flood).len() <= 32);
+    }
+
+    #[test]
+    fn quiet_auto_closed_loop_steps_clamps_and_remembers() {
+        let idle = QUIET_AUTO_IDLE_RPM;
+        let elevated = QUIET_AUTO_ELEVATED_RPM;
+        let mut map = QuietAutoFanMap::default();
+
+        // Target flip with nothing stored starts from the per-target default.
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, idle, None, true),
+            MIN_MANUAL_FAN_PERCENT
+        );
+        assert_eq!(next_quiet_auto_percent(&mut map, elevated, None, true), 8);
+
+        // Step size follows the RPM error: >700 +6, >350 +4, >120 +2, <-700 -4, <-220 -2.
+        map.last_percent = Some(10);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 701), false),
+            16
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 351), false),
+            20
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated - 121), false),
+            22
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated + 701), false),
+            18
+        );
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated + 221), false),
+            16
+        );
+        // Inside the band nothing moves, and that percent is remembered for this target.
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(elevated), false),
+            16
+        );
+        assert_eq!(map.elevated_percent, Some(16));
+        // Missing readback holds the last request.
+        assert_eq!(next_quiet_auto_percent(&mut map, elevated, None, false), 16);
+
+        // Clamps: floor 2, idle cap 25, elevated cap 35.
+        map.last_percent = Some(34);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, elevated, Some(0), false),
+            35
+        );
+        map.last_percent = Some(24);
+        assert_eq!(next_quiet_auto_percent(&mut map, idle, Some(0), false), 25);
+        map.last_percent = Some(3);
+        assert_eq!(
+            next_quiet_auto_percent(&mut map, idle, Some(idle + 2000), false),
+            2
+        );
+        // Out-of-band readings are never remembered.
+        assert_eq!(map.idle_percent, None);
+    }
+
+    #[test]
+    fn quiet_auto_thermal_warning_trips_at_ninety() {
+        assert!(quiet_auto_thermal_warning(Some(("cpu", 90)), 1).active);
+        assert!(!quiet_auto_thermal_warning(Some(("cpu", 89)), 1).active);
+        assert!(!quiet_auto_thermal_warning(None, 1).active);
+    }
 }

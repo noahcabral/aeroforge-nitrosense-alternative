@@ -1,17 +1,12 @@
-use std::{
-    fs, io,
-    path::Path,
-    ptr::null_mut,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use super::now_unix;
+use super::DynError;
+use std::{fs, io, path::Path, ptr::null_mut};
 
 use serde_json::{Map, Value};
 use windows_sys::Win32::{
     Graphics::Gdi::{GetDC, ReleaseDC},
     UI::ColorSystem::SetDeviceGammaRamp,
 };
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const SETTINGS_PATH: &str = r"C:\ProgramData\Acer\QA\settings.json";
 const DEFAULT_ENABLED_GAIN_ID: u8 = 3;
@@ -22,10 +17,6 @@ pub struct BlueLightApplyPayload {
     pub gain_id: u8,
     pub applied_at_unix: u64,
     pub detail: String,
-}
-
-pub fn sync_saved_state(enabled: bool) -> Result<BlueLightApplyPayload, DynError> {
-    apply_blue_light_filter(enabled)
 }
 
 pub fn apply_blue_light_filter(enabled: bool) -> Result<BlueLightApplyPayload, DynError> {
@@ -88,11 +79,7 @@ fn persist_gain_id(gain_id: u8) -> Result<(), DynError> {
         .ok_or_else(|| io::Error::other("Quick Access settings.json was not a JSON object."))?;
     object.insert("BluelightShield".into(), Value::from(gain_id));
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(path, serde_json::to_string_pretty(&root)?)?;
+    super::state::write_text_atomically(path, &serde_json::to_string_pretty(&root)?)?;
     Ok(())
 }
 
@@ -161,13 +148,6 @@ fn gain_profile(gain_id: u8) -> Result<GainProfile, DynError> {
         ))
         .into()),
     }
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 struct GainProfile {

@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint, types, tests, build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc -b
+      - run: npm test
+      - run: npx vite build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+          retention-days: 3
+
+  service:
+    name: Windows service (clippy, tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: aeroforge-service
+      - run: cargo fmt --check --manifest-path aeroforge-service/Cargo.toml
+      - run: cargo clippy --all-targets --manifest-path aeroforge-service/Cargo.toml -- -D warnings
+      - run: cargo test --manifest-path aeroforge-service/Cargo.toml
+
+  shell:
+    name: Tauri shell (clippy, tests)
+    runs-on: windows-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+      # tauri::generate_context! embeds frontendDist at compile time, so the
+      # crate does not build without the frontend output present.
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+      - run: cargo clippy --lib --bins --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - run: cargo test --lib --manifest-path src-tauri/Cargo.toml

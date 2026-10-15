@@ -351,7 +351,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--out",
-        default=r"C:\Users\noah\Desktop\afterburner-memory-structs-live.json",
+        default="afterburner-memory-structs-live.json",
         help="Path to write trace JSON",
     )
     args = parser.parse_args()

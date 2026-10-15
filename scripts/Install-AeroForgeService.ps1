@@ -10,15 +10,9 @@ $serviceBinDir = Join-Path $serviceRoot 'bin'
 $installedExe = Join-Path $serviceBinDir 'aeroforge-service.exe'
 
 function Resolve-CargoPath {
-  $fallbacks = @(
-    'C:\Users\noah\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe',
-    'C:\Users\noah\.cargo\bin\cargo.exe'
-  )
-
-  foreach ($candidate in $fallbacks) {
-    if (Test-Path -LiteralPath $candidate) {
-      return $candidate
-    }
+  # Explicit override first, then PATH, then the standard rustup install locations.
+  if ($env:AEROFORGE_CARGO -and (Test-Path -LiteralPath $env:AEROFORGE_CARGO)) {
+    return $env:AEROFORGE_CARGO
   }
 
   $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
@@ -26,7 +20,31 @@ function Resolve-CargoPath {
     return $cargoCommand.Source
   }
 
-  throw 'Unable to locate cargo.exe. Install or repair the Rust toolchain path first.'
+  $fallbacks = @()
+  if ($env:CARGO_HOME) {
+    $fallbacks += (Join-Path $env:CARGO_HOME 'bin\cargo.exe')
+  }
+  if ($env:USERPROFILE) {
+    $fallbacks += (Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe')
+  }
+
+  foreach ($candidate in $fallbacks) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  throw 'Unable to locate cargo.exe. Install the Rust toolchain from https://rustup.rs or set AEROFORGE_CARGO to the full path of cargo.exe.'
+}
+
+function Protect-ServiceRoot {
+  # CreateProcess and LoadLibrary search the application directory first, and
+  # ProgramData grants Users create-file by inheritance. Without this ACL any
+  # local user could plant a powershell.exe beside the service and run as SYSTEM.
+  & icacls $serviceRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "icacls failed to restrict $serviceRoot (exit code $LASTEXITCODE)."
+  }
 }
 
 function Invoke-Sc {
@@ -71,6 +89,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $serviceBinDir | Out-Null
+Protect-ServiceRoot
 
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($existingService) {

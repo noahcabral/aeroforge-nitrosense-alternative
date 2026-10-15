@@ -1,5 +1,5 @@
 param(
-  [string]$Repo = 'noahcabral/aeroforge-nitrosense-alternative',
+  [string]$Repo = '',
   [string]$Tag = '',
   [string]$TargetCommitish = 'main',
   [string]$Name = '',
@@ -10,6 +10,17 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+
+if (-not $Repo) {
+  # Default to this checkout's GitHub remote rather than a hardcoded repository.
+  $originUrl = (& git -C $projectRoot remote get-url origin 2>$null | Select-Object -First 1)
+  if ($originUrl -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?/?$') {
+    $Repo = $Matches[1]
+  } else {
+    throw 'Could not derive the GitHub repository from the origin remote. Pass -Repo owner/name.'
+  }
+}
+Write-Output "Publishing to https://github.com/$Repo"
 $package = Get-Content (Join-Path $projectRoot 'package.json') | ConvertFrom-Json
 $version = $package.version
 if ([string]::IsNullOrWhiteSpace($Tag)) {
@@ -25,7 +36,22 @@ $makeDebugCollector = Join-Path $projectRoot 'scripts\Make-DebugCollector.ps1'
 $portable = Join-Path $projectRoot "portable\AeroForge-Control-Portable-$version.zip"
 $installer = Join-Path $projectRoot "portable\AeroForge-Control-Setup-$version.exe"
 $debugger = Join-Path $projectRoot "portable\AeroForge-Debug-Collector-$version.zip"
-$assets = @($portable, $installer, $debugger)
+$primaryAssets = @($portable, $installer, $debugger)
+foreach ($asset in $primaryAssets) {
+  if (-not (Test-Path -LiteralPath $asset)) {
+    throw "Missing release asset: $asset"
+  }
+}
+
+$checksumFile = Join-Path $projectRoot 'portable\SHA256SUMS.txt'
+$checksumLines = foreach ($asset in $primaryAssets) {
+  $assetName = Split-Path -Leaf $asset
+  $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+  "$hash  $assetName"
+}
+$checksumLines | Set-Content -LiteralPath $checksumFile -Encoding ascii
+
+$assets = @($portable, $installer, $debugger, $checksumFile)
 foreach ($asset in $assets) {
   if (-not (Test-Path -LiteralPath $asset)) {
     throw "Missing release asset: $asset"
@@ -43,6 +69,7 @@ Release assets:
 - AeroForge-Control-Portable-$version.zip
 - AeroForge-Control-Setup-$version.exe
 - AeroForge-Debug-Collector-$version.zip
+- SHA256SUMS.txt
 
 The debug collector is included as a standalone asset on every release so users can file support bundles even when AeroForge will not install or launch.
 "@
@@ -105,7 +132,13 @@ foreach ($asset in $assets) {
     Invoke-RestMethod -Headers $headers -Uri "$apiBase/releases/assets/$($existing.id)" -Method Delete | Out-Null
   }
 
-  $contentType = if ($assetName.EndsWith('.zip')) { 'application/zip' } else { 'application/octet-stream' }
+  $contentType = if ($assetName.EndsWith('.zip')) {
+    'application/zip'
+  } elseif ($assetName.EndsWith('.txt')) {
+    'text/plain'
+  } else {
+    'application/octet-stream'
+  }
   $uploadUri = "$($uploadBase)?name=$([uri]::EscapeDataString($assetName))"
   Invoke-RestMethod -Headers $headers -Uri $uploadUri -Method Post -ContentType $contentType -InFile $asset | Out-Null
 }

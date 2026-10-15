@@ -1,11 +1,9 @@
-use std::{os::windows::process::CommandExt, path::Path, process::Command};
+use crate::paths::{powershell_command, system32_path};
 
 use crate::workers::control::acer_wmi;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 pub fn nvml_present() -> bool {
-    Path::new(r"C:\Windows\System32\nvml.dll").exists()
+    system32_path("nvml.dll").exists()
 }
 
 pub fn acer_gaming_wmi_present() -> bool {
@@ -51,16 +49,7 @@ if ($instance) {
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
-        .output();
+    let output = powershell_command(script).output();
 
     let Ok(output) = output else {
         return BatteryControlProbe::default();

@@ -3,6 +3,7 @@ mod state;
 
 use models::PersistenceSnapshot;
 
+use crate::DynError;
 use crate::{
     paths::ServicePaths,
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
@@ -19,7 +20,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     run_periodic_worker(
         WORKER_NAME,
         SAMPLE_INTERVAL,
@@ -30,7 +31,7 @@ fn run(
     )
 }
 
-fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn tick(paths: &ServicePaths) -> Result<(), DynError> {
     let tauri_config_path = state::discover_tauri_state_path();
     let snapshot = PersistenceSnapshot {
         service: WORKER_NAME,
@@ -41,9 +42,9 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
             "Move AeroForge-owned settings behind a shared service contract instead of separate app-owned files.",
     };
 
-    std::fs::write(
-        paths.worker_snapshot("persistence"),
-        serde_json::to_string_pretty(&snapshot)?,
+    crate::paths::write_text_atomically(
+        &paths.worker_snapshot("persistence"),
+        &serde_json::to_string_pretty(&snapshot)?,
     )?;
 
     Ok(())

@@ -1,6 +1,6 @@
-use crate::paths::ServicePaths;
+use crate::paths::{command_failure_detail, system32_command, ServicePaths};
 use serde::Serialize;
-use std::{env, fs, process::Command};
+use std::{env, fs};
 
 const NVIDIA_POWER_READBACK_ENV: &str = "AEROFORGE_ENABLE_NVIDIA_TELEMETRY";
 const MAX_REASONABLE_GPU_POWER_W: f32 = 250.0;
@@ -28,7 +28,7 @@ pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
         };
     }
 
-    let output = Command::new("nvidia-smi")
+    let output = system32_command("nvidia-smi")
         .args([
             "--query-gpu=power.draw,enforced.power.limit,power.default_limit,power.min_limit,power.max_limit",
             "--format=csv,noheader,nounits",
@@ -46,7 +46,7 @@ pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
     if !output.status.success() {
         return NvidiaPowerReadback {
             source: "nvidia-smi",
-            error: Some(command_error_detail(&output)),
+            error: Some(command_failure_detail("nvidia-smi", &output)),
             ..Default::default()
         };
     }
@@ -63,7 +63,7 @@ pub(crate) fn read_power_readback(paths: &ServicePaths) -> NvidiaPowerReadback {
     let columns = line.split(',').map(str::trim).collect::<Vec<_>>();
 
     NvidiaPowerReadback {
-        power_draw_w: parse_watts(columns.get(0).copied()),
+        power_draw_w: parse_watts(columns.first().copied()),
         power_limit_w: parse_watts(columns.get(1).copied()),
         default_limit_w: parse_watts(columns.get(2).copied()),
         min_limit_w: parse_watts(columns.get(3).copied()),
@@ -167,20 +167,6 @@ fn parse_nvidia_telemetry_enabled(raw: &str) -> Option<bool> {
                 .get("nvidiaTelemetryEnabled")
                 .and_then(|value| value.as_bool())
         })
-}
-
-fn command_error_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-
-    format!("nvidia-smi exited with status {}", output.status)
 }
 
 #[cfg(test)]

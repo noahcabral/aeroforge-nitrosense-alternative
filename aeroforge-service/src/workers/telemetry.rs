@@ -10,6 +10,7 @@ mod system;
 
 use models::{LowLevelSnapshot, TelemetrySnapshot};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
@@ -26,7 +27,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     run_periodic_worker(
         "telemetry-worker",
         std::time::Duration::from_millis(333),
@@ -37,7 +38,7 @@ fn run(
     )
 }
 
-fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn tick(paths: &ServicePaths) -> Result<(), DynError> {
     let heartbeat = system::next_heartbeat();
     let power = power::read_power_snapshot().unwrap_or_default();
     let cpu_usage = cpu::read_cpu_usage_percent().unwrap_or(0);
@@ -79,12 +80,12 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         cpu_pl2_w: low_level.package_pl2_w,
         cpu_pl2_enabled: low_level.package_pl2_enabled,
         cpu_power_limit_locked: low_level.package_power_limit_locked,
-        cpu_name: hardware_identity.cpu_name.clone(),
-        cpu_brand: hardware_identity.cpu_brand.clone(),
-        gpu_name: hardware_identity.gpu_name.clone(),
-        gpu_brand: hardware_identity.gpu_brand.clone(),
-        system_vendor: hardware_identity.system_vendor.clone(),
-        system_model: hardware_identity.system_model.clone(),
+        cpu_name: hardware_identity.cpu_name,
+        cpu_brand: hardware_identity.cpu_brand,
+        gpu_name: hardware_identity.gpu_name,
+        gpu_brand: hardware_identity.gpu_brand,
+        system_vendor: hardware_identity.system_vendor,
+        system_model: hardware_identity.system_model,
         cpu_clock_mhz,
         gpu_clock_mhz: gpu.clock_mhz.unwrap_or(0),
         cpu_fan_rpm: acer_hid_status
@@ -101,9 +102,9 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         heartbeat,
     };
 
-    std::fs::write(
-        paths.worker_snapshot("telemetry"),
-        serde_json::to_string_pretty(&snapshot)?,
+    crate::paths::write_text_atomically(
+        &paths.worker_snapshot("telemetry"),
+        &serde_json::to_string_pretty(&snapshot)?,
     )?;
 
     Ok(())
@@ -128,7 +129,7 @@ fn nvidia_telemetry_enabled(paths: &ServicePaths) -> bool {
                 .get("nvidiaTelemetryEnabled")
                 .and_then(|value| value.as_bool())
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     log_nvidia_telemetry_state(paths, enabled);
     enabled
@@ -153,9 +154,7 @@ fn log_nvidia_telemetry_state(paths: &ServicePaths, enabled: bool) {
     let _ = write_log_line(&paths.component_log("telemetry-nvidia-gpu"), "INFO", detail);
 }
 
-fn read_low_level_snapshot(
-    paths: &ServicePaths,
-) -> Result<LowLevelSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn read_low_level_snapshot(paths: &ServicePaths) -> Result<LowLevelSnapshot, DynError> {
     let raw = std::fs::read_to_string(paths.worker_snapshot("lowlevel"))?;
     Ok(serde_json::from_str::<LowLevelSnapshot>(&raw)?)
 }

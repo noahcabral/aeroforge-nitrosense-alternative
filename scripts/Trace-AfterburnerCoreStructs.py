@@ -299,7 +299,7 @@ def main() -> int:
     parser.add_argument("--seconds", type=int, default=90, help="How long to trace before detaching")
     parser.add_argument(
         "--out",
-        default=r"C:\Users\noah\Desktop\afterburner-core-structs.json",
+        default="afterburner-core-structs.json",
         help="Path to write trace JSON",
     )
     args = parser.parse_args()

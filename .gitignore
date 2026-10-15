@@ -23,6 +23,9 @@ dist-ssr
 *.sln
 *.sw?
 
+# Test / coverage output
+coverage/
+
 # Local runtime and probe artifacts
 .runtime/
 .runtime-buildshim/
@@ -37,3 +40,27 @@ aeroforge logo with text.png
 # Rust build output outside src-tauri
 aeroforge-service/target/
 aeroforge-service/target-hotfix/
+
+# Alternate / agent build trees under src-tauri
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/target-codex-*/
+
+# Vendor sample installs (never commit binaries or private keys)
+example nitrosense/
+**/NitroSense_*/
+
+# Local support bundles and staged packages
+AeroForge-Debug-*/
+*.msi
+Thumbs.db
+
+# Secrets / credentials (backup safety)
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# Knowledge-graph output (regenerate with /graphify)
+graphify-out/

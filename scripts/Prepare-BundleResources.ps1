@@ -8,15 +8,9 @@ $helperExe = Join-Path $projectRoot 'src-tauri\target\release\aeroforge-hotkey-h
 $installerServiceScript = Join-Path $projectRoot 'src-tauri\resources\Install-AeroForgeBundledService.ps1'
 
 function Resolve-CargoPath {
-  $fallbacks = @(
-    'C:\Users\noah\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe',
-    'C:\Users\noah\.cargo\bin\cargo.exe'
-  )
-
-  foreach ($candidate in $fallbacks) {
-    if (Test-Path -LiteralPath $candidate) {
-      return $candidate
-    }
+  # Explicit override first, then PATH, then the standard rustup install locations.
+  if ($env:AEROFORGE_CARGO -and (Test-Path -LiteralPath $env:AEROFORGE_CARGO)) {
+    return $env:AEROFORGE_CARGO
   }
 
   $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
@@ -24,7 +18,21 @@ function Resolve-CargoPath {
     return $cargoCommand.Source
   }
 
-  throw 'Unable to locate cargo.exe. Install or repair the Rust toolchain path first.'
+  $fallbacks = @()
+  if ($env:CARGO_HOME) {
+    $fallbacks += (Join-Path $env:CARGO_HOME 'bin\cargo.exe')
+  }
+  if ($env:USERPROFILE) {
+    $fallbacks += (Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe')
+  }
+
+  foreach ($candidate in $fallbacks) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  throw 'Unable to locate cargo.exe. Install the Rust toolchain from https://rustup.rs or set AEROFORGE_CARGO to the full path of cargo.exe.'
 }
 
 $cargoPath = Resolve-CargoPath
@@ -34,9 +42,20 @@ if ($LASTEXITCODE -ne 0) {
   throw 'Failed to build aeroforge-service.exe.'
 }
 
-& $cargoPath build --release --manifest-path $tauriManifest --bin aeroforge-hotkey-helper
-if ($LASTEXITCODE -ne 0) {
-  throw 'Failed to build aeroforge-hotkey-helper.exe.'
+$previousTauriConfig = $env:TAURI_CONFIG
+try {
+  $env:TAURI_CONFIG = '{"bundle":{"resources":null}}'
+  & $cargoPath build --release --manifest-path $tauriManifest --bin aeroforge-hotkey-helper
+  if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to build aeroforge-hotkey-helper.exe.'
+  }
+}
+finally {
+  if ($null -eq $previousTauriConfig) {
+    Remove-Item Env:\TAURI_CONFIG -ErrorAction SilentlyContinue
+  } else {
+    $env:TAURI_CONFIG = $previousTauriConfig
+  }
 }
 
 foreach ($requiredPath in @($serviceExe, $helperExe, $installerServiceScript)) {

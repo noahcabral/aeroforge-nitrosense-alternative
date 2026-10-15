@@ -2,19 +2,51 @@ mod handlers;
 mod models;
 mod pipe;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    io::Read,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use models::{PipeRequest, PipeResponse};
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::{unix_timestamp, WorkerEvent, WorkerEventSender, WorkerRegistration, WorkerState},
 };
 
 const PIPE_PATH: &str = r"\\.\pipe\AeroForgeService";
+/// Requests are small JSON lines (boot-logo applies carry a path, not the
+/// image); this is a generous ceiling, not a sizing.
+const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
+/// Any authenticated local user can connect, so bound what one can pin.
+/// ponytail: no read timeout on the pipe file, so an idle client still holds a
+/// slot until it disconnects; move to overlapped I/O if that is ever abused.
+const MAX_CONCURRENT_CLIENTS: usize = 16;
+static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Holds one of the MAX_CONCURRENT_CLIENTS slots; released on drop, which also
+/// covers thread-spawn failure and a panicking handler.
+struct ClientSlot;
+
+impl ClientSlot {
+    fn acquire() -> Option<Self> {
+        if ACTIVE_CLIENTS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
+            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub fn registration() -> WorkerRegistration {
     WorkerRegistration::new("ipc-worker", run)
@@ -31,7 +63,7 @@ pub fn run(
     paths: ServicePaths,
     stop_flag: Arc<AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let _ = event_tx.send(WorkerEvent {
         worker: "ipc-worker",
         state: WorkerState::Running,
@@ -43,10 +75,20 @@ pub fn run(
     while !stop_flag.load(Ordering::SeqCst) {
         let pipe = pipe::create_pipe_instance(&paths, PIPE_PATH)?;
         pipe::connect_client(&pipe)?;
+        let Some(slot) = ClientSlot::acquire() else {
+            drop(pipe);
+            let _ = write_log_line(
+                &paths.component_log("ipc-worker"),
+                "WARN",
+                "Rejected named-pipe client: too many concurrent connections.",
+            );
+            continue;
+        };
         let client_paths = paths.clone();
         std::thread::Builder::new()
             .name("ipc-client".into())
             .spawn(move || {
+                let _slot = slot;
                 if let Err(error) = handle_client(pipe, &client_paths) {
                     let _ = write_log_line(
                         &client_paths.component_log("ipc-worker"),
@@ -68,17 +110,17 @@ pub fn run(
     Ok(())
 }
 
-fn handle_client(
-    pipe: pipe::NamedPipeInstance,
-    paths: &ServicePaths,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn handle_client(pipe: pipe::NamedPipeInstance, paths: &ServicePaths) -> Result<(), DynError> {
     let mut file = pipe.into_file();
-    let mut reader = std::io::BufReader::new(&mut file);
+    let mut reader = std::io::BufReader::new((&mut file).take(MAX_REQUEST_BYTES));
     let mut line = String::new();
     let bytes_read = std::io::BufRead::read_line(&mut reader, &mut line)?;
 
     if bytes_read == 0 || line.trim().is_empty() {
         return Ok(());
+    }
+    if !line.ends_with('\n') {
+        return Err(format!("Named-pipe request exceeded {MAX_REQUEST_BYTES} bytes.").into());
     }
 
     let response = match serde_json::from_str::<PipeRequest>(&line) {

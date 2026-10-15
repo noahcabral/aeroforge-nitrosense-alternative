@@ -1,0 +1,30 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "aeroforge-ui",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "1420"
+      ],
+      "port": 1420
+    },
+    {
+      "name": "aeroforge-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "preview",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "4173"
+      ],
+      "port": 4173
+    }
+  ]
+}

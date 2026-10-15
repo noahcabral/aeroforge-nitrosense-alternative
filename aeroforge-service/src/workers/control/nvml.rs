@@ -5,14 +5,12 @@ use std::{
 
 use libloading::Library;
 
-use crate::paths::{write_log_line, ServicePaths};
+use crate::paths::{system32_path, write_log_line, ServicePaths};
+use crate::DynError;
 
 use super::models::GpuTuningState;
 
 const NVML_SUCCESS: i32 = 0;
-const NVML_ERROR_NOT_SUPPORTED: i32 = 3;
-const NVML_ERROR_NO_PERMISSION: i32 = 4;
-const NVML_ERROR_GPU_IS_LOST: i32 = 15;
 
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const NVML_CLOCK_MEM: u32 = 2;
@@ -94,8 +92,8 @@ pub fn apply_gpu_tuning(paths: &ServicePaths, tuning: &GpuTuningState) -> NvmlGp
 }
 
 impl NvmlApi {
-    fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let library = unsafe { Library::new(r"C:\Windows\System32\nvml.dll") }?;
+    fn load() -> Result<Self, DynError> {
+        let library = unsafe { Library::new(system32_path("nvml.dll")) }?;
 
         unsafe {
             Ok(Self {
@@ -120,7 +118,7 @@ impl NvmlApi {
         core_log_path: &Path,
         memory_log_path: &Path,
         tuning: &GpuTuningState,
-    ) -> Result<NvmlGpuTuningReport, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<NvmlGpuTuningReport, DynError> {
         self.require_ok(unsafe { (self.init_v2)() }, "nvmlInit_v2")?;
 
         let result = (|| {
@@ -132,7 +130,6 @@ impl NvmlApi {
                 device,
                 &gpu_name,
                 "core",
-                "coreClock",
                 NVML_CLOCK_GRAPHICS,
                 i32::from(tuning.core_clock_mhz),
             )?;
@@ -141,7 +138,6 @@ impl NvmlApi {
                 device,
                 &gpu_name,
                 "memory",
-                "memoryClock",
                 NVML_CLOCK_MEM,
                 i32::from(tuning.memory_clock_mhz),
             )?;
@@ -205,10 +201,9 @@ impl NvmlApi {
         device: NvmlDevice,
         gpu_name: &str,
         domain_label: &str,
-        field_name: &'static str,
         clock_type: u32,
         requested: i32,
-    ) -> Result<DomainResult, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<DomainResult, DynError> {
         let current_info = match self.read_clock_offsets(device, clock_type) {
             Ok(info) => info,
             Err(error) => {
@@ -271,13 +266,11 @@ impl NvmlApi {
         );
         write_log_line(log_path, "WARN", &detail)?;
 
+        // A rejected write leaves the domain unsupported for this apply whatever
+        // the status code; the code itself is already in the detail.
         Ok(DomainResult {
             applied_mhz: None,
-            unsupported: matches!(
-                set_status,
-                NVML_ERROR_NOT_SUPPORTED | NVML_ERROR_NO_PERMISSION | NVML_ERROR_GPU_IS_LOST
-            ) || field_name == "coreClock"
-                || field_name == "memoryClock",
+            unsupported: true,
             detail,
         })
     }
@@ -286,7 +279,7 @@ impl NvmlApi {
         &self,
         device: NvmlDevice,
         clock_type: u32,
-    ) -> Result<NvmlClockOffsetV1, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<NvmlClockOffsetV1, DynError> {
         let mut info = NvmlClockOffsetV1 {
             version: std::mem::size_of::<NvmlClockOffsetV1>() as u32 | NVML_CLOCK_OFFSET_V1,
             clock_type,
@@ -312,7 +305,7 @@ impl NvmlApi {
         unsafe { (self.device_set_clock_offsets)(device, &mut info) }
     }
 
-    fn first_device(&self) -> Result<NvmlDevice, Box<dyn std::error::Error + Send + Sync>> {
+    fn first_device(&self) -> Result<NvmlDevice, DynError> {
         let mut device_count = 0u32;
         self.require_ok(
             unsafe { (self.device_get_count_v2)(&mut device_count) },
@@ -346,11 +339,7 @@ impl NvmlApi {
         String::from_utf8_lossy(&bytes).trim().to_string()
     }
 
-    fn require_ok(
-        &self,
-        status: i32,
-        operation: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn require_ok(&self, status: i32, operation: &str) -> Result<(), DynError> {
         if status == NVML_SUCCESS {
             return Ok(());
         }

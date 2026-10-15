@@ -1,5 +1,4 @@
 use std::{
-    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -9,9 +8,9 @@ use super::{
     models::HardwareIdentitySnapshot,
 };
 use crate::paths::ServicePaths;
+use crate::DynError;
 
 static HARDWARE_IDENTITY_CACHE: OnceLock<Arc<Mutex<HardwareIdentityCache>>> = OnceLock::new();
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct HardwareIdentityCache {
     last_refresh: Option<Instant>,
@@ -74,8 +73,7 @@ pub fn read_hardware_identity(paths: &ServicePaths) -> HardwareIdentitySnapshot 
     )
 }
 
-fn query_hardware_identity_snapshot(
-) -> Result<HardwareIdentitySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_hardware_identity_snapshot() -> Result<HardwareIdentitySnapshot, DynError> {
     let script = r#"
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 Name, Manufacturer
 $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.PNPDeviceID -notmatch '^ROOT\\' }
@@ -100,53 +98,93 @@ $system = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufact
 } | ConvertTo-Json -Compress
 "#;
 
-    let output = std::process::Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-Command", script])
-        .output()?;
+    let output = crate::paths::powershell_command(script).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("hardware identity query failed: {stderr}").into());
+        return query_registry_hardware_identity_snapshot().map_err(|fallback_error| {
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "hardware identity query failed: {stderr}; registry fallback failed: {fallback_error}"
+            ))
+        });
     }
 
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
+    let field = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
     Ok(HardwareIdentitySnapshot {
-        cpu_name: parsed
-            .get("cpuName")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        cpu_brand: parsed
-            .get("cpuBrand")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        gpu_name: parsed
-            .get("gpuName")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        gpu_brand: parsed
-            .get("gpuBrand")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        system_vendor: parsed
-            .get("systemVendor")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        system_model: parsed
-            .get("systemModel")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+        cpu_name: field("cpuName"),
+        cpu_brand: field("cpuBrand"),
+        gpu_name: field("gpuName"),
+        gpu_brand: field("gpuBrand"),
+        system_vendor: field("systemVendor"),
+        system_model: field("systemModel"),
     })
+}
+
+fn query_registry_hardware_identity_snapshot() -> Result<HardwareIdentitySnapshot, DynError> {
+    let output = crate::paths::system32_command("reg")
+        .args(["query", r"HKLM\HARDWARE\DESCRIPTION\System\BIOS"])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("reg.exe exited with status {}", output.status).into());
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Ok(HardwareIdentitySnapshot {
+        cpu_name: None,
+        cpu_brand: None,
+        gpu_name: None,
+        gpu_brand: None,
+        system_vendor: parse_reg_value(&raw, "SystemManufacturer"),
+        system_model: parse_reg_value(&raw, "SystemProductName"),
+    })
+}
+
+fn parse_reg_value(raw: &str, name: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(name) {
+            return None;
+        }
+        let mut parts = trimmed.split_whitespace();
+        parts.next()?;
+        parts.next()?;
+        let value = parts.collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_reg_value;
+
+    #[test]
+    fn parses_registry_hardware_identity() {
+        let raw = r#"
+    SystemManufacturer    REG_SZ    Acer
+    SystemProductName    REG_SZ    Nitro ANV15-51
+    BIOSVersion    REG_SZ    V1.60
+"#;
+
+        assert_eq!(
+            parse_reg_value(raw, "SystemManufacturer").as_deref(),
+            Some("Acer")
+        );
+        assert_eq!(
+            parse_reg_value(raw, "SystemProductName").as_deref(),
+            Some("Nitro ANV15-51")
+        );
+        assert_eq!(
+            parse_reg_value(raw, "BIOSVersion").as_deref(),
+            Some("V1.60")
+        );
+    }
 }

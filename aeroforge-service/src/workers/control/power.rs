@@ -1,5 +1,7 @@
+use crate::paths::{command_failure_detail, system32_command};
+use crate::DynError;
 use regex::Regex;
-use std::{env, process::Command, sync::OnceLock, thread, time::Duration};
+use std::{env, sync::OnceLock, thread, time::Duration};
 
 use crate::{
     paths::{write_log_line, ServicePaths},
@@ -15,8 +17,8 @@ use super::{
         MISC_SETTING_SUPPORTED_PROFILES,
     },
     models::{
-        AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, CustomPowerBaseId, PowerProfileId,
-        ProcessorStateReadback, ProcessorStateSettings,
+        AppliedPowerProfileSnapshot, ApplyPowerProfileRequest, ControlLayerStatus,
+        CustomPowerBaseId, PowerProfileId, ProcessorStateReadback, ProcessorStateSettings,
     },
     nvapi_whisper::{set_whisper_mode, NvApiWhisperResult},
     nvidia_power, rapl_power,
@@ -36,13 +38,14 @@ enum PowercfgCurrentIndex {
 pub fn apply_power_profile(
     paths: &ServicePaths,
     request: ApplyPowerProfileRequest,
-) -> Result<AppliedPowerProfileSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedPowerProfileSnapshot, DynError> {
     let profile_id = request.profile_id.clone();
     let custom_base_profile = request.custom_base_profile.clone();
     let processor_state_control_enabled = request.processor_state_control_enabled;
     let processor_state = sanitize_processor_state(request.processor_state)?;
     let power_before = nvidia_power::read_power_readback(paths);
     let operating_mode = apply_operating_mode(paths, &profile_id, custom_base_profile.as_ref())?;
+    let mut layer_statuses = operating_mode.layer_statuses;
     let profile_label = profile_label(&profile_id);
 
     write_log_line(
@@ -61,31 +64,40 @@ pub fn apply_power_profile(
         ),
     )?;
 
+    // Every powercfg spawn costs ~100 ms, so only the AC/DC values that differ
+    // from the live scheme are written, and the scheme is re-activated and
+    // re-read only when something changed.
+    let mut readback = read_processor_state_readback()?;
     if processor_state_control_enabled {
-        apply_scheme_value(
-            "setacvalueindex",
-            PROCTHROTTLEMIN,
-            processor_state.min_percent,
-        )?;
-        apply_scheme_value(
-            "setacvalueindex",
-            PROCTHROTTLEMAX,
-            processor_state.max_percent,
-        )?;
-        apply_scheme_value(
-            "setdcvalueindex",
-            PROCTHROTTLEMIN,
-            processor_state.min_percent,
-        )?;
-        apply_scheme_value(
-            "setdcvalueindex",
-            PROCTHROTTLEMAX,
-            processor_state.max_percent,
-        )?;
-        run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+        let mut written = false;
+        for (action, current) in [
+            ("setacvalueindex", &readback.ac),
+            ("setdcvalueindex", &readback.dc),
+        ] {
+            for (setting, requested, live) in [
+                (
+                    PROCTHROTTLEMIN,
+                    processor_state.min_percent,
+                    current.min_percent,
+                ),
+                (
+                    PROCTHROTTLEMAX,
+                    processor_state.max_percent,
+                    current.max_percent,
+                ),
+            ] {
+                if requested != live {
+                    apply_scheme_value(action, setting, requested)?;
+                    written = true;
+                }
+            }
+        }
+        if written {
+            run_powercfg(&["/setactive", SCHEME_CURRENT])?;
+            readback = read_processor_state_readback()?;
+        }
     }
 
-    let readback = read_processor_state_readback()?;
     let drift_detected = processor_state_control_enabled
         && (readback.ac.min_percent != processor_state.min_percent
             || readback.ac.max_percent != processor_state.max_percent
@@ -94,8 +106,14 @@ pub fn apply_power_profile(
     let cpu_power_limit_detail =
         rapl_power::apply_profile_package_limit(paths, &profile_id, custom_base_profile.as_ref());
 
-    thread::sleep(Duration::from_millis(500));
-    let power_after = nvidia_power::read_power_readback(paths);
+    // A failed pre-apply readback already decides the delta message, so the
+    // settle wait and second nvidia-smi spawn would buy nothing.
+    let power_after = if power_before.error.is_some() {
+        power_before.clone()
+    } else {
+        thread::sleep(Duration::from_millis(500));
+        nvidia_power::read_power_readback(paths)
+    };
     let power_detail = nvidia_power::format_power_limit_delta(&power_before, &power_after);
 
     let processor_detail = if processor_state_control_enabled {
@@ -122,6 +140,29 @@ pub fn apply_power_profile(
             readback.dc.max_percent
         )
     };
+    layer_statuses.push(if processor_state_control_enabled {
+        if drift_detected {
+            ControlLayerStatus::failed(
+                "windows-processor-policy",
+                "Windows CPU Policy",
+                processor_detail.clone(),
+            )
+        } else {
+            ControlLayerStatus::applied(
+                "windows-processor-policy",
+                "Windows CPU Policy",
+                processor_detail.clone(),
+            )
+        }
+    } else {
+        ControlLayerStatus::skipped(
+            "windows-processor-policy",
+            "Windows CPU Policy",
+            processor_detail.clone(),
+        )
+    });
+    layer_statuses.push(classify_cpu_power_limit_status(&cpu_power_limit_detail));
+    layer_statuses.push(classify_nvidia_power_status(&power_detail));
 
     let detail = format!(
         "{} {} {} {}",
@@ -137,6 +178,7 @@ pub fn apply_power_profile(
         processor_state_control_enabled,
         readback,
         drift_detected,
+        layer_statuses,
         applied_at_unix: unix_timestamp(),
         detail,
     })
@@ -144,7 +186,7 @@ pub fn apply_power_profile(
 
 fn sanitize_processor_state(
     processor_state: ProcessorStateSettings,
-) -> Result<ProcessorStateSettings, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ProcessorStateSettings, DynError> {
     let min_percent = processor_state.min_percent.clamp(0, 100);
     let max_percent = processor_state.max_percent.clamp(5, 100);
 
@@ -166,7 +208,7 @@ fn apply_operating_mode(
     paths: &ServicePaths,
     profile_id: &PowerProfileId,
     custom_base_profile: Option<&CustomPowerBaseId>,
-) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedOperatingMode, DynError> {
     match profile_id {
         PowerProfileId::BatteryGuard => {
             let firmware_detail = apply_acer_platform_profile_or_fallback(
@@ -184,6 +226,11 @@ fn apply_operating_mode(
             );
             Ok(AppliedOperatingMode {
                 detail: format!("{firmware_detail} {direct_hid_detail} {whisper_detail}"),
+                layer_statuses: vec![
+                    classify_firmware_status(&firmware_detail),
+                    classify_direct_hid_status(&direct_hid_detail),
+                    classify_whisper_status(&whisper_detail),
+                ],
             })
         }
         PowerProfileId::Balanced => apply_acer_profile_with_whisper_clear(
@@ -229,6 +276,7 @@ fn profile_label(profile_id: &PowerProfileId) -> &'static str {
 
 struct AppliedOperatingMode {
     detail: String,
+    layer_statuses: Vec<ControlLayerStatus>,
 }
 
 fn apply_acer_profile_with_whisper_clear(
@@ -237,7 +285,7 @@ fn apply_acer_profile_with_whisper_clear(
     input: u64,
     balanced_base_for_custom: bool,
     custom_base_label: Option<&'static str>,
-) -> Result<AppliedOperatingMode, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedOperatingMode, DynError> {
     let firmware_detail = apply_acer_platform_profile_or_fallback(
         profile_label(profile_id),
         input,
@@ -262,9 +310,18 @@ fn apply_acer_profile_with_whisper_clear(
     } else {
         "Direct Acer HID turbo OC-profile hint skipped for non-turbo mode.".into()
     };
+    let mut layer_statuses = vec![
+        classify_firmware_status(&firmware_detail),
+        classify_direct_hid_status(&direct_hid_detail),
+        classify_whisper_status(&whisper_detail),
+    ];
+    if direct_hid_mode == Some(SystemUsageMode::Turbo) {
+        layer_statuses.push(classify_turbo_oc_status(&turbo_oc_detail));
+    }
 
     Ok(AppliedOperatingMode {
         detail: format!("{firmware_detail} {direct_hid_detail} {whisper_detail} {turbo_oc_detail}"),
+        layer_statuses,
     })
 }
 
@@ -315,6 +372,123 @@ fn apply_turbo_oc_profile_hint_detail() -> String {
     }
 }
 
+fn classify_firmware_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "acer-firmware-mode",
+        "Acer Firmware Mode",
+        detail,
+        &["unavailable"],
+        &["rejected"],
+        &["readback did not confirm", "Accepted but did not confirm"],
+        &["Confirmed", "Applied", "Accepted"],
+    )
+}
+
+fn classify_direct_hid_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "acer-hid-mode",
+        "Acer HID Mode",
+        detail,
+        &["unavailable", "not found"],
+        &[],
+        &["skipped"],
+        &["applied"],
+    )
+}
+
+fn classify_turbo_oc_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "acer-hid-turbo-oc",
+        "Acer HID Turbo Hint",
+        detail,
+        &["unavailable", "not found"],
+        &[],
+        &["skipped"],
+        &["applied"],
+    )
+}
+
+fn classify_whisper_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "nvidia-whisper",
+        "NVIDIA Whisper",
+        detail,
+        &["unavailable"],
+        &[],
+        &["skipped"],
+        &["Applied", "Cleared"],
+    )
+}
+
+fn classify_cpu_power_limit_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "cpu-package-power-limit",
+        "CPU Package Limit",
+        detail,
+        &[
+            "skipped",
+            "unavailable",
+            "not changed",
+            "locked",
+            "could not be derived",
+            "no readback",
+        ],
+        &[],
+        &["No CPU package power-limit target"],
+        &["applied", "already matched"],
+    )
+}
+
+fn classify_nvidia_power_status(detail: &str) -> ControlLayerStatus {
+    classify_detail(
+        "nvidia-power-limit",
+        "NVIDIA Power Limit",
+        detail,
+        &["unavailable", "no usable value"],
+        &[],
+        &[],
+        &["NVIDIA enforced power limit"],
+    )
+}
+
+fn classify_detail(
+    id: &'static str,
+    label: &'static str,
+    detail: &str,
+    unavailable_patterns: &[&str],
+    failed_patterns: &[&str],
+    skipped_or_unknown_patterns: &[&str],
+    applied_patterns: &[&str],
+) -> ControlLayerStatus {
+    let lower = detail.to_ascii_lowercase();
+    if failed_patterns
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+    {
+        return ControlLayerStatus::failed(id, label, detail);
+    }
+    if unavailable_patterns
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+    {
+        return ControlLayerStatus::unavailable(id, label, detail);
+    }
+    if skipped_or_unknown_patterns
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+    {
+        return ControlLayerStatus::skipped(id, label, detail);
+    }
+    if applied_patterns
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_ascii_lowercase()))
+    {
+        return ControlLayerStatus::applied(id, label, detail);
+    }
+
+    ControlLayerStatus::unknown(id, label, detail)
+}
+
 fn apply_acer_platform_profile_or_fallback(
     profile_label: &str,
     input: u64,
@@ -335,28 +509,30 @@ fn apply_acer_platform_profile_or_fallback(
                 let after_misc = read_misc_value_byte(MISC_SETTING_PLATFORM_PROFILE);
                 let supported_detail = describe_supported_profiles(&supported_profiles_raw, value);
                 if profile_readback_matches(&after_misc, value) {
-                    return format!(
+                    format!(
                         "Confirmed AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. {supported_detail} {}",
                         result.output,
                         describe_profile_readback(
                             "Current platform profile after misc-setting write",
                             &after_misc,
                         )
-                    );
-                }
-                return format!(
-                    "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}; readback did not confirm the target. {supported_detail} {} Legacy fallback skipped because the primary write was accepted.",
-                    result.output,
-                    describe_profile_readback(
-                        "Current platform profile after misc-setting write",
-                        &after_misc,
                     )
-                );
+                } else {
+                    format!(
+                        "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}; readback did not confirm the target. {supported_detail} {} Legacy fallback skipped because the primary write was accepted.",
+                        result.output,
+                        describe_profile_readback(
+                            "Current platform profile after misc-setting write",
+                            &after_misc,
+                        )
+                    )
+                }
+            } else {
+                format!(
+                    "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. Platform profile readback skipped for responsive profile switching; set AEROFORGE_PROFILE_READBACK=1 for diagnostics.",
+                    result.output
+                )
             }
-            return format!(
-                "Applied AcerGamingFunction {mode_label} platform profile with SetGamingMiscSetting(0x0B, 0x{value:02X}) gmOutput {:?}. Platform profile readback skipped for responsive profile switching; set AEROFORGE_PROFILE_READBACK=1 for diagnostics.",
-                result.output
-            );
         }
         Ok(result) => {
             let fallback = apply_legacy_gaming_profile(
@@ -366,10 +542,10 @@ fn apply_acer_platform_profile_or_fallback(
                 balanced_base_for_custom,
                 custom_base_label,
             );
-            return format!(
+            format!(
                 "AcerGamingFunction rejected platform profile SetGamingMiscSetting(0x0B, 0x{value:02X}) with gmOutput {:?}. Platform readback skipped before fallback for responsive profile switching. {fallback}",
                 result.output
-            );
+            )
         }
         Err(error) => {
             let fallback = apply_legacy_gaming_profile(
@@ -379,9 +555,9 @@ fn apply_acer_platform_profile_or_fallback(
                 balanced_base_for_custom,
                 custom_base_label,
             );
-            return format!(
+            format!(
                 "AcerGamingFunction platform profile misc-setting write unavailable: {error}. Platform readback skipped before fallback for responsive profile switching. {fallback}"
-            );
+            )
         }
     }
 }
@@ -488,7 +664,7 @@ fn profile_readback_enabled() -> bool {
 }
 
 fn describe_supported_profiles(
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
+    result: &Result<Option<u8>, DynError>,
     target_profile_value: u8,
 ) -> String {
     match result {
@@ -532,25 +708,17 @@ fn supported_profile_names(mask: u8) -> Vec<&'static str> {
     names
 }
 
-fn read_misc_value_byte(
-    setting: u8,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn read_misc_value_byte(setting: u8) -> Result<Option<u8>, DynError> {
     Ok(read_gaming_misc_setting(setting)?
         .output
         .map(decode_gm_output_byte))
 }
 
-fn profile_readback_matches(
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
-    expected: u8,
-) -> bool {
+fn profile_readback_matches(result: &Result<Option<u8>, DynError>, expected: u8) -> bool {
     matches!(result, Ok(Some(value)) if *value == expected)
 }
 
-fn describe_profile_readback(
-    label: &str,
-    result: &Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>>,
-) -> String {
+fn describe_profile_readback(label: &str, result: &Result<Option<u8>, DynError>) -> String {
     match result {
         Ok(Some(value)) => format!("{label} read as 0x{value:02X}."),
         Ok(None) => format!("{label} returned no gmOutput byte."),
@@ -593,11 +761,7 @@ fn apply_whisper_mode_detail(
     }
 }
 
-fn apply_scheme_value(
-    action: &str,
-    setting: &str,
-    value: u8,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn apply_scheme_value(action: &str, setting: &str, value: u8) -> Result<(), DynError> {
     run_powercfg(&[
         &format!("/{action}"),
         SCHEME_CURRENT,
@@ -607,87 +771,74 @@ fn apply_scheme_value(
     ])
 }
 
-fn run_powercfg(arguments: &[&str]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let output = run_powercfg_output(arguments)?;
+fn run_powercfg(arguments: &[&str]) -> Result<(), DynError> {
+    run_powercfg_output(arguments).map(drop)
+}
 
+fn run_powercfg_output(arguments: &[&str]) -> Result<std::process::Output, DynError> {
+    let output = system32_command("powercfg").args(arguments).output()?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("powercfg exited with status {}", output.status)
-    };
-
-    Err(format!("powercfg {} failed: {}", arguments.join(" "), detail).into())
+    Err(format!(
+        "powercfg {} failed: {}",
+        arguments.join(" "),
+        command_failure_detail("powercfg", &output)
+    )
+    .into())
 }
 
-fn run_powercfg_output(
-    arguments: &[&str],
-) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(Command::new("powercfg").args(arguments).output()?)
-}
-
-fn read_processor_state_readback(
-) -> Result<ProcessorStateReadback, Box<dyn std::error::Error + Send + Sync>> {
+fn read_processor_state_readback() -> Result<ProcessorStateReadback, DynError> {
+    // One powercfg /q per setting answers both AC and DC; each spawn costs ~100 ms.
+    let (min_ac, min_dc) = query_scheme_values(PROCTHROTTLEMIN)?;
+    let (max_ac, max_dc) = query_scheme_values(PROCTHROTTLEMAX)?;
     Ok(ProcessorStateReadback {
         ac: ProcessorStateSettings {
-            min_percent: query_scheme_value(
-                PROCTHROTTLEMIN,
-                "Current AC Power Setting Index",
-                PowercfgCurrentIndex::Ac,
-            )?,
-            max_percent: query_scheme_value(
-                PROCTHROTTLEMAX,
-                "Current AC Power Setting Index",
-                PowercfgCurrentIndex::Ac,
-            )?,
+            min_percent: min_ac,
+            max_percent: max_ac,
         },
         dc: ProcessorStateSettings {
-            min_percent: query_scheme_value(
-                PROCTHROTTLEMIN,
-                "Current DC Power Setting Index",
-                PowercfgCurrentIndex::Dc,
-            )?,
-            max_percent: query_scheme_value(
-                PROCTHROTTLEMAX,
-                "Current DC Power Setting Index",
-                PowercfgCurrentIndex::Dc,
-            )?,
+            min_percent: min_dc,
+            max_percent: max_dc,
         },
     })
 }
 
-fn query_scheme_value(
+fn query_scheme_values(setting: &str) -> Result<(u8, u8), DynError> {
+    let stdout = query_scheme_output(setting)?;
+    Ok((
+        parse_scheme_value(
+            &stdout,
+            setting,
+            "Current AC Power Setting Index",
+            PowercfgCurrentIndex::Ac,
+        )?,
+        parse_scheme_value(
+            &stdout,
+            setting,
+            "Current DC Power Setting Index",
+            PowercfgCurrentIndex::Dc,
+        )?,
+    ))
+}
+
+fn query_scheme_output(setting: &str) -> Result<String, DynError> {
+    let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_scheme_value(
+    stdout: &str,
     setting: &str,
     label: &str,
     current_index: PowercfgCurrentIndex,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
-    let output = run_powercfg_output(&["/q", SCHEME_CURRENT, SUB_PROCESSOR, setting])?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("powercfg exited with status {}", output.status)
-        };
-        return Err(format!("powercfg /q {} failed: {}", setting, detail).into());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(value) = parse_labeled_powercfg_value(&stdout, setting, label)? {
+) -> Result<u8, DynError> {
+    if let Some(value) = parse_labeled_powercfg_value(stdout, setting, label)? {
         return Ok(value);
     }
 
-    if let Some(value) = parse_scoped_powercfg_value(&stdout, setting, current_index)? {
+    if let Some(value) = parse_scoped_powercfg_value(stdout, setting, current_index)? {
         return Ok(value);
     }
 
@@ -702,7 +853,7 @@ fn parse_labeled_powercfg_value(
     stdout: &str,
     setting: &str,
     label: &str,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<u8>, DynError> {
     let regex = current_index_regex();
     for line in stdout.lines() {
         let trimmed = line.trim();
@@ -726,7 +877,7 @@ fn parse_scoped_powercfg_value(
     stdout: &str,
     setting: &str,
     current_index: PowercfgCurrentIndex,
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<u8>, DynError> {
     let regex = current_index_regex();
     let mut all_values = Vec::new();
     let mut setting_values = Vec::new();
@@ -778,10 +929,7 @@ fn parse_scoped_powercfg_value(
     Ok(Some(percent_from_powercfg_hex(parsed, setting)?))
 }
 
-fn percent_from_powercfg_hex(
-    parsed: u32,
-    setting: &str,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+fn percent_from_powercfg_hex(parsed: u32, setting: &str) -> Result<u8, DynError> {
     u8::try_from(parsed)
         .map_err(|_| format!("Readback value {} for {} exceeds u8 range", parsed, setting).into())
 }
@@ -826,5 +974,31 @@ mod tests {
                 .unwrap(),
             Some(88)
         );
+    }
+
+    #[test]
+    fn classifies_power_layer_statuses() {
+        assert!(matches!(
+            classify_firmware_status("AcerGamingFunction platform profile misc-setting write unavailable: Windows Management Instrumentation is disabled."),
+            ControlLayerStatus { state: super::super::models::ControlLayerState::Unavailable, .. }
+        ));
+        assert!(matches!(
+            classify_cpu_power_limit_status(
+                "CPU package power-limit applied for turbo: PL1 28.0W -> 115.0W."
+            ),
+            ControlLayerStatus {
+                state: super::super::models::ControlLayerState::Applied,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_nvidia_power_status(
+                "NVIDIA enforced power-limit readback unavailable: disabled."
+            ),
+            ControlLayerStatus {
+                state: super::super::models::ControlLayerState::Unavailable,
+                ..
+            }
+        ));
     }
 }

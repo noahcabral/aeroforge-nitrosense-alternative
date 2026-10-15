@@ -3,6 +3,7 @@ mod probes;
 
 use models::{feature, feature_with, CapabilitySnapshot, FeatureSupport};
 
+use crate::DynError;
 use crate::{
     paths::ServicePaths,
     workers::{run_periodic_worker, WorkerEventSender, WorkerRegistration},
@@ -19,7 +20,7 @@ fn run(
     paths: ServicePaths,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     event_tx: WorkerEventSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     run_periodic_worker(
         WORKER_NAME,
         SAMPLE_INTERVAL,
@@ -30,7 +31,7 @@ fn run(
     )
 }
 
-fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn tick(paths: &ServicePaths) -> Result<(), DynError> {
     let acer_wmi_present = probes::acer_gaming_wmi_present();
     let acer_fan_telemetry_present = probes::acer_fan_telemetry_present();
     let battery_control = probes::battery_control_probe();
@@ -79,9 +80,9 @@ fn tick(paths: &ServicePaths) -> Result<(), Box<dyn std::error::Error + Send + S
         ],
     };
 
-    std::fs::write(
-        paths.worker_snapshot("capabilities"),
-        serde_json::to_string_pretty(&snapshot)?,
+    crate::paths::write_text_atomically(
+        &paths.worker_snapshot("capabilities"),
+        &serde_json::to_string_pretty(&snapshot)?,
     )?;
 
     Ok(())

@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::telemetry::system::sanitize_log_message,
@@ -17,6 +18,7 @@ pub trait RefreshState {
     fn set_last_error(&mut self, error: Option<String>);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_cached_value<TState, TStoredValue, TQueryValue, TQuery, TApply, TRead, TNeedsSync>(
     paths: &ServicePaths,
     component_name: &str,
@@ -31,14 +33,8 @@ where
     TState: RefreshState + Send + 'static,
     TStoredValue: Clone,
     TQueryValue: Send + 'static,
-    TQuery: Fn() -> Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>
-        + Send
-        + Copy
-        + 'static,
-    TApply: Fn(&mut TState, &Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>)
-        + Send
-        + Copy
-        + 'static,
+    TQuery: Fn() -> Result<TQueryValue, DynError> + Send + Copy + 'static,
+    TApply: Fn(&mut TState, &Result<TQueryValue, DynError>) + Send + Copy + 'static,
     TRead: Fn(&TState) -> TStoredValue,
     TNeedsSync: Fn(&TState) -> bool,
 {
@@ -46,7 +42,9 @@ where
     let mut should_run_sync = false;
 
     {
-        let mut guard = cache.lock().expect("refresh cache lock poisoned");
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stale = guard
             .last_refresh()
             .map(|instant| instant.elapsed() >= refresh_interval)
@@ -64,7 +62,9 @@ where
 
     if should_run_sync {
         let result = query();
-        let mut guard = cache.lock().expect("refresh cache lock poisoned");
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         apply(&mut guard, &result);
         finalize_refresh(paths, component_name, &mut *guard, &result);
         return read(&guard);
@@ -76,13 +76,17 @@ where
         let component_name = component_name.to_string();
         std::thread::spawn(move || {
             let result = query();
-            let mut guard = cache.lock().expect("refresh cache lock poisoned");
+            let mut guard = cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             apply(&mut guard, &result);
             finalize_refresh(&paths, &component_name, &mut *guard, &result);
         });
     }
 
-    let guard = cache.lock().expect("refresh cache lock poisoned");
+    let guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     read(&guard)
 }
 
@@ -90,7 +94,7 @@ fn finalize_refresh<TState, TQueryValue>(
     paths: &ServicePaths,
     component_name: &str,
     state: &mut TState,
-    result: &Result<TQueryValue, Box<dyn std::error::Error + Send + Sync>>,
+    result: &Result<TQueryValue, DynError>,
 ) where
     TState: RefreshState,
 {

@@ -14,29 +14,52 @@ pub enum PipeRequest {
     GetCapabilities,
     GetControlSnapshot,
     GetTelemetrySnapshot,
-    RestoreStartupState,
+    RestoreStartupState {
+        #[serde(default)]
+        write_token: Option<String>,
+    },
     ApplyPowerProfile {
         payload: ApplyPowerProfileRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
     ApplyGpuTuning {
         payload: ApplyGpuTuningRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
     ApplyFanProfile {
         payload: ApplyFanProfileRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
     ApplyCustomFanCurves {
         payload: ApplyCustomFanCurvesRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
-    StartFanSpeedCalibration,
-    CancelFanSpeedCalibration,
+    StartFanSpeedCalibration {
+        #[serde(default)]
+        write_token: Option<String>,
+    },
+    CancelFanSpeedCalibration {
+        #[serde(default)]
+        write_token: Option<String>,
+    },
     ApplyBootLogo {
         payload: ApplyBootLogoRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
     ApplySmartCharging {
         payload: ApplySmartChargeRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
     ApplyTelemetrySettings {
         payload: ApplyTelemetrySettingsRequest,
+        #[serde(default)]
+        write_token: Option<String>,
     },
 }
 

@@ -1,11 +1,11 @@
+use super::now_unix;
+use super::DynError;
 use std::{
     ffi::OsStr,
     fs, io,
-    os::windows::{ffi::OsStrExt, process::CommandExt},
+    os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Command,
     sync::RwLock,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{
@@ -18,16 +18,14 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 use super::models::{UpdateChannelId, UpdateStatus};
+use super::process::hidden_command;
 use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-
-type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 const UPDATE_REPO_SLUG: &str = "noahcabral/aeroforge-nitrosense-alternative";
 const UPDATE_STATE_FILE: &str = "update-state.json";
 const UPDATES_DIR_NAME: &str = "updates";
 const SETUP_ASSET_PREFIX: &str = "AeroForge-Control-Setup-";
 const PORTABLE_ASSET_PREFIX: &str = "AeroForge-Control-Portable-";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct UpdaterStore {
     status: RwLock<UpdateStatus>,
@@ -54,22 +52,24 @@ impl UpdaterStore {
         let current = self
             .status
             .read()
-            .expect("updater status lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         apply_runtime_fields(current)
     }
 
     pub fn save_status(&self, status: UpdateStatus) -> Result<UpdateStatus, DynError> {
         let runtime_status = apply_runtime_fields(status);
-        fs::write(
+        // Held across the file write so concurrent saves reach disk in the
+        // same order they reach memory.
+        let mut guard = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::state::write_text_atomically(
             &self.status_file,
-            serde_json::to_string_pretty(&runtime_status)?,
+            &serde_json::to_string_pretty(&runtime_status)?,
         )?;
-
-        {
-            let mut guard = self.status.write().expect("updater status lock poisoned");
-            *guard = runtime_status.clone();
-        }
+        *guard = runtime_status.clone();
 
         Ok(runtime_status)
     }
@@ -102,6 +102,16 @@ pub fn stage_latest_update(
     let candidate = resolved.asset.ok_or_else(|| {
         io::Error::other("No installable update asset is available for the selected channel.")
     })?;
+    let checksum_asset = resolved.sha256_asset;
+    // Release metadata is remote input; the asset name only ever becomes a bare
+    // file name under the staging directory.
+    if Path::new(&candidate.name).file_name() != Some(OsStr::new(&candidate.name)) {
+        return Err(io::Error::other(format!(
+            "Refusing update asset with a path-like name: {}",
+            candidate.name
+        ))
+        .into());
+    }
 
     let stage_root = store.updates_dir().join(
         resolved
@@ -114,24 +124,43 @@ pub fn stage_latest_update(
     fs::create_dir_all(&stage_root)?;
     let staged_file = stage_root.join(&candidate.name);
 
-    let mut response = github_client()?
+    let staged_bytes = github_client()?
         .get(&candidate.browser_download_url)
         .send()?
-        .error_for_status()?;
-    let mut file = fs::File::create(&staged_file)?;
-    io::copy(&mut response, &mut file)?;
-
-    let staged_bytes = fs::read(&staged_file)?;
+        .error_for_status()?
+        .bytes()?;
+    fs::write(&staged_file, &staged_bytes)?;
     let staged_sha256 = format!("{:x}", Sha256::digest(&staged_bytes));
+    let verified_sha256 = if let Some(checksum_asset) = checksum_asset {
+        let checksum_text = download_text_asset(&checksum_asset)?;
+        verify_staged_sha256(&candidate.name, &staged_sha256, &checksum_text)?;
+        true
+    } else {
+        false
+    };
 
     let mut status = resolved.status;
     status.staged_asset_name = Some(candidate.name.clone());
     status.staged_asset_path = Some(staged_file.display().to_string());
     status.staged_sha256 = Some(staged_sha256);
+    status.staged_sha256_verified = verified_sha256;
     status.staged_at_unix = Some(now_unix());
-    status.can_install_update = true;
-    status.detail = format!("Downloaded {} and staged it for install.", candidate.name);
-    status.last_error = None;
+    status.can_install_update = verified_sha256;
+    if verified_sha256 {
+        status.detail = format!(
+            "Downloaded {} and verified its SHA256 against release metadata.",
+            candidate.name
+        );
+        status.last_error = None;
+    } else {
+        status.detail = format!(
+            "Downloaded {}, but install is blocked until the release includes a matching SHA256 sidecar.",
+            candidate.name
+        );
+        status.last_error = Some(
+            "Release asset staged without a trusted SHA256 sidecar; local hash alone is not accepted.".into(),
+        );
+    }
 
     store.save_status(status)
 }
@@ -152,6 +181,18 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
     let staged_file = PathBuf::from(&staged_path);
     if !staged_file.exists() {
         return Err(io::Error::other("The staged update file no longer exists on disk.").into());
+    }
+    // Re-verify right before the elevated launch: the stage-time result lives in
+    // a user-writable state file and the EXE in %APPDATA% could have been swapped.
+    let staged_sha256 = format!("{:x}", Sha256::digest(fs::read(&staged_file)?));
+    if Some(staged_sha256.as_str()) != status.staged_sha256.as_deref() {
+        status.can_install_update = false;
+        status.staged_sha256_verified = false;
+        let _ = store.save_status(status);
+        return Err(io::Error::other(
+            "The staged update file no longer matches its verified SHA256. Stage the update again.",
+        )
+        .into());
     }
     let extension = staged_file
         .extension()
@@ -215,8 +256,7 @@ pub fn launch_staged_install(store: &UpdaterStore) -> Result<UpdateStatus, DynEr
         .ok_or_else(|| io::Error::other("Could not resolve the current executable file name."))?
         .to_string();
 
-    Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
+    hidden_command("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -260,6 +300,9 @@ fn resolve_update_candidate(
             .or_else(|| release.name.clone())
             .unwrap_or_else(|| release.tag_name.clone());
         let latest_asset = select_update_asset(&release.assets);
+        let latest_sha256_asset = latest_asset
+            .as_ref()
+            .and_then(|asset| select_sha256_asset(&release.assets, &asset.name));
         let current_version = Version::parse(env!("CARGO_PKG_VERSION")).ok();
         let release_version = normalize_release_version(&release.tag_name)
             .and_then(|value| Version::parse(&value).ok());
@@ -270,23 +313,30 @@ fn resolve_update_candidate(
             .name
             .clone()
             .or_else(|| Some(release.tag_name.clone()));
-        status.latest_published_at = release.published_at.clone();
+        status.latest_published_at = release.published_at;
         status.latest_commit_sha = None;
         status.latest_asset_name = latest_asset.as_ref().map(|asset| asset.name.clone());
-        status.update_available = match (current_version, release_version) {
-            (Some(current), Some(remote)) => remote > current,
-            _ => latest_version != env!("CARGO_PKG_VERSION"),
-        };
+        status.update_available =
+            is_newer_release(current_version.as_ref(), release_version.as_ref());
         status.can_stage_update = latest_asset.is_some() && status.update_available;
         status.can_install_update = staged_update_ready(&status);
         status.detail = if let Some(asset) = latest_asset.as_ref() {
             if status.update_available {
-                format!(
-                    "{} is available from the {} channel. Asset {} is ready to stage.",
-                    latest_version,
-                    channel.as_str(),
-                    asset.name
-                )
+                if latest_sha256_asset.is_some() {
+                    format!(
+                        "{} is available from the {} channel. Asset {} is ready to stage with SHA256 release metadata.",
+                        latest_version,
+                        channel.as_str(),
+                        asset.name
+                    )
+                } else {
+                    format!(
+                        "{} is available from the {} channel. Asset {} can be downloaded, but install will remain blocked until a SHA256 sidecar is attached to the release.",
+                        latest_version,
+                        channel.as_str(),
+                        asset.name
+                    )
+                }
             } else {
                 format!(
                     "AeroForge is already on {}. Latest published update asset is {}.",
@@ -304,6 +354,7 @@ fn resolve_update_candidate(
         return Ok(ResolvedUpdateCandidate {
             status,
             asset: latest_asset,
+            sha256_asset: latest_sha256_asset,
         });
     }
 
@@ -324,6 +375,7 @@ fn resolve_update_candidate(
             return Ok(ResolvedUpdateCandidate {
                 status,
                 asset: None,
+                sha256_asset: None,
             });
         }
 
@@ -348,6 +400,7 @@ fn resolve_update_candidate(
                 return Ok(ResolvedUpdateCandidate {
                     status,
                     asset: None,
+                    sha256_asset: None,
                 });
             }
         };
@@ -369,6 +422,7 @@ fn resolve_update_candidate(
         return Ok(ResolvedUpdateCandidate {
             status,
             asset: None,
+            sha256_asset: None,
         });
     }
 
@@ -386,6 +440,7 @@ fn resolve_update_candidate(
     Ok(ResolvedUpdateCandidate {
         status,
         asset: None,
+        sha256_asset: None,
     })
 }
 
@@ -393,7 +448,10 @@ fn github_client() -> Result<Client, DynError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("AeroForgeControlUpdater/0.11.0"),
+        HeaderValue::from_static(concat!(
+            "AeroForgeControlUpdater/",
+            env!("CARGO_PKG_VERSION")
+        )),
     );
     headers.insert(
         ACCEPT,
@@ -452,6 +510,33 @@ fn select_update_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
         })
 }
 
+fn select_sha256_asset(assets: &[GithubAsset], update_asset_name: &str) -> Option<GithubAsset> {
+    let exact_names = [
+        format!("{update_asset_name}.sha256"),
+        format!("{update_asset_name}.sha256.txt"),
+    ];
+
+    exact_names
+        .iter()
+        .find_map(|name| {
+            assets
+                .iter()
+                .find(|asset| asset.name.eq_ignore_ascii_case(name))
+                .cloned()
+        })
+        .or_else(|| {
+            assets
+                .iter()
+                .find(|asset| {
+                    matches!(
+                        asset.name.to_ascii_lowercase().as_str(),
+                        "sha256sums" | "sha256sums.txt" | "checksums.txt"
+                    )
+                })
+                .cloned()
+        })
+}
+
 fn select_setup_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
     assets
         .iter()
@@ -476,6 +561,74 @@ fn select_portable_asset(assets: &[GithubAsset]) -> Option<GithubAsset> {
                 .find(|asset| asset.name.to_ascii_lowercase().ends_with(".zip"))
                 .cloned()
         })
+}
+
+fn download_text_asset(asset: &GithubAsset) -> Result<String, DynError> {
+    Ok(github_client()?
+        .get(&asset.browser_download_url)
+        .send()?
+        .error_for_status()?
+        .text()?)
+}
+
+fn verify_staged_sha256(
+    update_asset_name: &str,
+    actual_sha256: &str,
+    checksum_text: &str,
+) -> Result<(), DynError> {
+    let expected =
+        expected_sha256_from_text(update_asset_name, checksum_text).ok_or_else(|| {
+            io::Error::other(format!(
+                "Release checksum metadata did not contain a SHA256 entry for {update_asset_name}."
+            ))
+        })?;
+
+    if !expected.eq_ignore_ascii_case(actual_sha256) {
+        return Err(io::Error::other(format!(
+            "Release checksum mismatch for {update_asset_name}. Expected {expected}, got {actual_sha256}."
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
+fn expected_sha256_from_text(update_asset_name: &str, checksum_text: &str) -> Option<String> {
+    let mut only_hash: Option<String> = None;
+    for line in checksum_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let hash = trimmed.split_whitespace().find(|part| is_sha256_hex(part));
+        let Some(hash) = hash else {
+            continue;
+        };
+
+        if trimmed
+            .to_ascii_lowercase()
+            .contains(&update_asset_name.to_ascii_lowercase())
+        {
+            return Some(hash.to_ascii_lowercase());
+        }
+
+        if only_hash.is_none() && trimmed.split_whitespace().count() == 1 {
+            only_hash = Some(hash.to_ascii_lowercase());
+        }
+    }
+
+    only_hash
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// A tag that does not parse as semver is never treated as newer; a string
+/// inequality fallback would offer a downgrade to whatever a malformed tag names.
+fn is_newer_release(current: Option<&Version>, remote: Option<&Version>) -> bool {
+    matches!((current, remote), (Some(current), Some(remote)) if remote > current)
 }
 
 fn normalize_release_version(tag_name: &str) -> Option<String> {
@@ -507,6 +660,7 @@ fn default_status() -> UpdateStatus {
         staged_asset_name: None,
         staged_asset_path: None,
         staged_sha256: None,
+        staged_sha256_verified: false,
         staged_at_unix: None,
         detail: "Updater not checked yet.".into(),
         last_error: None,
@@ -542,7 +696,7 @@ fn load_status(path: &Path) -> Result<Option<UpdateStatus>, DynError> {
 }
 
 fn staged_update_ready(status: &UpdateStatus) -> bool {
-    if !status.update_available || !staged_file_exists(status) {
+    if !status.update_available || !status.staged_sha256_verified || !staged_file_exists(status) {
         return false;
     }
 
@@ -593,13 +747,6 @@ fn quarantine_invalid_state_file(path: &Path, reason: &str) -> Result<(), io::Er
     fs::rename(path, backup_path)
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn extract_zip(zip_path: &Path, destination: &Path) -> Result<(), DynError> {
     let file = fs::File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -643,7 +790,7 @@ fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
         .unwrap_or_else(|| vec![0]);
     let parameters = [0u16];
 
-    let result = unsafe {
+    let result = super::process::with_sta_com(|| unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             operation.as_ptr(),
@@ -652,13 +799,18 @@ fn shell_execute_runas(path: &Path) -> Result<(), DynError> {
             directory.as_ptr(),
             SW_SHOWNORMAL,
         )
-    };
+    });
     let result_code = result as isize;
     if result_code <= 32 {
-        return Err(io::Error::other(format!(
-            "Windows refused to launch the setup installer with elevation. ShellExecuteW returned {result_code}."
-        ))
-        .into());
+        // SE_ERR_ACCESSDENIED is also what a cancelled UAC prompt returns.
+        let reason = if result_code == 5 {
+            "The administrator prompt was declined or blocked, so the update was not installed."
+        } else {
+            "Windows refused to launch the setup installer with elevation."
+        };
+        return Err(
+            io::Error::other(format!("{reason} ShellExecuteW returned {result_code}.")).into(),
+        );
     }
 
     Ok(())
@@ -734,4 +886,81 @@ struct GithubCommitter {
 struct ResolvedUpdateCandidate {
     status: UpdateStatus,
     asset: Option<GithubAsset>,
+    sha256_asset: Option<GithubAsset>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_text_supports_single_hash_and_sha256sums_lines() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            expected_sha256_from_text("AeroForge-Control-Setup-1.0.0.exe", hash).as_deref(),
+            Some(hash)
+        );
+
+        let checksums = format!(
+            "{hash}  AeroForge-Control-Setup-1.0.0.exe\nffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  other.exe"
+        );
+        assert_eq!(
+            expected_sha256_from_text("AeroForge-Control-Setup-1.0.0.exe", &checksums).as_deref(),
+            Some(hash)
+        );
+    }
+
+    #[test]
+    fn selects_asset_specific_sha256_before_generic_checksum_file() {
+        let assets = vec![
+            GithubAsset {
+                name: "SHA256SUMS.txt".into(),
+                browser_download_url: "https://example.invalid/SHA256SUMS.txt".into(),
+            },
+            GithubAsset {
+                name: "AeroForge-Control-Setup-1.0.0.exe.sha256".into(),
+                browser_download_url: "https://example.invalid/setup.sha256".into(),
+            },
+        ];
+
+        let selected = select_sha256_asset(&assets, "AeroForge-Control-Setup-1.0.0.exe")
+            .expect("expected asset-specific checksum");
+        assert_eq!(selected.name, "AeroForge-Control-Setup-1.0.0.exe.sha256");
+    }
+
+    #[test]
+    fn unparseable_release_tag_never_counts_as_newer() {
+        let current = Version::parse("0.15.6").unwrap();
+        assert!(is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.16.0").unwrap())
+        ));
+        assert!(!is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.15.6").unwrap())
+        ));
+        assert!(!is_newer_release(
+            Some(&current),
+            Some(&Version::parse("0.15.5").unwrap())
+        ));
+        assert!(!is_newer_release(Some(&current), None));
+        assert!(!is_newer_release(None, Some(&current)));
+    }
+
+    #[test]
+    fn staged_update_ready_requires_verified_checksum() {
+        let mut status = default_status();
+        status.update_available = true;
+        status.latest_asset_name = Some("AeroForge-Control-Setup-1.0.0.exe".into());
+        status.staged_asset_name = status.latest_asset_name.clone();
+        status.staged_asset_path = Some(std::env::current_exe().unwrap().display().to_string());
+        status.staged_sha256 =
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into());
+
+        status.staged_sha256_verified = false;
+        assert!(!staged_update_ready(&status));
+
+        status.staged_sha256_verified = true;
+        assert!(staged_update_ready(&status));
+    }
 }

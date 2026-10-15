@@ -1,34 +1,34 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AeroForge Control",
-  "version": "0.16.3",
+  "version": "0.16.4",
   "identifier": "com.noah.aeroforgecontrol",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendDev.ps1",
-    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-FrontendBuild.ps1",
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/Run-BeforeBuild.ps1",
     "beforeBundleCommand": "powershell -ExecutionPolicy Bypass -File scripts/Prepare-BundleResources.ps1"
   },
   "app": {
     "windows": [
       {
         "title": "AeroForge Control",
-        "width": 1460,
-        "height": 980,
-        "minWidth": 1180,
-        "minHeight": 760,
+        "width": 1280,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 540,
         "center": true,
         "visible": false,
         "decorations": true,
         "transparent": false,
         "resizable": true,
         "fullscreen": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu --disable-gpu-compositing"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420 https://api.github.com"
     }
   },
   "bundle": {
@@ -58,7 +58,6 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
     ]
   }

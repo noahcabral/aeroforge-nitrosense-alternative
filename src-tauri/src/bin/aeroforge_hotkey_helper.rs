@@ -2,72 +2,42 @@
 #![windows_subsystem = "windows"]
 
 use std::{
-    collections::HashSet,
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
-    mem::size_of,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        OnceLock,
-    },
+    sync::OnceLock,
     thread::{self, sleep},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use aeroforge_control_lib::backend::{
-    commands::show_update_notification,
+    commands::notify_update_available,
+    log_file,
     models::UpdateChannelId,
+    nitro_key, now_unix,
+    single_instance::{find_existing_main_window, is_app_process_running},
     updater::{refresh_status, UpdaterStore},
+    DynError,
 };
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, HANDLE, HWND,
-        INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
-    },
-    System::{
-        Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-            TH32CS_SNAPPROCESS,
-        },
-        LibraryLoader::GetModuleHandleW,
-        Threading::{
-            AttachThreadInput, CreateMutexW, GetCurrentThreadId, OpenProcess,
-            QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-        },
-    },
-    UI::{
-        Input::{
-            GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList,
-            RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER,
-            RIDEV_INPUTSINK, RIDI_DEVICEINFO, RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
-            RIM_TYPEKEYBOARD,
-        },
-        WindowsAndMessaging::{
-            AllowSetForegroundWindow, BringWindowToTop, CreateWindowExW, DefWindowProcW,
-            DispatchMessageW, EnumWindows, GetForegroundWindow, GetMessageW, GetWindowTextLengthW,
-            GetWindowTextW, GetWindowThreadProcessId, RegisterClassW, SetForegroundWindow,
-            SetWindowPos, ShowWindow, ShowWindowAsync, SwitchToThisWindow, TranslateMessage,
-            HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, MSG, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-            SW_RESTORE, WM_INPUT, WNDCLASSW, WS_OVERLAPPED,
-        },
+    Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND},
+    System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId},
+    UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow, GetWindowTextLengthW,
+        GetWindowTextW, GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, ShowWindow,
+        ShowWindowAsync, SwitchToThisWindow, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_RESTORE,
     },
 };
 
-const NITRO_KEY_VKEY: u16 = 0x00ff;
-const NITRO_KEY_SCAN: u16 = 0x0075;
-const RAW_KEY_BREAK: u16 = 0x0001;
-const DEBOUNCE_MS: u64 = 750;
 const ASFW_ANY: u32 = u32::MAX;
 const BACKGROUND_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const BACKGROUND_UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const UI_PREWARM_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const UI_PREWARM_INTERVAL: Duration = Duration::from_secs(30);
+const UI_PREWARM_MAX_BACKOFF_EXPONENT: u32 = 5;
 
-static LAST_NITRO_KEY_MS: AtomicU64 = AtomicU64::new(0);
 static APP_EXE: OnceLock<PathBuf> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -117,7 +87,7 @@ fn main() {
     spawn_background_update_worker(&log_path);
     spawn_ui_prewarm_worker(&log_path, &app_exe);
 
-    if let Err(error) = run_raw_input_loop(&log_path) {
+    if let Err(error) = nitro_key::run_raw_input_loop(on_nitro_key, Some(log_path.clone())) {
         write_log(&log_path, &format!("raw-input loop stopped: {error}"));
     }
 }
@@ -177,30 +147,71 @@ fn spawn_ui_prewarm_worker(log_path: &Path, app_exe: &Path) {
     let app_exe = app_exe.to_path_buf();
     thread::spawn(move || {
         sleep(UI_PREWARM_INITIAL_DELAY);
+        let mut launched_last_tick = false;
+        let mut failed_launches = 0u32;
         loop {
-            if let Err(error) = reconcile_ui_prewarm(&log_path, &app_exe) {
-                write_log(&log_path, &format!("UI prewarm check failed: {error}"));
+            let launched = match reconcile_ui_prewarm(&log_path, &app_exe) {
+                Ok(launched) => launched,
+                Err(error) => {
+                    write_log(&log_path, &format!("UI prewarm check failed: {error}"));
+                    true
+                }
+            };
+            // A prewarm that is gone again by the next tick died at startup (missing WebView2,
+            // crash): back off instead of relaunching a broken install every 30 seconds forever.
+            failed_launches = if launched && launched_last_tick {
+                failed_launches + 1
+            } else if launched {
+                failed_launches
+            } else {
+                0
+            };
+            launched_last_tick = launched;
+            let backoff = UI_PREWARM_INTERVAL
+                * 2u32.pow(failed_launches.min(UI_PREWARM_MAX_BACKOFF_EXPONENT));
+            if failed_launches > 0 {
+                write_log(
+                    &log_path,
+                    &format!(
+                        "UI prewarm exited before the next check ({failed_launches} in a row); next attempt in {}s",
+                        backoff.as_secs()
+                    ),
+                );
             }
-            sleep(UI_PREWARM_INTERVAL);
+            sleep(backoff);
         }
     });
 }
 
-fn reconcile_ui_prewarm(
-    log_path: &Path,
-    app_exe: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+#[cfg(test)]
+mod prewarm_backoff_tests {
+    use super::{UI_PREWARM_INTERVAL, UI_PREWARM_MAX_BACKOFF_EXPONENT};
+
+    #[test]
+    fn backoff_caps_at_max_exponent() {
+        let backoff = |failed: u32| {
+            UI_PREWARM_INTERVAL * 2u32.pow(failed.min(UI_PREWARM_MAX_BACKOFF_EXPONENT))
+        };
+        assert_eq!(backoff(0), UI_PREWARM_INTERVAL);
+        assert_eq!(backoff(1), UI_PREWARM_INTERVAL * 2);
+        assert_eq!(backoff(5), UI_PREWARM_INTERVAL * 32);
+        assert_eq!(backoff(40), UI_PREWARM_INTERVAL * 32);
+    }
+}
+
+/// Returns whether a hidden UI instance was launched on this tick.
+fn reconcile_ui_prewarm(log_path: &Path, app_exe: &Path) -> Result<bool, DynError> {
     let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
         return Err("could not resolve AeroForge config root".into());
     };
 
     let settings = load_helper_settings(&config_root);
     if !settings.keep_ui_prewarmed {
-        return Ok(());
+        return Ok(false);
     }
 
-    if is_app_process_running(app_exe) {
-        return Ok(());
+    if is_app_process_running(app_exe, 0) {
+        return Ok(false);
     }
 
     match Command::new(app_exe).arg("--prewarm").spawn() {
@@ -213,15 +224,13 @@ fn reconcile_ui_prewarm(
                     child.id()
                 ),
             );
-            Ok(())
+            Ok(true)
         }
         Err(error) => Err(format!("failed to launch hidden UI prewarm: {error}").into()),
     }
 }
 
-fn run_background_update_check(
-    log_path: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_background_update_check(log_path: &Path) -> Result<(), DynError> {
     let Some(config_root) = log_path.parent().map(Path::to_path_buf) else {
         return Err("could not resolve AeroForge config root".into());
     };
@@ -264,11 +273,11 @@ fn run_background_update_check(
         .clone()
         .or_else(|| status.latest_title.clone())
         .unwrap_or_else(|| "A new AeroForge update".into());
-    show_update_notification(version_label)
+    notify_update_available(&version_label)
         .map_err(|error| format!("Windows update notification failed: {error}"))?;
 
     notify_state.last_notified_key = Some(notification_key.clone());
-    notify_state.last_notified_at_unix = Some(unix_now());
+    notify_state.last_notified_at_unix = Some(now_unix());
     save_background_update_state(&config_root, &notify_state)?;
     write_log(
         log_path,
@@ -320,17 +329,10 @@ fn load_background_update_state(config_root: &Path) -> BackgroundUpdateNotificat
 fn save_background_update_state(
     config_root: &Path,
     state: &BackgroundUpdateNotificationState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), DynError> {
     let state_file = config_root.join("background-update-notification.json");
     fs::write(state_file, serde_json::to_string_pretty(state)?)?;
     Ok(())
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[derive(Debug, Clone)]
@@ -382,225 +384,7 @@ fn default_stable_channel() -> UpdateChannelId {
     UpdateChannelId::Stable
 }
 
-fn run_raw_input_loop(log_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let class_name = to_wide("AeroForgeNitroKeyHelperRawInputWindow");
-    let window_name = to_wide("AeroForge Nitro Key Helper");
-    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    if instance.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    let window_class = WNDCLASSW {
-        lpfnWndProc: Some(raw_input_window_proc),
-        hInstance: instance,
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-
-    let atom = unsafe { RegisterClassW(&window_class) };
-    if atom == 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(ERROR_CLASS_ALREADY_EXISTS as i32) {
-            return Err(error.into());
-        }
-    }
-
-    let hwnd = unsafe {
-        CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            window_name.as_ptr(),
-            WS_OVERLAPPED,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            instance,
-            std::ptr::null_mut(),
-        )
-    };
-    if hwnd.is_null() {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    let devices = build_raw_input_registrations(hwnd);
-    if devices.is_empty() {
-        return Err("no raw-input devices were available to register".into());
-    }
-
-    let registered = unsafe {
-        RegisterRawInputDevices(
-            devices.as_ptr(),
-            devices.len() as u32,
-            size_of::<RAWINPUTDEVICE>() as u32,
-        )
-    };
-    if registered == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    write_log(
-        log_path,
-        &format!(
-            "raw-input helper armed with {} registration(s)",
-            devices.len()
-        ),
-    );
-
-    let mut message = unsafe { std::mem::zeroed::<MSG>() };
-    while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
-        unsafe {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-
-    Ok(())
-}
-
-fn build_raw_input_registrations(hwnd: HWND) -> Vec<RAWINPUTDEVICE> {
-    let mut devices = Vec::new();
-    let mut seen = HashSet::<(u16, u16)>::new();
-
-    add_registration(&mut devices, &mut seen, 0x01, 0x06, hwnd);
-    add_registration(&mut devices, &mut seen, 0x0c, 0x01, hwnd);
-
-    let mut count = 0u32;
-    let list_item_size = size_of::<RAWINPUTDEVICELIST>() as u32;
-    let first_result =
-        unsafe { GetRawInputDeviceList(std::ptr::null_mut(), &mut count, list_item_size) };
-    if first_result == u32::MAX || count == 0 {
-        return devices;
-    }
-
-    let mut raw_devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
-    let list_result =
-        unsafe { GetRawInputDeviceList(raw_devices.as_mut_ptr(), &mut count, list_item_size) };
-    if list_result == u32::MAX {
-        return devices;
-    }
-
-    for raw_device in raw_devices.into_iter().take(list_result as usize) {
-        if raw_device.dwType == RIM_TYPEKEYBOARD {
-            add_registration(&mut devices, &mut seen, 0x01, 0x06, hwnd);
-            continue;
-        }
-
-        if raw_device.dwType != RIM_TYPEHID {
-            continue;
-        }
-
-        let Some(info) = read_raw_input_device_info(raw_device.hDevice) else {
-            continue;
-        };
-        let hid = unsafe { info.Anonymous.hid };
-        if hid.usUsagePage != 0 && hid.usUsage != 0 {
-            add_registration(&mut devices, &mut seen, hid.usUsagePage, hid.usUsage, hwnd);
-        }
-    }
-
-    devices
-}
-
-fn add_registration(
-    devices: &mut Vec<RAWINPUTDEVICE>,
-    seen: &mut HashSet<(u16, u16)>,
-    usage_page: u16,
-    usage: u16,
-    hwnd: HWND,
-) {
-    if !seen.insert((usage_page, usage)) {
-        return;
-    }
-
-    devices.push(RAWINPUTDEVICE {
-        usUsagePage: usage_page,
-        usUsage: usage,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    });
-}
-
-fn read_raw_input_device_info(handle: HANDLE) -> Option<RID_DEVICE_INFO> {
-    let mut info = RID_DEVICE_INFO::default();
-    info.cbSize = size_of::<RID_DEVICE_INFO>() as u32;
-    let mut info_size = info.cbSize;
-    let result = unsafe {
-        GetRawInputDeviceInfoW(
-            handle,
-            RIDI_DEVICEINFO,
-            (&mut info as *mut RID_DEVICE_INFO).cast(),
-            &mut info_size,
-        )
-    };
-
-    if result == u32::MAX {
-        None
-    } else {
-        Some(info)
-    }
-}
-
-unsafe extern "system" fn raw_input_window_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if message == WM_INPUT {
-        handle_raw_input(lparam);
-    }
-
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-}
-
-fn handle_raw_input(lparam: LPARAM) {
-    let mut raw_size = 0u32;
-    let header_size = size_of::<RAWINPUTHEADER>() as u32;
-    let first_result = unsafe {
-        GetRawInputData(
-            lparam as _,
-            RID_INPUT,
-            std::ptr::null_mut(),
-            &mut raw_size,
-            header_size,
-        )
-    };
-    if first_result == u32::MAX || raw_size == 0 {
-        return;
-    }
-
-    let mut buffer = vec![0u8; raw_size as usize];
-    let read_result = unsafe {
-        GetRawInputData(
-            lparam as _,
-            RID_INPUT,
-            buffer.as_mut_ptr().cast(),
-            &mut raw_size,
-            header_size,
-        )
-    };
-    if read_result == u32::MAX {
-        return;
-    }
-
-    let raw_input = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
-    if raw_input.header.dwType != RIM_TYPEKEYBOARD {
-        return;
-    }
-
-    let keyboard = unsafe { raw_input.data.keyboard };
-    let is_key_down = keyboard.Flags & RAW_KEY_BREAK == 0;
-    if !is_key_down || keyboard.VKey != NITRO_KEY_VKEY || keyboard.MakeCode != NITRO_KEY_SCAN {
-        return;
-    }
-
-    if !accept_debounced_press() {
-        return;
-    }
-
+fn on_nitro_key() {
     let Some(log_path) = LOG_PATH.get().cloned() else {
         return;
     };
@@ -614,13 +398,13 @@ fn activate_or_launch(log_path: &Path) {
         return;
     };
 
-    if let Some(hwnd) = find_app_window(&app_exe) {
+    if let Some(hwnd) = find_existing_main_window(&app_exe, 0) {
         let detail = restore_native_window_to_foreground(hwnd);
         write_log(log_path, &detail);
         return;
     }
 
-    if is_app_process_running(&app_exe) {
+    if is_app_process_running(&app_exe, 0) {
         write_log(
             log_path,
             "app process is already running; waiting for its window instead of launching another copy",
@@ -693,7 +477,7 @@ fn activate_or_launch(log_path: &Path) {
 fn wait_for_app_window(app_exe: &Path, timeout: Duration) -> Option<HWND> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Some(hwnd) = find_app_window(app_exe) {
+        if let Some(hwnd) = find_existing_main_window(app_exe, 0) {
             return Some(hwnd);
         }
         sleep(Duration::from_millis(150));
@@ -701,76 +485,7 @@ fn wait_for_app_window(app_exe: &Path, timeout: Duration) -> Option<HWND> {
     None
 }
 
-fn is_app_process_running(app_exe: &Path) -> bool {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return false;
-    }
-
-    let mut entry = unsafe { std::mem::zeroed::<PROCESSENTRY32W>() };
-    entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) != 0 };
-    while has_entry {
-        if process_path_matches(entry.th32ProcessID, app_exe) {
-            unsafe {
-                CloseHandle(snapshot);
-            }
-            return true;
-        }
-        has_entry = unsafe { Process32NextW(snapshot, &mut entry) != 0 };
-    }
-
-    unsafe {
-        CloseHandle(snapshot);
-    }
-    false
-}
-
-fn find_app_window(app_exe: &Path) -> Option<HWND> {
-    let mut context = WindowSearchContext {
-        app_exe: app_exe.to_path_buf(),
-        hwnd: std::ptr::null_mut(),
-    };
-
-    unsafe {
-        EnumWindows(
-            Some(enum_windows_for_app),
-            (&mut context as *mut WindowSearchContext) as LPARAM,
-        );
-    }
-
-    if context.hwnd.is_null() {
-        None
-    } else {
-        Some(context.hwnd)
-    }
-}
-
-struct WindowSearchContext {
-    app_exe: PathBuf,
-    hwnd: HWND,
-}
-
-unsafe extern "system" fn enum_windows_for_app(hwnd: HWND, lparam: LPARAM) -> i32 {
-    let context = unsafe { &mut *(lparam as *mut WindowSearchContext) };
-    let mut process_id = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, &mut process_id);
-    }
-    if process_id == 0 {
-        return 1;
-    }
-
-    if process_path_matches(process_id, &context.app_exe)
-        && window_title(hwnd).contains("AeroForge Control")
-    {
-        context.hwnd = hwnd;
-        return 0;
-    }
-
-    1
-}
-
+// HWND is a raw pointer, so this stays local rather than becoming a pub lib fn.
 fn window_title(hwnd: HWND) -> String {
     let length = unsafe { GetWindowTextLengthW(hwnd) };
     if length <= 0 {
@@ -792,40 +507,6 @@ fn window_process_id(hwnd: HWND) -> u32 {
         GetWindowThreadProcessId(hwnd, &mut process_id);
     }
     process_id
-}
-
-fn process_path_matches(process_id: u32, target: &Path) -> bool {
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
-    if process.is_null() {
-        return false;
-    }
-
-    let mut buffer = vec![0u16; 32768];
-    let mut length = buffer.len() as u32;
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) };
-    unsafe {
-        CloseHandle(process);
-    }
-    if ok == 0 {
-        return false;
-    }
-
-    let process_path = String::from_utf16_lossy(&buffer[..length as usize]);
-    paths_equal(Path::new(&process_path), target)
-}
-
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = left
-        .canonicalize()
-        .unwrap_or_else(|_| left.to_path_buf())
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let right = right
-        .canonicalize()
-        .unwrap_or_else(|_| right.to_path_buf())
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    left == right
 }
 
 fn restore_native_window_to_foreground(hwnd: HWND) -> String {
@@ -932,34 +613,8 @@ fn restore_native_window_to_foreground(hwnd: HWND) -> String {
     )
 }
 
-fn accept_debounced_press() -> bool {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let previous_ms = LAST_NITRO_KEY_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(previous_ms) < DEBOUNCE_MS {
-        return false;
-    }
-    LAST_NITRO_KEY_MS.store(now_ms, Ordering::Relaxed);
-    true
-}
-
 fn write_log(path: &Path, message: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {message}", timestamp_seconds());
-    }
-}
-
-fn timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+    log_file::append_line(path, message);
 }
 
 fn to_wide(value: &str) -> Vec<u16> {

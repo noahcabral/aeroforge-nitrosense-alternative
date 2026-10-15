@@ -1,5 +1,6 @@
 param(
   [switch]$Uninstall,
+  [switch]$RepairPrerequisites,
   [switch]$InstallPawnIO,
   [string]$ServiceSource = (Join-Path $PSScriptRoot 'aeroforge-service.exe')
 )
@@ -8,14 +9,15 @@ $ErrorActionPreference = 'Stop'
 
 $serviceName = 'AeroForgeService'
 $displayName = 'AeroForge Service'
+$wmiServiceName = 'Winmgmt'
 $serviceRoot = Join-Path $env:ProgramData 'AeroForge\Service'
 $serviceBinDir = Join-Path $serviceRoot 'bin'
 $serviceDriverDir = Join-Path $serviceRoot 'drivers'
 $serviceLogDir = Join-Path $serviceRoot 'logs'
 $installedExe = Join-Path $serviceBinDir 'aeroforge-service.exe'
-$pawnIoIntelMsrSource = Join-Path $PSScriptRoot 'IntelMSR.bin'
+$healerTaskName = 'AeroForge Service Healer'
+$healerScript = Join-Path $serviceRoot 'Start-AeroForgeServiceHealer.ps1'
 $pawnIoIntelMsrInstalled = Join-Path $serviceDriverDir 'IntelMSR.bin'
-$pawnIoSetupSource = Join-Path $PSScriptRoot 'PawnIO_setup.exe'
 $pawnIoDllEnv = 'AEROFORGE_PAWNIO_DLL'
 $pawnIoModuleEnv = 'AEROFORGE_PAWNIO_MODULE'
 $pawnIoEnableEnv = 'AEROFORGE_ENABLE_PAWNIO'
@@ -41,6 +43,30 @@ function Write-InstallLog {
   Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8
 }
 
+function Resolve-BundledResource {
+  param(
+    [Parameter(Mandatory = $true)][string]$FileName,
+    [string]$SourceRelativePath
+  )
+
+  $candidates = New-Object System.Collections.Generic.List[string]
+  [void]$candidates.Add((Join-Path $PSScriptRoot $FileName))
+  if ($SourceRelativePath) {
+    $projectRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..') -ErrorAction SilentlyContinue
+    if ($projectRoot) {
+      [void]$candidates.Add((Join-Path $projectRoot.Path $SourceRelativePath))
+    }
+  }
+
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return (Resolve-Path -LiteralPath $candidate).Path
+    }
+  }
+
+  return $null
+}
+
 function Fail-Install {
   param(
     [string]$Message,
@@ -63,9 +89,10 @@ function Test-IsAdmin {
 }
 
 function Write-PawnIoInstallerEnvironment {
+  $pawnIoSetupSource = Resolve-BundledResource -FileName 'PawnIO_setup.exe' -SourceRelativePath 'third_party\pawnio\PawnIO_setup.exe'
   Write-InstallLog "PawnIO installer diagnostics: admin=$(Test-IsAdmin) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name) os=$([Environment]::OSVersion.VersionString)."
 
-  if (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf) {
+  if ($pawnIoSetupSource -and (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf)) {
     try {
       $hash = Get-FileHash -LiteralPath $pawnIoSetupSource -Algorithm SHA256 -ErrorAction Stop
       Write-InstallLog "PawnIO setup file: path=$pawnIoSetupSource size=$((Get-Item -LiteralPath $pawnIoSetupSource).Length) sha256=$($hash.Hash)."
@@ -119,6 +146,16 @@ function Write-RecentPawnIoSetupTranscript {
   }
 }
 
+function Protect-ServiceRoot {
+  # CreateProcess and LoadLibrary search the application directory first, and
+  # ProgramData grants Users create-file by inheritance. Without this ACL any
+  # local user could plant a powershell.exe beside the service and run as SYSTEM.
+  & icacls $serviceRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "icacls failed to restrict $serviceRoot (exit code $LASTEXITCODE)."
+  }
+}
+
 function Invoke-Sc {
   param(
     [Parameter(Mandatory = $true)]
@@ -138,6 +175,76 @@ function Invoke-Sc {
     throw "sc.exe $($Arguments -join ' ') failed with exit code $exitCode."
   }
   return $output
+}
+
+function Get-ScText {
+  param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+  $output = Invoke-Sc -Arguments $Arguments -AllowedExitCodes @(0, 1060)
+  if ($null -eq $output) {
+    return ''
+  }
+  return ($output | Out-String)
+}
+
+function Get-WindowsServiceStartType {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $text = Get-ScText -Arguments @('qc', $Name)
+  foreach ($line in ($text -split "`r?`n")) {
+    if ($line -match 'START_TYPE\s*:\s*\d+\s+(.+)$') {
+      return $Matches[1].Trim()
+    }
+  }
+  return 'UNKNOWN'
+}
+
+function Test-WindowsServiceRunning {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  $text = Get-ScText -Arguments @('query', $Name)
+  return ($text -match 'STATE\s*:\s*\d+\s+RUNNING')
+}
+
+function Wait-WindowsServiceRunning {
+  param(
+    [Parameter(Mandatory = $true)][string]$Name,
+    [int]$TimeoutSeconds = 20
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    if (Test-WindowsServiceRunning -Name $Name) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 500
+  } while ((Get-Date) -lt $deadline)
+
+  return $false
+}
+
+function Repair-WindowsManagementInstrumentation {
+  $startType = Get-WindowsServiceStartType -Name $wmiServiceName
+  $wasRunning = Test-WindowsServiceRunning -Name $wmiServiceName
+  Write-InstallLog "WMI prerequisite before repair: service=$wmiServiceName startType=$startType running=$wasRunning."
+
+  if ($startType -match 'DISABLED') {
+    Write-InstallLog "Enabling Windows Management Instrumentation because Acer WMI control paths require it."
+    Invoke-Sc -Arguments @('config', $wmiServiceName, 'start=', 'auto') | Out-Null
+  }
+
+  if (-not (Test-WindowsServiceRunning -Name $wmiServiceName)) {
+    Write-InstallLog "Starting Windows Management Instrumentation."
+    Invoke-Sc -Arguments @('start', $wmiServiceName) -AllowedExitCodes @(0, 1056) | Out-Null
+    if (-not (Wait-WindowsServiceRunning -Name $wmiServiceName -TimeoutSeconds 25)) {
+      Invoke-Sc -Arguments @('query', $wmiServiceName) -AllowedExitCodes @(0, 1060) | Out-Null
+      throw "Windows Management Instrumentation did not reach Running state before timeout."
+    }
+  }
+
+  $finalStartType = Get-WindowsServiceStartType -Name $wmiServiceName
+  $finalRunning = Test-WindowsServiceRunning -Name $wmiServiceName
+  Write-InstallLog "WMI prerequisite after repair: service=$wmiServiceName startType=$finalStartType running=$finalRunning."
 }
 
 function Get-AeroForgeServicePid {
@@ -334,6 +441,8 @@ function Resolve-PawnIoDll {
 }
 
 function Install-PawnIoRuntime {
+  $pawnIoSetupSource = Resolve-BundledResource -FileName 'PawnIO_setup.exe' -SourceRelativePath 'third_party\pawnio\PawnIO_setup.exe'
+
   if (-not $InstallPawnIO) {
     Write-InstallLog "PawnIO runtime install was not requested."
     return $false
@@ -341,7 +450,7 @@ function Install-PawnIoRuntime {
 
   Write-PawnIoInstallerEnvironment
 
-  if (-not (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf)) {
+  if (-not ($pawnIoSetupSource -and (Test-Path -LiteralPath $pawnIoSetupSource -PathType Leaf))) {
     Write-InstallLog "WARN: PawnIO runtime install was requested, but bundled setup was not found at $pawnIoSetupSource. AeroForgeService install will continue without CPU package power and PL readback."
     return $false
   }
@@ -395,11 +504,22 @@ function Wait-ServiceDeleted {
     if (-not (Get-AeroForgeService)) {
       return $true
     }
+    if (Test-AeroForgeServiceMarkedForDeletion) {
+      return $true
+    }
     Stop-AeroForgeServiceProcesses -Reason 'delete wait cleanup' -WarnOnly:$WarnOnly | Out-Null
     Start-Sleep -Milliseconds 500
   } while ((Get-Date) -lt $deadline)
 
   return $false
+}
+
+function Test-AeroForgeServiceMarkedForDeletion {
+  $output = & sc.exe queryex $serviceName 2>&1
+  $exitCode = $LASTEXITCODE
+  $text = ($output | Out-String)
+
+  return $exitCode -eq 1072 -or $text -match 'marked for deletion'
 }
 
 function Stop-AeroForgeService {
@@ -460,7 +580,11 @@ function Remove-AeroForgeServiceRegistration {
     Start-Sleep -Seconds 1
   } while ($attempts -lt 3)
 
-  Invoke-Sc -Arguments @('queryex', $serviceName) -AllowedExitCodes @(0, 1060) | Out-Null
+  Invoke-Sc -Arguments @('queryex', $serviceName) -AllowedExitCodes @(0, 1060, 1072) | Out-Null
+  if (Test-AeroForgeServiceMarkedForDeletion) {
+    Write-InstallLog "$serviceName is marked for deletion. Windows will finish removal after reboot."
+    return
+  }
   if ($WarnOnly) {
     Write-InstallLog "WARN: $serviceName is still present after delete attempts. Continuing uninstall; a reboot may be required before reinstalling."
     return
@@ -483,6 +607,66 @@ function Wait-ServiceRunning {
   throw "$serviceName did not reach Running state before timeout."
 }
 
+function Install-AeroForgeServiceHealerTask {
+  New-Item -ItemType Directory -Force -Path $serviceRoot | Out-Null
+
+  $healerBody = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+try {
+  Set-Service -Name '$wmiServiceName' -StartupType Automatic -ErrorAction SilentlyContinue
+} catch {}
+try {
+  Start-Service -Name '$wmiServiceName' -ErrorAction SilentlyContinue
+} catch {}
+try {
+  Start-Service -Name '$serviceName' -ErrorAction SilentlyContinue
+} catch {}
+"@
+
+  Set-Content -LiteralPath $healerScript -Value $healerBody -Encoding UTF8 -Force
+
+  $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $action = New-ScheduledTaskAction `
+    -Execute $powershellPath `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$healerScript`""
+  $triggers = @(
+    (New-ScheduledTaskTrigger -AtStartup),
+    (New-ScheduledTaskTrigger -AtLogOn)
+  )
+  $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+
+  Register-ScheduledTask `
+    -TaskName $healerTaskName `
+    -Action $action `
+    -Trigger $triggers `
+    -Principal $principal `
+    -Settings $settings `
+    -Force | Out-Null
+
+  Write-InstallLog "Installed hidden SYSTEM scheduled task '$healerTaskName' for service/WMI startup healing."
+}
+
+function Remove-AeroForgeServiceHealerTask {
+  try {
+    if (Get-ScheduledTask -TaskName $healerTaskName -ErrorAction SilentlyContinue) {
+      Unregister-ScheduledTask -TaskName $healerTaskName -Confirm:$false
+      Write-InstallLog "Removed scheduled task '$healerTaskName'."
+    }
+  } catch {
+    Write-InstallLog "WARN: Could not remove scheduled task '$healerTaskName': $($_.Exception.Message)"
+  }
+
+  if (Test-Path -LiteralPath $healerScript -PathType Leaf) {
+    Remove-Item -LiteralPath $healerScript -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Install-AeroForgeService {
   if (-not (Test-Path -LiteralPath $ServiceSource)) {
     Fail-Install "Bundled AeroForge service binary not found at $ServiceSource." 20
@@ -491,8 +675,11 @@ function Install-AeroForgeService {
   $resolvedSource = (Resolve-Path -LiteralPath $ServiceSource).Path
   Write-InstallLog "Installing $serviceName from $resolvedSource."
 
+  Repair-WindowsManagementInstrumentation
+
   New-Item -ItemType Directory -Force -Path $serviceBinDir | Out-Null
   New-Item -ItemType Directory -Force -Path $serviceDriverDir | Out-Null
+  Protect-ServiceRoot
   Stop-AeroForgeService
   Copy-WithRetry -Source $resolvedSource -Destination $installedExe
   Install-LowLevelModules
@@ -516,7 +703,7 @@ function Install-AeroForgeService {
     ) | Out-Null
   }
 
-  Invoke-Sc -Arguments @('config', $serviceName, 'start=', 'delayed-auto') | Out-Null
+  Invoke-Sc -Arguments @('config', $serviceName, 'start=', 'auto') | Out-Null
   Invoke-Sc -Arguments @(
     'failure',
     $serviceName,
@@ -526,13 +713,22 @@ function Install-AeroForgeService {
     'restart/5000/restart/5000/restart/5000'
   ) | Out-Null
 
-  Invoke-Sc -Arguments @('start', $serviceName) -AllowedExitCodes @(0, 1056) | Out-Null
-  Wait-ServiceRunning
-  Write-InstallLog "Installed $serviceName at $installedExe with delayed automatic startup and restart-on-failure actions."
+  Install-AeroForgeServiceHealerTask
+  try {
+    Invoke-Sc -Arguments @('start', $serviceName) -AllowedExitCodes @(0, 1056) | Out-Null
+    Wait-ServiceRunning
+    Write-InstallLog "Started $serviceName successfully after install."
+  } catch {
+    Write-InstallLog "WARN: $serviceName was installed but did not reach Running state during setup: $($_.Exception.Message)"
+    Write-InstallLog "WARN: The hidden '$healerTaskName' scheduled task and AeroForge app readiness flow will retry service startup in the background."
+  }
+  Write-InstallLog "Installed $serviceName at $installedExe with automatic startup, restart-on-failure actions, and background healer."
 }
 
 function Install-LowLevelModules {
-  if (Test-Path -LiteralPath $pawnIoIntelMsrSource) {
+  $pawnIoIntelMsrSource = Resolve-BundledResource -FileName 'IntelMSR.bin' -SourceRelativePath 'third_party\pawnio-modules\IntelMSR.bin'
+
+  if ($pawnIoIntelMsrSource -and (Test-Path -LiteralPath $pawnIoIntelMsrSource)) {
     Copy-Item -LiteralPath $pawnIoIntelMsrSource -Destination $pawnIoIntelMsrInstalled -Force
     Write-InstallLog "Staged optional PawnIO IntelMSR module at $pawnIoIntelMsrInstalled."
   } else {
@@ -589,6 +785,7 @@ function Remove-AeroForgeServiceRuntimeFiles {
 
 function Uninstall-AeroForgeService {
   Write-InstallLog "Uninstall requested for $serviceName."
+  Remove-AeroForgeServiceHealerTask
   Disable-AeroForgeServiceForRemoval
   Stop-AeroForgeService -WarnOnly
   if (Get-AeroForgeService) {
@@ -606,7 +803,7 @@ function Uninstall-AeroForgeService {
 }
 
 Initialize-InstallLog
-Write-InstallLog "AeroForge service installer started. Uninstall=$Uninstall Source=$ServiceSource User=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+Write-InstallLog "AeroForge service installer started. Uninstall=$Uninstall RepairPrerequisites=$RepairPrerequisites Source=$ServiceSource User=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
 if (-not (Test-IsAdmin)) {
   Fail-Install "Administrator rights are required to install or remove $serviceName." 11

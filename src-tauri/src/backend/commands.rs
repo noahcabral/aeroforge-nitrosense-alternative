@@ -1,68 +1,80 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{self, Write},
-    path::PathBuf,
+    io::Write,
     time::Instant,
 };
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use super::{
-    blue_light, boot_logo, cpu_clock, display_refresh,
+    app_rules::{AppRule, AppRuleStore},
+    blue_light, boot_logo, cpu_clock, display_refresh, hardware_readiness,
     models::{
-        ApplyState, BackendBootstrap, BackendContract, BackendPollSnapshot, BackendPollTimings,
+        ApplyState, BackendBootstrap, BackendPollSnapshot, BackendPollTimings,
         BlueLightApplyResult, BootLogoApplyResult, CapabilitySnapshot, ControlSnapshot,
-        CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, LiveControlSnapshot,
-        NvidiaTelemetryApplyResult, PerformanceLogEvent, PersistenceStatus, PowerProfileId,
-        ProcessorStateSettings, ServiceStatus, ShellStatus, SmartChargeApplyResult,
+        CustomPowerBaseId, FanCurveSet, FanProfileId, GpuTuningState, HardwareReadinessSnapshot,
+        LiveControlSnapshot, NvidiaTelemetryApplyResult, PerformanceLogEvent, PowerProfileId,
+        ProcessorStateSettings, RepairLaunchResult, ServiceHealResult, SmartChargeApplyResult,
         TelemetrySnapshot, UpdateChannelId, UpdateStatus,
     },
     service_pipe, smart_charge,
     state::{shell_status, BackendState},
-    updater,
+    tray, updater, DynError,
 };
 
-#[tauri::command]
-pub fn runtime_shell() -> ShellStatus {
-    shell_status()
+/// Sync commands run on the main thread, so anything that waits on the service
+/// pipe, a child process, the network or a display change goes through here.
+async fn off_main<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("{what} worker failed: {error}"))
+}
+
+/// Same, for work that fails with a DynError; the tray menu shares it.
+pub async fn off_main_fallible<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> Result<T, DynError> + Send + 'static,
+) -> Result<T, String> {
+    off_main(what, work)
+        .await?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn get_backend_contract(state: State<'_, BackendState>) -> BackendContract {
-    state.contract()
+pub async fn get_hardware_readiness_snapshot() -> Result<HardwareReadinessSnapshot, String> {
+    off_main("Hardware readiness", hardware_readiness::snapshot).await
 }
 
 #[tauri::command]
-pub fn get_service_status(_state: State<'_, BackendState>) -> ServiceStatus {
-    match service_pipe::fetch_service_status() {
-        Ok(status) => status,
-        Err(error) => service_pipe::fetch_cached_service_status(&error.to_string()),
-    }
+pub async fn repair_hardware_prerequisites() -> Result<RepairLaunchResult, String> {
+    off_main("Prerequisite repair", hardware_readiness::launch_repair).await
 }
 
 #[tauri::command]
-pub fn get_capability_snapshot(state: State<'_, BackendState>) -> CapabilitySnapshot {
+pub async fn request_service_heal() -> Result<ServiceHealResult, String> {
+    off_main("Service heal", hardware_readiness::request_service_heal).await
+}
+
+#[tauri::command]
+pub async fn get_capability_snapshot(
+    state: State<'_, BackendState>,
+) -> Result<CapabilitySnapshot, String> {
     let desktop = state.capabilities();
-    service_pipe::fetch_cached_capabilities()
-        .or_else(|_| service_pipe::fetch_capabilities())
-        .map(|service| merge_capabilities(desktop.clone(), service))
-        .unwrap_or(desktop)
+    off_main("Capability snapshot", move || {
+        service_pipe::fetch_cached_capabilities()
+            .or_else(|_| service_pipe::fetch_capabilities())
+            .map(|service| merge_capabilities(desktop.clone(), service))
+            .unwrap_or(desktop)
+    })
+    .await
 }
 
 #[tauri::command]
 pub fn get_control_snapshot(state: State<'_, BackendState>) -> ControlSnapshot {
     state.controls()
-}
-
-#[tauri::command]
-pub fn get_telemetry_snapshot(state: State<'_, BackendState>) -> TelemetrySnapshot {
-    let mut telemetry = service_pipe::fetch_cached_telemetry()
-        .or_else(|_| service_pipe::fetch_telemetry())
-        .unwrap_or_else(|_| state.telemetry());
-
-    refresh_cpu_clock_if_missing(&mut telemetry);
-
-    telemetry
 }
 
 #[tauri::command]
@@ -113,95 +125,106 @@ fn elapsed_ms(started: Instant) -> f64 {
 }
 
 #[tauri::command]
-pub fn get_live_control_snapshot(
-    _state: State<'_, BackendState>,
-) -> Result<LiveControlSnapshot, String> {
-    service_pipe::fetch_live_controls().map_err(|error| error.to_string())
+pub async fn get_live_control_snapshot() -> Result<LiveControlSnapshot, String> {
+    off_main_fallible("Live control snapshot", service_pipe::fetch_live_controls).await
 }
 
 #[tauri::command]
-pub fn get_backend_bootstrap(state: State<'_, BackendState>) -> BackendBootstrap {
+pub async fn get_backend_bootstrap(
+    state: State<'_, BackendState>,
+) -> Result<BackendBootstrap, String> {
     let poll = get_backend_poll_snapshot(state.clone());
+    let capabilities = get_capability_snapshot(state.clone()).await?;
+    let hardware_readiness = get_hardware_readiness_snapshot().await?;
 
-    BackendBootstrap {
+    Ok(BackendBootstrap {
         shell: shell_status(),
         service: poll.service,
-        contract: state.contract(),
-        capabilities: get_capability_snapshot(state.clone()),
+        capabilities,
+        hardware_readiness,
         controls: state.controls(),
         telemetry: poll.telemetry,
         live_controls: poll.live_controls,
         persistence: state.persistence_status(),
         update_status: state.update_status(),
-    }
+    })
 }
 
 #[tauri::command]
-pub fn get_persistence_status(state: State<'_, BackendState>) -> PersistenceStatus {
-    state.persistence_status()
-}
-
-#[tauri::command]
-pub fn get_update_status(state: State<'_, BackendState>) -> UpdateStatus {
-    state.update_status()
-}
-
-#[tauri::command]
-pub fn append_performance_log(
+pub async fn append_performance_log(
     events: Vec<PerformanceLogEvent>,
     state: State<'_, BackendState>,
 ) -> Result<String, String> {
-    let path = performance_log_path(&state).map_err(|error| error.to_string())?;
+    let log_dir = state.config_root().join("logs");
+    off_main_fallible("Performance log append", move || {
+        fs::create_dir_all(&log_dir)?;
+        let path = log_dir.join("performance.jsonl");
 
-    if events.is_empty() {
-        return Ok(path.display().to_string());
-    }
+        if events.is_empty() {
+            return Ok(path.display().to_string());
+        }
 
-    rotate_performance_log_if_needed(&path).map_err(|error| error.to_string())?;
+        super::log_file::rotate_if_needed(&path)?;
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
-    for event in events.into_iter().take(128) {
-        serde_json::to_writer(&mut file, &event).map_err(|error| error.to_string())?;
-        writeln!(file).map_err(|error| error.to_string())?;
-    }
+        for event in events.into_iter().take(128) {
+            serde_json::to_writer(&mut file, &event)?;
+            writeln!(file)?;
+        }
 
-    Ok(path.display().to_string())
+        Ok(path.display().to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn check_for_updates(
+pub async fn check_for_updates(
+    app: AppHandle,
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    updater::refresh_status(state.updater(), resolved_channel).map_err(|error| error.to_string())
+    off_main_fallible("Update check", move || {
+        updater::refresh_status(app.state::<BackendState>().updater(), resolved_channel)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn stage_update_download(
+pub async fn stage_update_download(
+    app: AppHandle,
     channel: Option<UpdateChannelId>,
     state: State<'_, BackendState>,
 ) -> Result<UpdateStatus, String> {
     let resolved_channel =
         channel.unwrap_or_else(|| state.controls().personal_settings.update_channel);
-    updater::stage_latest_update(state.updater(), resolved_channel)
-        .map_err(|error| error.to_string())
+    off_main_fallible("Update download", move || {
+        updater::stage_latest_update(app.state::<BackendState>().updater(), resolved_channel)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn install_staged_update(state: State<'_, BackendState>) -> Result<UpdateStatus, String> {
-    updater::launch_staged_install(state.updater()).map_err(|error| error.to_string())
+pub async fn install_staged_update(app: AppHandle) -> Result<UpdateStatus, String> {
+    off_main_fallible("Update install", move || {
+        updater::launch_staged_install(app.state::<BackendState>().updater())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn show_update_notification(version_label: String) -> Result<(), String> {
-    let version = normalize_notification_text(&version_label, 80);
+pub async fn show_update_notification(version_label: String) -> Result<(), String> {
+    off_main("Update notification", move || {
+        notify_update_available(&version_label)
+    })
+    .await?
+}
+
+/// Also raised by the hotkey helper from its own background thread.
+pub fn notify_update_available(version_label: &str) -> Result<(), String> {
+    let version = normalize_notification_text(version_label, 80);
     let body = if version.is_empty() {
         "A new AeroForge build is ready to download.".to_string()
     } else {
@@ -212,7 +235,10 @@ pub fn show_update_notification(version_label: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn show_thermal_warning_notification(sensor_label: String, temp_c: u8) -> Result<(), String> {
+pub async fn show_thermal_warning_notification(
+    sensor_label: String,
+    temp_c: u8,
+) -> Result<(), String> {
     let sensor = normalize_notification_text(&sensor_label, 30);
     let sensor = if sensor.is_empty() {
         "CPU".to_string()
@@ -224,37 +250,27 @@ pub fn show_thermal_warning_notification(sensor_label: String, temp_c: u8) -> Re
         "{sensor} reached {temp_c}C while Quiet Auto fan control is active. Switch to Max/Turbo or reduce load if it keeps climbing."
     );
 
-    show_desktop_notification("AeroForge temperature warning", &body)
+    off_main("Thermal warning notification", move || {
+        show_desktop_notification("AeroForge temperature warning", &body)
+    })
+    .await?
 }
 
 #[cfg(windows)]
-fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
+pub(crate) fn show_desktop_notification(title: &str, body: &str) -> Result<(), String> {
     let title = normalize_notification_text(title, 80);
     let body = normalize_notification_text(body, 220);
     let script = build_windows_notification_script(&title, &body);
 
-    std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            &script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
+    super::process::hidden_powershell()
+        .args(["-Command", &script])
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Could not launch Windows notification helper: {error}"))
 }
 
 #[cfg(not(windows))]
-fn show_desktop_notification(_title: &str, _body: &str) -> Result<(), String> {
+pub(crate) fn show_desktop_notification(_title: &str, _body: &str) -> Result<(), String> {
     Err("Windows notifications are only available on Windows builds.".into())
 }
 
@@ -324,9 +340,7 @@ pub fn apply_blue_light_filter(
     let mut controls = state.controls();
     controls.personal_settings.blue_light_filter_enabled = applied.enabled;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(BlueLightApplyResult {
         controls,
@@ -338,31 +352,17 @@ pub fn apply_blue_light_filter(
 
 #[tauri::command]
 pub async fn apply_smart_charging(
+    app: AppHandle,
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<SmartChargeApplyResult, String> {
-    let applied = match service_pipe::apply_smart_charging(enabled) {
-        Ok(applied) => smart_charge::SmartChargeApplyPayload {
-            enabled: applied.enabled,
-            battery_healthy: applied.battery_healthy,
-            applied_at_unix: applied.applied_at_unix,
-            detail: applied.detail,
-        },
-        Err(service_error) => smart_charge::apply_smart_charging(enabled)
-            .await
-            .map_err(|desktop_error| {
-                format!(
-                    "Service smart-charge apply failed: {service_error}. Desktop fallback also failed: {desktop_error}"
-                )
-            })?,
-    };
+    let applied = smart_charge::apply_with_desktop_fallback(enabled).await?;
 
     let mut controls = state.controls();
     controls.personal_settings.smart_charging_enabled = applied.enabled;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
+    tray::refresh(&app, &controls);
 
     Ok(SmartChargeApplyResult {
         controls,
@@ -373,27 +373,24 @@ pub async fn apply_smart_charging(
 }
 
 #[tauri::command]
-pub fn apply_auto_refresh_rate(
+pub async fn apply_auto_refresh_rate(
     enabled: bool,
     on_battery: bool,
     state: State<'_, BackendState>,
 ) -> Result<super::models::DisplayRefreshApplyResult, String> {
     let mut controls = state.controls();
-    let applied = display_refresh::sync_auto_refresh_rate(
-        enabled,
-        on_battery,
-        controls.personal_settings.auto_refresh_rate_restore_hz,
-    )
-    .map_err(|error| error.to_string())?;
+    let saved_restore_hz = controls.personal_settings.auto_refresh_rate_restore_hz;
+    let applied = off_main_fallible("Refresh rate apply", move || {
+        display_refresh::sync_auto_refresh_rate(enabled, on_battery, saved_restore_hz)
+    })
+    .await?;
 
     controls
         .personal_settings
         .auto_refresh_rate_on_battery_enabled = applied.enabled;
     controls.personal_settings.auto_refresh_rate_restore_hz = applied.restore_hz;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(super::models::DisplayRefreshApplyResult {
         controls,
@@ -408,17 +405,18 @@ pub fn apply_auto_refresh_rate(
 }
 
 #[tauri::command]
-pub fn set_nvidia_telemetry_enabled(
+pub async fn set_nvidia_telemetry_enabled(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<NvidiaTelemetryApplyResult, String> {
-    let service_result = service_pipe::apply_telemetry_settings(enabled);
+    let service_result = off_main("Telemetry settings apply", move || {
+        service_pipe::apply_telemetry_settings(enabled)
+    })
+    .await?;
 
     let mut controls = state.controls();
     controls.personal_settings.nvidia_telemetry_enabled = enabled;
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     let (enabled, detail) = match service_result {
         Ok(applied) => (applied.nvidia_telemetry_enabled, applied.detail),
@@ -458,26 +456,26 @@ fn merge_capabilities(
         gpu_tuning: service.gpu_tuning,
         boot_logo: service.boot_logo,
         notes,
+        cache_updated_at_unix: service
+            .cache_updated_at_unix
+            .or(desktop.cache_updated_at_unix),
     }
 }
 
 #[tauri::command]
-pub fn save_control_snapshot(
+pub async fn save_control_snapshot(
+    app: AppHandle,
     snapshot: ControlSnapshot,
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
-    state
-        .save_controls(snapshot)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn reset_control_snapshot(state: State<'_, BackendState>) -> Result<ControlSnapshot, String> {
-    state.reset_controls().map_err(|error| error.to_string())
+    let controls = state.save_controls(snapshot)?;
+    tray::refresh(&app, &controls);
+    Ok(controls)
 }
 
 #[tauri::command]
 pub async fn apply_power_profile(
+    app: AppHandle,
     profile_id: PowerProfileId,
     processor_state: ProcessorStateSettings,
     custom_base_profile: Option<CustomPowerBaseId>,
@@ -485,8 +483,7 @@ pub async fn apply_power_profile(
     state: State<'_, BackendState>,
 ) -> Result<ControlSnapshot, String> {
     let custom_base_profile_for_apply = custom_base_profile.clone();
-    let custom_base_profile_for_save = custom_base_profile.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
+    let applied = off_main_fallible("Power profile apply", move || {
         service_pipe::apply_power_profile(
             profile_id,
             processor_state,
@@ -494,9 +491,7 @@ pub async fn apply_power_profile(
             processor_state_control_enabled,
         )
     })
-    .await
-    .map_err(|error| format!("Power profile apply worker failed: {error}"))?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_power_profile = applied.profile_id;
@@ -504,23 +499,27 @@ pub async fn apply_power_profile(
         applied.processor_state_control_enabled;
     if matches!(controls.active_power_profile, PowerProfileId::Custom) {
         controls.custom_processor_state = applied.processor_state;
-        if let Some(custom_base_profile) = custom_base_profile_for_save {
+        if let Some(custom_base_profile) = custom_base_profile {
             controls.custom_power_base = custom_base_profile;
         }
     }
 
-    state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())
+    let controls = state.save_controls(controls)?;
+    tray::refresh(&app, &controls);
+    Ok(controls)
 }
 
 #[tauri::command]
-pub fn apply_gpu_tuning(
+pub async fn apply_gpu_tuning(
+    app: AppHandle,
     tuning: GpuTuningState,
     active_oc_slot: String,
     state: State<'_, BackendState>,
 ) -> Result<super::models::GpuTuningApplyResult, String> {
-    let applied = service_pipe::apply_gpu_tuning(tuning).map_err(|error| error.to_string())?;
+    let applied = off_main_fallible("GPU tuning apply", move || {
+        service_pipe::apply_gpu_tuning(tuning)
+    })
+    .await?;
 
     let mut controls = state.controls();
     controls.active_power_profile = PowerProfileId::Custom;
@@ -528,9 +527,8 @@ pub fn apply_gpu_tuning(
     controls.active_oc_slot = active_oc_slot;
     controls.oc_apply_state = ApplyState::Live;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
+    tray::refresh(&app, &controls);
 
     Ok(super::models::GpuTuningApplyResult {
         controls,
@@ -541,21 +539,20 @@ pub fn apply_gpu_tuning(
 
 #[tauri::command]
 pub async fn apply_fan_profile(
+    app: AppHandle,
     profile_id: FanProfileId,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
-    let applied =
-        tauri::async_runtime::spawn_blocking(move || service_pipe::apply_fan_profile(profile_id))
-            .await
-            .map_err(|error| format!("Fan profile apply worker failed: {error}"))?
-            .map_err(|error| error.to_string())?;
+    let applied = off_main_fallible("Fan profile apply", move || {
+        service_pipe::apply_fan_profile(profile_id)
+    })
+    .await?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = applied.profile_id;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
+    tray::refresh(&app, &controls);
 
     Ok(super::models::FanControlApplyResult {
         controls,
@@ -566,24 +563,22 @@ pub async fn apply_fan_profile(
 
 #[tauri::command]
 pub async fn apply_custom_fan_curves(
+    app: AppHandle,
     curves: FanCurveSet,
     state: State<'_, BackendState>,
 ) -> Result<super::models::FanControlApplyResult, String> {
     let curves_for_save = curves.clone();
-    let applied = tauri::async_runtime::spawn_blocking(move || {
-        service_pipe::apply_custom_fan_curves(curves.clone())
+    let applied = off_main_fallible("Custom fan curve apply", move || {
+        service_pipe::apply_custom_fan_curves(curves)
     })
-    .await
-    .map_err(|error| format!("Custom fan curve apply worker failed: {error}"))?
-    .map_err(|error| error.to_string())?;
+    .await?;
 
     let mut controls = state.controls();
     controls.active_fan_profile = FanProfileId::Custom;
     controls.fan_curves = applied.curves.unwrap_or(curves_for_save);
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
+    tray::refresh(&app, &controls);
 
     Ok(super::models::FanControlApplyResult {
         controls,
@@ -595,34 +590,38 @@ pub async fn apply_custom_fan_curves(
 #[tauri::command]
 pub async fn start_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(service_pipe::start_fan_speed_calibration)
-        .await
-        .map_err(|error| format!("Fan speed calibration worker failed: {error}"))?
-        .map_err(|error| error.to_string())
+    off_main_fallible(
+        "Fan speed calibration",
+        service_pipe::start_fan_speed_calibration,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn cancel_fan_speed_calibration(
 ) -> Result<super::models::FanSpeedCalibrationSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(service_pipe::cancel_fan_speed_calibration)
-        .await
-        .map_err(|error| format!("Fan speed calibration cancel worker failed: {error}"))?
-        .map_err(|error| error.to_string())
+    off_main_fallible(
+        "Fan speed calibration cancel",
+        service_pipe::cancel_fan_speed_calibration,
+    )
+    .await
 }
 
 #[tauri::command]
-pub fn apply_boot_logo(
+pub async fn apply_boot_logo(
     file_name: String,
     image_base64: String,
     selected_boot_art: Option<String>,
     state: State<'_, BackendState>,
 ) -> Result<BootLogoApplyResult, String> {
-    let image_path =
-        boot_logo::save_uploaded_boot_logo(&state.config_root(), &file_name, &image_base64)
-            .map_err(|error| error.to_string())?;
-    let image_path_string = image_path.display().to_string();
-    let applied = service_pipe::apply_boot_logo(image_path_string, Some(file_name.clone()))
-        .map_err(|error| error.to_string())?;
+    let config_root = state.config_root();
+    let upload_name = file_name.clone();
+    let applied = off_main_fallible("Boot logo apply", move || {
+        let image_path =
+            boot_logo::save_uploaded_boot_logo(&config_root, &upload_name, &image_base64)?;
+        service_pipe::apply_boot_logo(image_path.display().to_string(), Some(upload_name))
+    })
+    .await?;
 
     let mut controls = state.controls();
     controls.personal_settings.selected_boot_art = selected_boot_art
@@ -631,9 +630,7 @@ pub fn apply_boot_logo(
         .unwrap_or(super::models::BootArtId::Custom);
     controls.personal_settings.custom_boot_filename = file_name;
 
-    let controls = state
-        .save_controls(controls)
-        .map_err(|error| error.to_string())?;
+    let controls = state.save_controls(controls)?;
 
     Ok(BootLogoApplyResult {
         controls,
@@ -651,24 +648,15 @@ fn parse_boot_art_id(value: &str) -> super::models::BootArtId {
     }
 }
 
-fn performance_log_path(state: &BackendState) -> io::Result<PathBuf> {
-    let log_dir = state.config_root().join("logs");
-    fs::create_dir_all(&log_dir)?;
-    Ok(log_dir.join("performance.jsonl"))
+#[tauri::command]
+pub fn get_app_rules(store: State<'_, AppRuleStore>) -> Vec<AppRule> {
+    store.rules()
 }
 
-fn rotate_performance_log_if_needed(path: &PathBuf) -> io::Result<()> {
-    const MAX_PERFORMANCE_LOG_BYTES: u64 = 2 * 1024 * 1024;
-
-    let Ok(metadata) = fs::metadata(path) else {
-        return Ok(());
-    };
-
-    if metadata.len() < MAX_PERFORMANCE_LOG_BYTES {
-        return Ok(());
-    }
-
-    let archived_path = path.with_extension("jsonl.old");
-    let _ = fs::remove_file(&archived_path);
-    fs::rename(path, archived_path)
+#[tauri::command]
+pub fn save_app_rules(
+    rules: Vec<AppRule>,
+    store: State<'_, AppRuleStore>,
+) -> Result<Vec<AppRule>, String> {
+    store.save(rules)
 }

@@ -1,0 +1,17 @@
+# Store text as LF in the repository; each checkout applies its own core.autocrlf unless overridden below.
+* text=auto
+
+# Windows-executed scripts must keep CRLF (cmd.exe misparses LF batch files).
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.nsh text eol=crlf
+
+# Binary assets
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.bin binary
+*.dll binary
+*.zip binary

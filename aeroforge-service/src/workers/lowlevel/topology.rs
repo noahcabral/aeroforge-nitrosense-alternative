@@ -5,6 +5,7 @@ use windows_sys::Win32::{
     System::SystemInformation::GetLogicalProcessorInformationEx,
 };
 
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::lowlevel::winring::RELATION_PROCESSOR_CORE,
@@ -67,7 +68,7 @@ fn fallback_affinity_masks() -> Vec<usize> {
         .collect::<Vec<_>>()
 }
 
-fn query_core_affinity_masks() -> Result<Vec<usize>, Box<dyn std::error::Error + Send + Sync>> {
+fn query_core_affinity_masks() -> Result<Vec<usize>, DynError> {
     let mut required_length = 0u32;
     let first_ok = unsafe {
         GetLogicalProcessorInformationEx(

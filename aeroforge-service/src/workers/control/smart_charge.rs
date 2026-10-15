@@ -1,4 +1,6 @@
-use std::{io, os::windows::process::CommandExt, process::Command};
+use crate::paths::{command_failure_detail, powershell_command};
+use crate::DynError;
+use std::io;
 
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -8,7 +10,6 @@ use crate::{
     workers::unix_timestamp,
 };
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const BATTERY_CONTROL_RESULT_PREFIX: &str = "AEROFORGE_BATTERY_CONTROL_RESULT:";
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +35,7 @@ struct BatteryControlApplyOutput {
 pub fn apply_smart_charging(
     paths: &ServicePaths,
     request: ApplySmartChargeRequest,
-) -> Result<AppliedSmartChargeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedSmartChargeSnapshot, DynError> {
     let requested_health_status = if request.enabled { 1u8 } else { 0u8 };
     log_battery_control_snapshot(paths, "before-apply", requested_health_status);
     let output = match apply_battery_control_health_status(requested_health_status) {
@@ -115,12 +116,12 @@ fn log_battery_control_snapshot(paths: &ServicePaths, phase: &str, requested_hea
     }
 }
 
-fn read_battery_control_snapshot(
-    requested_health_status: u8,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let script = r#"
-$requested = [int]$args[0]
-$result = [ordered]@{
+fn read_battery_control_snapshot(requested_health_status: u8) -> Result<String, DynError> {
+    // `-Command` appends extra arguments to the script text instead of binding
+    // them to $args, so the requested status is spliced in as the first line.
+    let script = format!(
+        "$requested = {requested_health_status}\n{}",
+        r#"$result = [ordered]@{
   requestedHealthStatus = $requested
   isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   classes = @()
@@ -229,30 +230,13 @@ if ($instances.Count -gt 0) {
 }
 
 $result | ConvertTo-Json -Depth 8 -Compress
-"#;
+"#
+    );
 
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-            &requested_health_status.to_string(),
-        ])
-        .output()?;
+    let output = powershell_command(&script).output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(io::Error::other(detail).into());
     }
 
@@ -262,11 +246,13 @@ $result | ConvertTo-Json -Depth 8 -Compress
 // made by faxcon
 fn apply_battery_control_health_status(
     requested_health_status: u8,
-) -> Result<BatteryControlApplyOutput, Box<dyn std::error::Error + Send + Sync>> {
-    let script = r#"
-# made by faxcon
-param([byte]$status)
-
+) -> Result<BatteryControlApplyOutput, DynError> {
+    // Same splice as the snapshot read: `-Command` gets the status as the
+    // first line, so no script file has to be dropped in SYSTEM's temp dir.
+    let script = format!(
+        "$status = [byte]{requested_health_status}
+{}",
+        r#"# made by faxcon
 $battery = Get-CimInstance -Namespace root\wmi -ClassName BatteryControl -ErrorAction Stop | Select-Object -First 1
 if (-not $battery) { throw 'BatteryControl instance was not found.' }
 
@@ -520,43 +506,13 @@ foreach ($attempt in $functionDataAttempts) {
 }
 
 throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
-"#;
+"#
+    );
 
-    use std::io::Write;
-    let mut tmp_file = tempfile::Builder::new()
-        .suffix(".ps1")
-        .tempfile()
-        .map_err(|e| io::Error::other(format!("Failed to create temp file: {}", e)))?;
-    write!(tmp_file, "{}", script)
-        .map_err(|e| io::Error::other(format!("Failed to write temp script: {}", e)))?;
-    let tmp_path = tmp_file.into_temp_path();
-
-    let output = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            tmp_path.to_str().unwrap(),
-            "-Status",
-            &requested_health_status.to_string(),
-        ])
-        .output()?;
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&tmp_path);
+    let output = powershell_command(&script).output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("PowerShell exited with status {}", output.status)
-        };
+        let detail = command_failure_detail("PowerShell", &output);
         return Err(
             io::Error::other(format!("BatteryControl service apply failed: {detail}")).into(),
         );
@@ -574,9 +530,7 @@ throw ('BatteryControl direct apply failed. ' + ($errors -join ' | '))
     Ok(parsed)
 }
 
-fn parse_battery_control_result<T: DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+fn parse_battery_control_result<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DynError> {
     let text = String::from_utf8_lossy(bytes);
     let payload = text
         .lines()

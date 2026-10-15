@@ -1,13 +1,32 @@
 import {
   type ChangeEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
 } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import './App.css'
-import aeroforgeMark from './assets/aeroforge-mark.png'
-import aeroforgeWordmark from './assets/aeroforge-wordmark.png'
+import aeroforgeMark from './assets/aeroforge-mark.webp'
+import { AppRulesPanel } from './components/AppRulesPanel'
+import { BootSplashPreview } from './components/BootSplashPreview'
+import { CurveTemplateBar } from './components/CurveTemplateBar'
+import { FanCurvePanel } from './components/FanCurvePanel'
+import { HardwareReadinessBanner } from './components/HardwareReadinessBanner'
+import { HomeFanReadoutCard } from './components/HomeFanReadoutCard'
+import { HomeTemperatureDial } from './components/HomeTemperatureDial'
+import { LayerStatusStrip } from './components/LayerStatusStrip'
+import { MetricCard } from './components/MetricCard'
+import { OverclockSlider } from './components/OverclockSlider'
+import { PresetPanel } from './components/PresetPanel'
+import { ProcessorStateControl } from './components/ProcessorStateControl'
+import { ShortcutsOverlay } from './components/ShortcutsOverlay'
+import { ToastStack } from './components/ToastStack'
+import { useDebugLog } from './hooks/useDebugLog'
+import { useFrameStats } from './hooks/useFrameStats'
+import { usePerformanceLog } from './hooks/usePerformanceLog'
+import { useToasts } from './hooks/useToasts'
 import {
   applyAutoRefreshRate,
   applyBlueLightFilter,
@@ -17,13 +36,16 @@ import {
   applyGpuTuning,
   applyPowerProfile,
   applySmartCharging,
-  appendPerformanceLog,
   cancelFanSpeedCalibration,
   checkForUpdates,
   getBackendBootstrap,
+  getHardwareReadinessSnapshot,
   getBackendPollSnapshot,
+  getControlSnapshot,
   getLiveControlSnapshot,
   installStagedUpdate,
+  repairHardwarePrerequisites,
+  requestServiceHeal,
   saveControlSnapshot,
   setNvidiaTelemetryEnabled,
   showThermalWarningNotification,
@@ -32,64 +54,151 @@ import {
   startFanSpeedCalibration,
   type CapabilitySnapshot,
   type ControlSnapshot,
+  type BackendPollSnapshot,
   type BootArtId,
   type CustomPowerBaseId,
-  type FeatureSupport,
+  type HardwareReadinessSnapshot,
   type LiveControlSnapshot,
-  type PerformanceLogEvent,
   type ServiceStatus,
   type TelemetrySnapshot,
   type UpdateStatus,
 } from './lib/backend'
+import { bootArtwork, type BootArt } from './lib/bootArt'
+import {
+  buildJpegBootLogoName,
+  prepareBootLogoUpload,
+  preparePresetBootLogo,
+  type PreparedBootLogo,
+} from './lib/bootLogo'
+import {
+  chartHeight,
+  chartPadding,
+  chartWidth,
+  clamp,
+  duplicateCurveSet,
+  FAN_CURVE_TEMPLATES,
+  interpolateCurveTarget,
+  mirrorCurveSetFromTarget,
+  speedMax,
+  speedMin,
+  tempMax,
+  tempMin,
+  type CurveSet,
+  type CurveTarget,
+  type FanCurveTemplate,
+} from './lib/curves'
+import { formatDiagnosticsText, type DiagnosticsBundle } from './lib/diagnostics'
+import { copyTextToClipboard, downloadJsonFile, downloadTextFile } from './lib/dom'
+import { describeError, withTimeout } from './lib/errors'
+import {
+  buildCpuPowerLimitLabel,
+  buildFanSpeedDetail,
+  buildGpuPowerLimitLabel,
+  buildHardwareIdentity,
+  filenameTimestamp,
+  formatDebugClock,
+  formatFanSpeedMeta,
+  formatFrameTime,
+  formatLiveBatteryDetail,
+  formatPowerSource,
+  formatRemainingRuntime,
+  formatTelemetryValue,
+  formatUnixClock,
+  formatWattReadout,
+  formatWattValue,
+  presentPositive,
+} from './lib/format'
+import {
+  KEYBOARD_SHORTCUT_ENTRIES,
+  KEYBOARD_SHORTCUT_HINT,
+  parseControlShortcut,
+} from './lib/keyboard'
+import {
+  buildPresetPack,
+  mergePresetPack,
+  parsePresetPack,
+} from './lib/presetTransfer'
+import {
+  autoPerformanceAlreadyApplied,
+  autoPerformanceModeLabel,
+  decideAutoPerformance,
+  type AutoPerformanceDecision,
+  type AutoPerformanceMode,
+} from './lib/autoPerformance'
+import {
+  findBestGpuOverclock,
+  resultForTier,
+  stepDownGpuOverclockTier,
+  type AutoGpuFinderResult,
+} from './lib/autoGpuOverclock'
+import {
+  buildPortableSettings,
+  defaultSettingsExportFilename,
+  parsePortableSettings,
+  serializePortableSettings,
+} from './lib/settingsPortable'
+import {
+  buildControlSnapshotForPersistence,
+  buildCustomOcStrap,
+  builtInOcProfileSlots,
+  defaultCustomOcSlot,
+  defaultGpuOverclock,
+  fromBackendCurveSet,
+  fromBackendGpuTuningState,
+  fromBackendOcPreset,
+  mergeControlsWithLiveSnapshot,
+  nitroSenseExtremeGpuOverclock,
+  toBackendCurveSet,
+  toBackendGpuTuningState,
+  toBackendOcPreset,
+  type GpuTuningState,
+  type OcProfileSlot,
+} from './lib/controlMapping'
+import {
+  buildCpuPowerDashboardSummary,
+  buildCpuThermalSummary,
+  buildGpuPowerDashboardSummary,
+  buildHardwareReadinessTitle,
+  describeFeatureSupport,
+  describeTelemetrySource,
+  formatStageFitDetail,
+  formatStageFitValue,
+  hasUsableTelemetry,
+  summarizeLayerAttention,
+  type StageFitSnapshot,
+  type StageFitTarget,
+} from './lib/status'
 
-type CurveTarget = 'cpu' | 'gpu'
 type ControlTab = 'home' | 'power' | 'fans' | 'personal' | 'debug'
-type PersonalSection = 'updates' | 'charge' | 'screen' | 'config' | 'boot'
+type PersonalSection = 'updates' | 'charge' | 'screen' | 'config' | 'boot' | 'backup'
 type UpdateChannel = ControlSnapshot['personalSettings']['updateChannel']
 type UpdateAction = 'check' | 'stage' | 'install'
-type CurvePoint = {
-  temp: number
-  speed: number
+type SettingsActionPending =
+  | null
+  | 'smart-charge'
+  | 'blue-light'
+  | 'boot-logo'
+  | 'refresh-rate'
+  | 'nvidia-telemetry'
+  | 'auto-performance'
+  | 'hardware-repair'
+  | 'hardware-start'
+  | 'fan-calibration'
+  | 'fan-calibration-cancel'
+type TrayControlEventPayload = {
+  action: string
+  detail: string
+  controls: ControlSnapshot
+}
+type TrayControlErrorPayload = {
+  action: string
+  detail: string
 }
 
 type DragState = {
   target: CurveTarget
   index: number
 }
-
-type FrameStats = {
-  averageMs: number
-  maxMs: number
-  fps: number
-  longFrameCount: number
-  sampleWindowMs: number
-  updatedAt: string
-}
-
-type StageFitTarget = 'home' | 'power' | 'fans'
-
-type StageFitSnapshot = {
-  tab: StageFitTarget
-  scale: number
-  scaledHeight: number
-  naturalWidth: number
-  naturalHeight: number
-  availableWidth: number
-  availableHeight: number
-  windowWidth: number
-  windowHeight: number
-  updatedAt: string
-}
-
-type PerformanceLogState = {
-  path: string | null
-  lastFlushAt: string
-  pendingCount: number
-  eventCount: number
-  lastError: string | null
-}
-
-type CurveSet = Record<CurveTarget, CurvePoint[]>
 
 type PowerProfile = {
   id: 'battery-guard' | 'balanced' | 'performance' | 'turbo' | 'custom'
@@ -101,7 +210,7 @@ type PowerProfile = {
 }
 
 type FanProfile = {
-  id: 'auto' | 'max' | 'custom'
+  id: ControlSnapshot['activeFanProfile']
   name: string
   strap: string
   summary: string
@@ -114,6 +223,9 @@ type PersistControlOverrides = {
   customProcessorState?: { min: number; max: number }
   customPowerBase?: CustomPowerBaseId
   customCurves?: CurveSet
+  fanPresets?: FanControlPreset[]
+  powerPresets?: PowerControlPreset[]
+  quickPresets?: QuickControlPreset[]
   fanSyncLockEnabled?: boolean
   smartChargingEnabled?: boolean
   processorStateControlEnabled?: boolean
@@ -121,6 +233,7 @@ type PersistControlOverrides = {
   keepUiPrewarmed?: boolean
   autoRefreshRateOnBatteryEnabled?: boolean
   autoRefreshRateRestoreHz?: number | null
+  autoPerformanceEnabled?: boolean
   blueLightFilterEnabled?: boolean
   selectedBootArt?: string
   customBootFilename?: string
@@ -134,31 +247,9 @@ type FinalizeCustomCurveOptions = {
   statusMessage?: string
 }
 
-type GpuTuningState = {
-  coreClock: number
-  memoryClock: number
-  voltageOffset: number
-  powerLimit: number
-  tempLimit: number
-}
-
-type OcProfileSlot = {
-  id: string
-  label: string
-  name: string
-  strap: string
-  settings: GpuTuningState
-  isCustom?: boolean
-}
-
-type BootArt = {
-  id: string
-  name: string
-  palette: string
-  layout: 'forge' | 'center' | 'banner'
-  headline: string
-  subline: string
-}
+type FanControlPreset = ControlSnapshot['fanPresets'][number]
+type PowerControlPreset = ControlSnapshot['powerPresets'][number]
+type QuickControlPreset = ControlSnapshot['quickPresets'][number]
 
 const powerProfiles: PowerProfile[] = [
   {
@@ -233,6 +324,14 @@ const fanProfiles: FanProfile[] = [
     badge: 'A',
   },
   {
+    id: 'cool',
+    name: 'Cool',
+    strap: 'Cooler adaptive curve',
+    summary:
+      'Tracks temperature like Auto, but asks for stronger airflow before heat builds up.',
+    badge: 'CO',
+  },
+  {
     id: 'max',
     name: 'Max',
     strap: 'Cooling first',
@@ -263,6 +362,22 @@ const presetCurves: Record<FanProfile['id'], CurveSet> = {
       { temp: 60, speed: 34 },
       { temp: 74, speed: 55 },
       { temp: 87, speed: 78 },
+    ],
+  },
+  cool: {
+    cpu: [
+      { temp: 30, speed: 20 },
+      { temp: 50, speed: 35 },
+      { temp: 65, speed: 55 },
+      { temp: 75, speed: 78 },
+      { temp: 82, speed: 100 },
+    ],
+    gpu: [
+      { temp: 30, speed: 20 },
+      { temp: 50, speed: 35 },
+      { temp: 65, speed: 55 },
+      { temp: 75, speed: 78 },
+      { temp: 82, speed: 100 },
     ],
   },
   max: {
@@ -297,115 +412,6 @@ const presetCurves: Record<FanProfile['id'], CurveSet> = {
       { temp: 80, speed: 100 },
     ],
   },
-}
-
-const bootArtwork: BootArt[] = [
-  {
-    id: 'ember',
-    name: 'Forge Ember',
-    palette: 'palette-ember',
-    layout: 'forge',
-    headline: 'AeroForge',
-    subline: 'Thermal performance boot',
-  },
-  {
-    id: 'arc',
-    name: 'Arc Horizon',
-    palette: 'palette-arc',
-    layout: 'banner',
-    headline: 'AeroForge Arc',
-    subline: 'Cool-spectrum startup theme',
-  },
-  {
-    id: 'slate',
-    name: 'Slate Monolith',
-    palette: 'palette-slate',
-    layout: 'center',
-    headline: 'AF Core',
-    subline: 'Minimal studio boot screen',
-  },
-]
-
-const defaultGpuOverclock: GpuTuningState = {
-  coreClock: 165,
-  memoryClock: 420,
-  voltageOffset: -35,
-  powerLimit: 114,
-  tempLimit: 83,
-}
-
-const builtInOcProfileSlots: OcProfileSlot[] = [
-  {
-    id: 'silent-uv',
-    label: 'P1',
-    name: 'Silent UV',
-    strap: 'Low-noise undervolt',
-    settings: {
-      coreClock: 90,
-      memoryClock: 180,
-      voltageOffset: -60,
-      powerLimit: 92,
-      tempLimit: 78,
-    },
-  },
-  {
-    id: 'daily',
-    label: 'P2',
-    name: 'Forge Daily',
-    strap: 'Balanced everyday tune',
-    settings: {
-      ...defaultGpuOverclock,
-    },
-  },
-  {
-    id: 'creator',
-    label: 'P3',
-    name: 'Creator Boost',
-    strap: 'Long-session render preset',
-    settings: {
-      coreClock: 185,
-      memoryClock: 560,
-      voltageOffset: -10,
-      powerLimit: 118,
-      tempLimit: 84,
-    },
-  },
-  {
-    id: 'arena',
-    label: 'P4',
-    name: 'Arena Max',
-    strap: 'Aggressive gaming tune',
-    settings: {
-      coreClock: 220,
-      memoryClock: 840,
-      voltageOffset: 25,
-      powerLimit: 122,
-      tempLimit: 86,
-    },
-  },
-]
-
-const defaultCustomOcSlot: OcProfileSlot = {
-  id: 'custom-user',
-  label: 'P5',
-  name: 'Custom Preset',
-  strap: 'User-saved GPU tuning',
-  settings: {
-    ...defaultGpuOverclock,
-  },
-  isCustom: true,
-}
-
-function buildCustomOcStrap(settings: GpuTuningState) {
-  const core = settings.coreClock >= 0 ? `+${settings.coreClock}` : `${settings.coreClock}`
-  const memory =
-    settings.memoryClock >= 0 ? `+${settings.memoryClock}` : `${settings.memoryClock}`
-  const voltage =
-    settings.voltageOffset >= 0
-      ? `+${settings.voltageOffset}mV`
-      : `${settings.voltageOffset}mV`
-
-  return `Core ${core} / Mem ${memory} / ${voltage}`
 }
 
 const navigationTabs: { id: ControlTab; label: string }[] = [
@@ -448,6 +454,11 @@ const personalSections: {
     description: 'Disabled until this path is reliable.',
     disabled: true,
   },
+  {
+    id: 'backup',
+    label: 'Backup & Restore',
+    description: 'Export or import profiles, curves, presets, and personal settings.',
+  },
 ]
 
 const fanTelemetryByProfile: Record<
@@ -455,512 +466,34 @@ const fanTelemetryByProfile: Record<
   { gpuRpm: number; cpuRpm: number; modeLabel: string }
 > = {
   auto: { gpuRpm: 3385, cpuRpm: 3089, modeLabel: 'Automatic airflow mapping' },
+  cool: { gpuRpm: 4240, cpuRpm: 3980, modeLabel: 'Cool adaptive fan curve' },
   max: { gpuRpm: 5110, cpuRpm: 4950, modeLabel: 'Full-speed thermal override' },
   custom: { gpuRpm: 3385, cpuRpm: 3089, modeLabel: 'Custom curve runtime' },
 }
 
-const clamp = (value: number, min: number, max: number) =>
-  Math.min(max, Math.max(min, value))
-
-const chartWidth = 480
-const chartHeight = 260
-const chartPadding = 24
-const tempMin = 30
-const tempMax = 90
-const speedMin = 0
-const speedMax = 100
-const BACKEND_POLL_INTERVAL_MS = 1000
-const HIDDEN_BACKEND_POLL_INTERVAL_MS = 5000
+const BACKEND_POLL_INTERVAL_MS = 5000
+const BACKEND_SECONDARY_POLL_INTERVAL_MS = 10000
+const HIDDEN_BACKEND_POLL_INTERVAL_MS = 30000
+const HARDWARE_READINESS_REFRESH_MS = 15_000
 const RUNTIME_ESTIMATE_COUNTDOWN_SEC = 30
-const PERFORMANCE_LOG_BATCH_SIZE = 16
-const PERFORMANCE_LOG_FLUSH_DELAY_MS = 1500
-const PERFORMANCE_LOG_LONG_FRAME_MS = 34
-const PERFORMANCE_LOG_MAX_QUEUE = 200
 const FAN_PROFILE_APPLY_TIMEOUT_MS = 15_000
-
-function pointToChart(point: CurvePoint) {
-  const x =
-    chartPadding +
-    ((point.temp - tempMin) / (tempMax - tempMin)) * (chartWidth - chartPadding * 2)
-  const y =
-    chartHeight -
-    chartPadding -
-    ((point.speed - speedMin) / (speedMax - speedMin)) * (chartHeight - chartPadding * 2)
-
-  return { x, y }
-}
-
-function buildCurvePath(points: CurvePoint[]) {
-  return points
-    .map((point, index) => {
-      const { x, y } = pointToChart(point)
-      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`
-    })
-    .join(' ')
-}
-
-function normalizeCurvePoints(points: CurvePoint[]) {
-  let lastTemp = tempMin - 2
-  let lastSpeed = speedMin
-  const sorted = points
-    .map((point) => ({
-      temp: Math.round(clamp(point.temp, tempMin, tempMax)),
-      speed: Math.round(clamp(point.speed, speedMin, speedMax)),
-    }))
-    .sort((left, right) => left.temp - right.temp)
-
-  return sorted.map((point, index) => {
-    const remainingPoints = sorted.length - index - 1
-    const minTemp = index === 0 ? tempMin : lastTemp + 2
-    const maxTemp = tempMax - remainingPoints * 2
-    const normalized = {
-      temp: clamp(point.temp, minTemp, maxTemp),
-      speed: clamp(point.speed, lastSpeed, speedMax),
-    }
-    lastTemp = normalized.temp
-    lastSpeed = normalized.speed
-    return normalized
-  })
-}
-
-function duplicateCurveSet(curves: CurveSet): CurveSet {
-  return {
-    cpu: normalizeCurvePoints(curves.cpu),
-    gpu: normalizeCurvePoints(curves.gpu),
-  }
-}
-
-function otherCurveTarget(target: CurveTarget): CurveTarget {
-  return target === 'cpu' ? 'gpu' : 'cpu'
-}
-
-function mirrorCurveSetFromTarget(curves: CurveSet, source: CurveTarget): CurveSet {
-  const normalized = duplicateCurveSet(curves)
-  return {
-    ...normalized,
-    [otherCurveTarget(source)]: normalized[source].map((point) => ({ ...point })),
-  }
-}
-
-function describeError(error: unknown) {
-  if (error instanceof Error) {
-    return error.message
-  }
-
-  if (typeof error === 'string') {
-    return error
-  }
-
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return 'Unknown error'
-  }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
-  let timeoutId: number | null = null
-
-  const timeout = new Promise<T>((_, reject) => {
-    timeoutId = window.setTimeout(() => {
-      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds`))
-    }, timeoutMs)
-  })
-
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId)
-    }
-  })
-}
-
-type PreparedBootLogo = {
-  fileName: string
-  imageBase64: string
-}
-
-type BootArtworkTheme = {
-  glowColor: string
-  gradientStops: [string, string, string]
-}
-
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result ?? ''))
-    reader.onerror = () => reject(reader.error ?? new Error('Unable to read boot-logo image.'))
-    reader.readAsDataURL(file)
-  })
-}
-
-function loadImageElement(src: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('Unable to decode boot-logo image.'))
-    image.src = src
-  })
-}
-
-function buildJpegBootLogoName(fileName: string) {
-  const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
-  return `${stem}.jpg`
-}
-
-function buildGifBootLogoName(fileName: string) {
-  const stem = fileName.replace(/\.[^.]+$/, '').trim() || 'aeroforge-boot-logo'
-  return `${stem}.gif`
-}
-
-function base64PayloadFromDataUrl(dataUrl: string) {
-  const payload = dataUrl.split(',')[1]
-  if (!payload) {
-    throw new Error('Unable to encode boot-logo image.')
-  }
-  return payload
-}
-
-function buildPresetBootLogoName(art: BootArt) {
-  return `aeroforge-${art.id}-boot-logo.jpg`
-}
-
-function getBootArtworkTheme(art: BootArt): BootArtworkTheme {
-  switch (art.id) {
-    case 'arc':
-      return {
-        glowColor: 'rgba(133, 224, 255, 0.35)',
-        gradientStops: ['#09141d', '#173d5a', '#4594bb'],
-      }
-    case 'slate':
-      return {
-        glowColor: 'rgba(255, 255, 255, 0.22)',
-        gradientStops: ['#15181e', '#414a59', '#6c7585'],
-      }
-    case 'ember':
-    default:
-      return {
-        glowColor: 'rgba(255, 170, 92, 0.34)',
-        gradientStops: ['#30170f', '#9d4d2e', '#cb8a53'],
-      }
-  }
-}
-
-function drawBootArtworkBackground(
-  context: CanvasRenderingContext2D,
-  art: BootArt,
-  width: number,
-  height: number,
-) {
-  const theme = getBootArtworkTheme(art)
-  const background = context.createLinearGradient(0, 0, width, height)
-  background.addColorStop(0, theme.gradientStops[0])
-  background.addColorStop(0.58, theme.gradientStops[1])
-  background.addColorStop(1, theme.gradientStops[2])
-  context.fillStyle = background
-  context.fillRect(0, 0, width, height)
-
-  const glow =
-    art.layout === 'center'
-      ? context.createRadialGradient(
-          width * 0.5,
-          height * 0.52,
-          0,
-          width * 0.5,
-          height * 0.52,
-          width * 0.34,
-        )
-      : context.createRadialGradient(
-          width * 0.28,
-          height * 0.28,
-          0,
-          width * 0.28,
-          height * 0.28,
-          width * 0.36,
-        )
-  glow.addColorStop(0, theme.glowColor)
-  glow.addColorStop(1, 'rgba(0, 0, 0, 0)')
-  context.fillStyle = glow
-  context.fillRect(0, 0, width, height)
-}
-
-async function preparePresetBootLogo(art: BootArt): Promise<PreparedBootLogo> {
-  const width = 1920
-  const height = 1080
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-
-  const context = canvas.getContext('2d')
-  if (!context) {
-    throw new Error('Unable to prepare boot-logo canvas.')
-  }
-
-  drawBootArtworkBackground(context, art, width, height)
-
-  const [markImage, wordmarkImage] = await Promise.all([
-    loadImageElement(aeroforgeMark),
-    loadImageElement(aeroforgeWordmark),
-  ])
-
-  context.textBaseline = 'top'
-  context.shadowColor = 'rgba(0, 0, 0, 0.34)'
-  context.shadowBlur = 28
-  context.shadowOffsetY = 12
-
-  if (art.layout === 'center') {
-    const markWidth = 340
-    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
-    context.drawImage(markImage, (width - markWidth) / 2, 180, markWidth, markHeight)
-    context.shadowBlur = 0
-    context.shadowOffsetY = 0
-    context.fillStyle = '#f6f1ea'
-    context.font = '700 118px "Segoe UI", Arial, sans-serif'
-    context.textAlign = 'center'
-    context.fillText(art.headline, width / 2, 620)
-    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
-    context.font = '500 40px "Segoe UI", Arial, sans-serif'
-    context.fillText(art.subline.toUpperCase(), width / 2, 760)
-  } else if (art.layout === 'banner') {
-    const wordmarkWidth = 760
-    const wordmarkHeight = (wordmarkImage.naturalHeight / wordmarkImage.naturalWidth) * wordmarkWidth
-    context.drawImage(wordmarkImage, 170, 650, wordmarkWidth, wordmarkHeight)
-    const markWidth = 270
-    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
-    context.drawImage(markImage, 1430, 130, markWidth, markHeight)
-    context.shadowBlur = 0
-    context.shadowOffsetY = 0
-    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
-    context.font = '500 38px "Segoe UI", Arial, sans-serif'
-    context.textAlign = 'left'
-    context.fillText(art.subline.toUpperCase(), 182, 845)
-  } else {
-    const markWidth = 280
-    const markHeight = (markImage.naturalHeight / markImage.naturalWidth) * markWidth
-    context.drawImage(markImage, 170, 140, markWidth, markHeight)
-    context.shadowBlur = 0
-    context.shadowOffsetY = 0
-    context.drawImage(
-      wordmarkImage,
-      180,
-      700,
-      760,
-      (wordmarkImage.naturalHeight / wordmarkImage.naturalWidth) * 760,
-    )
-    context.fillStyle = 'rgba(247, 239, 232, 0.82)'
-    context.font = '500 38px "Segoe UI", Arial, sans-serif'
-    context.textAlign = 'left'
-    context.fillText(art.subline.toUpperCase(), 190, 830)
-  }
-
-  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.94)
-  return {
-    fileName: buildPresetBootLogoName(art),
-    imageBase64: base64PayloadFromDataUrl(jpegDataUrl),
-  }
-}
-
-async function prepareBootLogoUpload(file: File): Promise<PreparedBootLogo> {
-  const sourceDataUrl = await readFileAsDataUrl(file)
-  if (file.type === 'image/gif' || /\.gif$/i.test(file.name)) {
-    return {
-      fileName: buildGifBootLogoName(file.name),
-      imageBase64: base64PayloadFromDataUrl(sourceDataUrl),
-    }
-  }
-
-  const image = await loadImageElement(sourceDataUrl)
-  const maxWidth = Math.max(1, Math.floor(window.screen.width * 0.4))
-  const maxHeight = Math.max(1, Math.floor(window.screen.height * 0.4))
-  const scale = Math.min(1, maxWidth / image.naturalWidth, maxHeight / image.naturalHeight)
-  const width = Math.max(1, Math.round(image.naturalWidth * scale))
-  const height = Math.max(1, Math.round(image.naturalHeight * scale))
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-
-  const context = canvas.getContext('2d')
-  if (!context) {
-    throw new Error('Unable to prepare boot-logo canvas.')
-  }
-
-  context.fillStyle = '#000'
-  context.fillRect(0, 0, width, height)
-  context.drawImage(image, 0, 0, width, height)
-
-  const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-
-  return {
-    fileName: buildJpegBootLogoName(file.name),
-    imageBase64: base64PayloadFromDataUrl(jpegDataUrl),
-  }
-}
-
-function formatDebugClock(date: Date) {
-  return date.toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
-}
-
-function formatUnixClock(unix: number | null | undefined) {
-  if (!unix) {
-    return 'Waiting'
-  }
-
-  return formatDebugClock(new Date(unix * 1000))
-}
-
-function formatTelemetryValue(value: number | null | undefined, suffix = '') {
-  if (value == null) {
-    return ''
-  }
-
-  return `${value}${suffix}`
-}
-
-function formatFanSpeedMeta(
-  rpm: number | null | undefined,
-  targetPercent: number | null | undefined,
-) {
-  const rpmLabel = rpm == null ? null : 'RPM'
-  const targetLabel = targetPercent == null ? null : `Target ${targetPercent}%`
-  return [rpmLabel, targetLabel].filter(Boolean).join(' | ')
-}
-
-function buildFanSpeedDetail(
-  rpm: number | null | undefined,
-  targetPercent: number | null | undefined,
-  liveDetail: string,
-  unavailableDetail = 'Fan telemetry unavailable',
-) {
-  if (rpm == null && targetPercent == null) {
-    return unavailableDetail
-  }
-
-  const targetDetail = targetPercent == null ? null : `Target ${targetPercent}%`
-  return [targetDetail, rpm == null ? null : liveDetail].filter(Boolean).join(' | ')
-}
-
-function formatWattValue(value: number | null | undefined, maximumFractionDigits = 0) {
-  if (value == null || Number.isNaN(value)) {
-    return null
-  }
-
-  return `${value.toLocaleString(undefined, { maximumFractionDigits })}W`
-}
-
-function formatWattReadout(value: number | null | undefined, maximumFractionDigits = 1) {
-  return formatWattValue(value, maximumFractionDigits) ?? '--'
-}
-
-function buildCpuPowerLimitLabel(pl1Label: string | null, pl2Label: string | null) {
-  if (pl1Label && pl2Label) {
-    return `PL1/PL2 ${pl1Label} / ${pl2Label}`
-  }
-
-  if (pl1Label) {
-    return `PL1 ${pl1Label}`
-  }
-
-  if (pl2Label) {
-    return `PL2 ${pl2Label}`
-  }
-
-  return null
-}
-
-function buildGpuPowerLimitLabel(
-  limitLabel: string | null,
-  maxLimit: number | null | undefined,
-) {
-  if (limitLabel) {
-    return `Limit ${limitLabel}`
-  }
-
-  const maxLimitLabel = formatWattValue(maxLimit, 1)
-  return maxLimitLabel ? `Max ${maxLimitLabel}` : null
-}
-
-function sanitizeIdentityText(value: string | null | undefined) {
-  if (!value) {
-    return null
-  }
-
-  const sanitized = value
-    .replace(/\(R\)|\(TM\)/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return sanitized.length > 0 ? sanitized : null
-}
-
-function buildHardwareIdentity(
-  brand: string | null | undefined,
-  model: string | null | undefined,
-  fallback: string,
-) {
-  const cleanBrand = sanitizeIdentityText(brand)
-  const cleanModel = sanitizeIdentityText(model)
-
-  if (cleanBrand && cleanModel) {
-    const normalizedBrand = cleanBrand.toLowerCase()
-    const normalizedModel = cleanModel.toLowerCase()
-
-    if (normalizedModel.includes(normalizedBrand)) {
-      return cleanModel
-    }
-
-    return `${cleanBrand} ${cleanModel}`
-  }
-
-  return cleanModel ?? cleanBrand ?? fallback
-}
-
-function formatLiveBatteryDetail(value: number | null | undefined) {
-  if (value == null) {
-    return ''
-  }
-
-  return `${value}% battery live`
-}
-
-function formatRemainingRuntime(seconds: number | null | undefined) {
-  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
-    return ''
-  }
-
-  const roundedMinutes = Math.max(1, Math.round(seconds / 60))
-  const hours = Math.floor(roundedMinutes / 60)
-  const minutes = roundedMinutes % 60
-
-  if (hours <= 0) {
-    return `${minutes}m`
-  }
-
-  if (minutes === 0) {
-    return `${hours}h`
-  }
-
-  return `${hours}h ${minutes}m`
-}
-
-function formatFrameTime(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return ''
-  }
-
-  return `${value.toFixed(1)} ms`
-}
 
 function isDesktopRuntime() {
   return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
 }
 
+function isDevBuild() {
+  return Boolean(import.meta.env.DEV)
+}
+
 function waitForNextPaint() {
   return new Promise<void>((resolve) => {
-    if (typeof window.requestAnimationFrame !== 'function') {
+    if (
+      typeof window.requestAnimationFrame !== 'function' ||
+      document.visibilityState === 'hidden'
+    ) {
+      // rAF does not fire while hidden; never let an apply wait on a paint that
+      // will not happen.
       window.setTimeout(resolve, 0)
       return
     }
@@ -969,143 +502,6 @@ function waitForNextPaint() {
       window.requestAnimationFrame(() => resolve())
     })
   })
-}
-
-function formatStageFitValue(snapshot: StageFitSnapshot | undefined) {
-  if (!snapshot) {
-    return null
-  }
-
-  return `${snapshot.tab} ${snapshot.scale.toFixed(3)} / ${Math.round(snapshot.scaledHeight)}px`
-}
-
-function formatStageFitDetail(snapshot: StageFitSnapshot | undefined) {
-  if (!snapshot) {
-    return null
-  }
-
-  return `natural ${Math.round(snapshot.naturalWidth)}x${Math.round(
-    snapshot.naturalHeight,
-  )}, available ${Math.round(snapshot.availableWidth)}x${Math.round(
-    snapshot.availableHeight,
-  )}, window ${snapshot.windowWidth}x${snapshot.windowHeight} at ${snapshot.updatedAt}`
-}
-
-function presentPositive(value: number | null | undefined) {
-  if (value == null || value <= 0) {
-    return null
-  }
-
-  return value
-}
-
-function formatPowerSource(acPluggedIn: boolean | null | undefined) {
-  if (acPluggedIn == null) {
-    return 'Power source unavailable'
-  }
-
-  return acPluggedIn ? 'AC Plugged In' : 'Battery Power'
-}
-
-function hasUsableTelemetry(snapshot: TelemetrySnapshot | null | undefined) {
-  if (!snapshot) {
-    return false
-  }
-
-  return Boolean(
-    snapshot.cpuTempC > 0 ||
-      snapshot.cpuTempAverageC != null ||
-      snapshot.gpuTempC > 0 ||
-      snapshot.systemTempC > 0 ||
-      snapshot.cpuUsagePercent > 0 ||
-      snapshot.gpuUsagePercent > 0 ||
-      snapshot.gpuMemoryUsagePercent != null ||
-      snapshot.gpuPowerLimitW != null ||
-      snapshot.gpuPowerDrawW != null ||
-      snapshot.cpuPackagePowerW != null ||
-      snapshot.cpuPl1W != null ||
-      snapshot.cpuPl2W != null ||
-      snapshot.cpuClockMhz > 0 ||
-      snapshot.gpuClockMhz > 0 ||
-      snapshot.cpuFanRpm > 0 ||
-      snapshot.gpuFanRpm > 0 ||
-      snapshot.batteryPercent > 0 ||
-      snapshot.cpuName ||
-      snapshot.gpuName ||
-      snapshot.systemModel,
-  )
-}
-
-function describeTelemetrySource(
-  serviceConnected: boolean,
-  telemetry: TelemetrySnapshot | null | undefined,
-) {
-  if (serviceConnected) {
-    return 'Service pipe'
-  }
-
-  return hasUsableTelemetry(telemetry) ? 'Cached service state' : 'No telemetry'
-}
-
-function describeFeatureSupport(
-  feature: FeatureSupport | null | undefined,
-  unsupportedDetail: string,
-  stagedDetail?: string,
-) {
-  if (!feature) {
-    return null
-  }
-
-  if (!feature.available) {
-    return unsupportedDetail
-  }
-
-  if (!feature.writable) {
-    return stagedDetail ?? unsupportedDetail
-  }
-
-  return null
-}
-
-function buildCpuThermalSummary(
-  lowestCoreTemp: number | null | undefined,
-  highestCoreTemp: number | null | undefined,
-  cpuUsage: number | null | undefined,
-) {
-  const thermalRange =
-    lowestCoreTemp != null && highestCoreTemp != null
-      ? `Low ${lowestCoreTemp}C / High ${highestCoreTemp}C`
-      : null
-  const usageLabel = cpuUsage != null ? `Usage ${cpuUsage}%` : null
-
-  return [thermalRange, usageLabel].filter(Boolean).join(' • ')
-}
-
-function buildPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-) {
-  const temperatureLabel = temperatureC != null ? `Temp ${temperatureC}C` : null
-  const usageLabel = usagePercent != null ? `Usage ${usagePercent}%` : null
-
-  return [temperatureLabel, usageLabel].filter(Boolean).join(' | ')
-}
-
-function buildCpuPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-  packagePowerW: number | null | undefined,
-  pl1W: number | null | undefined,
-  pl2W: number | null | undefined,
-) {
-  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const powerLabel = packagePowerW != null ? `Power ${formatWattValue(packagePowerW, 1)}` : null
-  const limitLabel = buildCpuPowerLimitLabel(
-    formatWattValue(pl1W, 1),
-    formatWattValue(pl2W, 1),
-  )
-
-  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
 }
 
 function buildPowerTargetFallback(
@@ -1148,19 +544,6 @@ function buildPowerTargetFallback(
   }
 }
 
-function buildGpuPowerDashboardSummary(
-  temperatureC: number | null | undefined,
-  usagePercent: number | null | undefined,
-  powerDrawW: number | null | undefined,
-  powerLimitW: number | null | undefined,
-) {
-  const baseSummary = buildPowerDashboardSummary(temperatureC, usagePercent)
-  const powerLabel = powerDrawW != null ? `Power ${formatWattValue(powerDrawW, 1)}` : null
-  const limitLabel = powerLimitW != null ? `Limit ${formatWattValue(powerLimitW, 1)}` : null
-
-  return [baseSummary, powerLabel, limitLabel].filter(Boolean).join(' | ')
-}
-
 function getProcessorStateForPowerProfile(
   profileId: PowerProfile['id'],
   customProcessorState: { min: number; max: number },
@@ -1192,154 +575,6 @@ function applyPowerControlSnapshot(
   })
 }
 
-function fromBackendGpuTuningState(
-  tuning: ControlSnapshot['gpuTuning'],
-): GpuTuningState {
-  return {
-    coreClock: tuning.coreClockMhz,
-    memoryClock: tuning.memoryClockMhz,
-    voltageOffset: tuning.voltageOffsetMv,
-    powerLimit: tuning.powerLimitPercent,
-    tempLimit: tuning.tempLimitC,
-  }
-}
-
-function toBackendGpuTuningState(tuning: GpuTuningState): ControlSnapshot['gpuTuning'] {
-  return {
-    coreClockMhz: tuning.coreClock,
-    memoryClockMhz: tuning.memoryClock,
-    voltageOffsetMv: tuning.voltageOffset,
-    powerLimitPercent: tuning.powerLimit,
-    tempLimitC: tuning.tempLimit,
-  }
-}
-
-function fromBackendOcPreset(preset: ControlSnapshot['ocPresets'][number]): OcProfileSlot {
-  return {
-    id: preset.id,
-    label: preset.label,
-    name: preset.name,
-    strap: preset.strap,
-    settings: fromBackendGpuTuningState(preset.settings),
-    isCustom: preset.isCustom,
-  }
-}
-
-function toBackendOcPreset(slot: OcProfileSlot): ControlSnapshot['ocPresets'][number] {
-  return {
-    id: slot.id,
-    label: slot.label,
-    name: slot.name,
-    strap: slot.strap,
-    settings: toBackendGpuTuningState(slot.settings),
-    isCustom: Boolean(slot.isCustom),
-  }
-}
-
-function toBackendCurveSet(curves: CurveSet): ControlSnapshot['fanCurves'] {
-  const normalizedCurves = duplicateCurveSet(curves)
-  return {
-    cpu: normalizedCurves.cpu.map((point) => ({
-      tempC: point.temp,
-      speedPercent: point.speed,
-    })),
-    gpu: normalizedCurves.gpu.map((point) => ({
-      tempC: point.temp,
-      speedPercent: point.speed,
-    })),
-  }
-}
-
-function fromBackendCurveSet(curves: ControlSnapshot['fanCurves']): CurveSet {
-  return duplicateCurveSet({
-    cpu: curves.cpu.map((point) => ({
-      temp: point.tempC,
-      speed: point.speedPercent,
-    })),
-    gpu: curves.gpu.map((point) => ({
-      temp: point.tempC,
-      speed: point.speedPercent,
-    })),
-  })
-}
-
-function mergeControlsWithLiveSnapshot(
-  controls: ControlSnapshot,
-  liveControls: LiveControlSnapshot | null,
-): ControlSnapshot {
-  if (!liveControls) {
-    return controls
-  }
-
-  return {
-    ...controls,
-    customProcessorState:
-      controls.activePowerProfile === 'custom' &&
-      liveControls.activePowerProfile === 'custom' &&
-      liveControls.processorState
-        ? liveControls.processorState
-        : controls.customProcessorState,
-    customPowerBase: controls.customPowerBase,
-  }
-}
-
-function buildControlSnapshotForPersistence(input: {
-  activePowerProfile: PowerProfile['id']
-  activeFanProfile: FanProfile['id']
-  customProcessorState: { min: number; max: number }
-  customPowerBase: CustomPowerBaseId
-  gpuOverclock: GpuTuningState
-  ocProfileSlots: OcProfileSlot[]
-  activeOcSlot: string
-  ocApplyState: 'staged' | 'live'
-  ocTuningLocked: boolean
-  customCurves: CurveSet
-  fanSyncLockEnabled: boolean
-  smartChargingEnabled: boolean
-  processorStateControlEnabled: boolean
-  nvidiaTelemetryEnabled: boolean
-  keepUiPrewarmed: boolean
-  autoRefreshRateOnBatteryEnabled: boolean
-  autoRefreshRateRestoreHz: number | null
-  usbPowerEnabled: boolean
-  blueLightFilterEnabled: boolean
-  selectedBootArt: string
-  customBootFilename: string
-  updateChannel: UpdateChannel
-  checkForUpdatesOnLaunch: boolean
-}): ControlSnapshot {
-  return {
-    activePowerProfile: input.activePowerProfile,
-    activeFanProfile: input.activeFanProfile,
-    customProcessorState: {
-      minPercent: input.customProcessorState.min,
-      maxPercent: input.customProcessorState.max,
-    },
-    customPowerBase: input.customPowerBase,
-    gpuTuning: toBackendGpuTuningState(input.gpuOverclock),
-    ocPresets: input.ocProfileSlots.map(toBackendOcPreset),
-    activeOcSlot: input.activeOcSlot,
-    ocApplyState: input.ocApplyState,
-    ocTuningLocked: input.ocTuningLocked,
-    fanCurves: toBackendCurveSet(input.customCurves),
-    fanSyncLockEnabled: input.fanSyncLockEnabled,
-    personalSettings: {
-      smartChargingEnabled: input.smartChargingEnabled,
-      usbPowerEnabled: input.usbPowerEnabled,
-      processorStateControlEnabled: input.processorStateControlEnabled,
-      nvidiaTelemetryEnabled: input.nvidiaTelemetryEnabled,
-      keepUiPrewarmed: input.keepUiPrewarmed,
-      blueLightFilterEnabled: input.blueLightFilterEnabled,
-      autoRefreshRateOnBatteryEnabled: input.autoRefreshRateOnBatteryEnabled,
-      autoRefreshRateRestoreHz: input.autoRefreshRateRestoreHz,
-      selectedBootArt: input.selectedBootArt as ControlSnapshot['personalSettings']['selectedBootArt'],
-      customBootFilename: input.customBootFilename,
-      updateChannel: input.updateChannel,
-      checkForUpdatesOnLaunch: input.checkForUpdatesOnLaunch,
-    },
-  }
-}
-
 function applyBackendControlSnapshot(
   controls: ControlSnapshot,
   setActivePowerProfile: (profile: PowerProfile['id']) => void,
@@ -1364,6 +599,8 @@ function applyBackendControlSnapshot(
   setUpdateChannel: (channel: UpdateChannel) => void,
   setCheckForUpdatesOnLaunch: (enabled: boolean) => void,
   setAutoRefreshRateSettings?: (enabled: boolean, restoreHz: number | null) => void,
+  setAutoPerformanceEnabled?: (enabled: boolean) => void,
+  setPresetCollections?: (controls: ControlSnapshot) => void,
 ) {
   applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
   setCustomPowerBase(controls.customPowerBase)
@@ -1382,7 +619,7 @@ function applyBackendControlSnapshot(
   setOcTuningLocked(controls.ocTuningLocked)
   setSmartChargingEnabled(controls.personalSettings.smartChargingEnabled)
   setProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
-  setNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? true)
+  setNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? false)
   setKeepUiPrewarmed(controls.personalSettings.keepUiPrewarmed ?? false)
   setUsbPowerEnabled(controls.personalSettings.usbPowerEnabled)
   setBlueLightFilterEnabled(controls.personalSettings.blueLightFilterEnabled)
@@ -1390,10 +627,12 @@ function applyBackendControlSnapshot(
     controls.personalSettings.autoRefreshRateOnBatteryEnabled,
     controls.personalSettings.autoRefreshRateRestoreHz,
   )
+  setAutoPerformanceEnabled?.(controls.personalSettings.autoPerformanceEnabled ?? false)
   setSelectedBootArt(controls.personalSettings.selectedBootArt)
   setCustomBootFilename(controls.personalSettings.customBootFilename)
-  setUpdateChannel('stable')
+  setUpdateChannel(controls.personalSettings.updateChannel ?? 'stable')
   setCheckForUpdatesOnLaunch(controls.personalSettings.checkForUpdatesOnLaunch)
+  setPresetCollections?.(controls)
 }
 
 function App() {
@@ -1412,12 +651,11 @@ function App() {
   const queuedPowerProfileRef = useRef<PowerProfile['id'] | null>(null)
   const fanProfileApplyInFlightRef = useRef(false)
   const queuedFanProfileRef = useRef<FanProfile['id'] | null>(null)
-  const lastTransportDebugRef = useRef<string>('')
-  const lastPollHeartbeatRef = useRef(0)
+  const hardwareReadinessRefreshRef = useRef(0)
   const runtimeEstimateSessionRef = useRef(false)
   const [activeTab, setActiveTab] = useState<ControlTab>('home')
   const [activePowerProfile, setActivePowerProfile] =
-    useState<PowerProfile['id']>('turbo')
+    useState<PowerProfile['id']>('balanced')
   const [customProcessorState, setCustomProcessorState] = useState({
     min: 35,
     max: 88,
@@ -1427,6 +665,8 @@ function App() {
   const customPowerBaseRef = useRef<CustomPowerBaseId>('performance')
   const customPowerApplyTimerRef = useRef<number | null>(null)
   const customPowerApplyRevisionRef = useRef(0)
+  const controlsBootstrappedRef = useRef(false)
+  const pulseTimerRef = useRef<number | null>(null)
   const [gpuOverclock, setGpuOverclock] = useState<GpuTuningState>(defaultGpuOverclock)
   const [customOcSlot, setCustomOcSlot] = useState<OcProfileSlot>(defaultCustomOcSlot)
   const [activeOcSlot, setActiveOcSlot] = useState<string>('daily')
@@ -1440,14 +680,22 @@ function App() {
     duplicateCurveSet(presetCurves.custom),
   )
   const customCurvesRef = useRef<CurveSet>(duplicateCurveSet(presetCurves.custom))
+  const [fanPresets, setFanPresets] = useState<FanControlPreset[]>([])
+  const [powerPresets, setPowerPresets] = useState<PowerControlPreset[]>([])
+  const [quickPresets, setQuickPresets] = useState<QuickControlPreset[]>([])
+  const fanPresetsRef = useRef<FanControlPreset[]>([])
+  const powerPresetsRef = useRef<PowerControlPreset[]>([])
+  const quickPresetsRef = useRef<QuickControlPreset[]>([])
+  const syncPresetCollectionsRef = useRef<(controls: ControlSnapshot) => void>(() => {})
+  const applyControlsToUiRef = useRef<(controls: ControlSnapshot) => void>(() => {})
   const [fanSyncLockEnabled, setFanSyncLockEnabled] = useState(false)
   const [draggingPoint, setDraggingPoint] = useState<DragState | null>(null)
   const [smartChargingEnabled, setSmartChargingEnabled] = useState(true)
   const smartChargingEnabledRef = useRef(true)
   const [processorStateControlEnabled, setProcessorStateControlEnabled] = useState(true)
   const processorStateControlEnabledRef = useRef(true)
-  const [nvidiaTelemetryEnabled, setNvidiaTelemetryEnabledState] = useState(true)
-  const nvidiaTelemetryEnabledRef = useRef(true)
+  const [nvidiaTelemetryEnabled, setNvidiaTelemetryEnabledState] = useState(false)
+  const nvidiaTelemetryEnabledRef = useRef(false)
   const [keepUiPrewarmed, setKeepUiPrewarmed] = useState(false)
   const keepUiPrewarmedRef = useRef(false)
   const [usbPowerEnabled, setUsbPowerEnabled] = useState(true)
@@ -1456,10 +704,19 @@ function App() {
   const [autoRefreshRateOnBatteryEnabled, setAutoRefreshRateOnBatteryEnabled] =
     useState(false)
   const autoRefreshRateOnBatteryEnabledRef = useRef(false)
-  const [autoRefreshRateRestoreHz, setAutoRefreshRateRestoreHz] = useState<number | null>(
-    null,
-  )
+  const [autoRefreshRateRestoreHz, setAutoRefreshRateRestoreHz] = useState<number | null>(null)
   const autoRefreshRateRestoreHzRef = useRef<number | null>(null)
+  const [autoPerformanceEnabled, setAutoPerformanceEnabled] = useState(false)
+  const autoPerformanceEnabledRef = useRef(false)
+  const autoPerformanceStickyModeRef = useRef<AutoPerformanceMode | null>(null)
+  const autoPerformanceApplyInFlightRef = useRef(false)
+  const autoPerformanceLastKeyRef = useRef<string | null>(null)
+  const autoPerformanceTimerRef = useRef<number | null>(null)
+  const [autoPerformanceStatus, setAutoPerformanceStatus] = useState<string | null>(null)
+  const [autoPerformanceMode, setAutoPerformanceMode] = useState<AutoPerformanceMode | null>(null)
+  const [autoGpuFinderResult, setAutoGpuFinderResult] = useState<AutoGpuFinderResult | null>(null)
+  const [autoGpuFinderPending, setAutoGpuFinderPending] = useState(false)
+  const scheduleAutoPerformanceEvaluationRef = useRef<(immediate?: boolean) => void>(() => {})
   const autoRefreshRateSyncKeyRef = useRef<string | null>(null)
   const [selectedBootArt, setSelectedBootArt] = useState<string>('ember')
   const [customBootPreview, setCustomBootPreview] = useState<string | null>(null)
@@ -1467,7 +724,7 @@ function App() {
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>('stable')
   const [checkForUpdatesOnLaunch, setCheckForUpdatesOnLaunch] = useState(true)
   const [backendCapabilities, setBackendCapabilities] = useState<CapabilitySnapshot | null>(null)
-  const [backendVersion, setBackendVersion] = useState('0.13.0')
+  const [backendVersion, setBackendVersion] = useState(__APP_VERSION__)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null)
   const [updateActionPending, setUpdateActionPending] = useState<UpdateAction | null>(null)
   const [updateActionMessage, setUpdateActionMessage] = useState<string | null>(null)
@@ -1477,40 +734,71 @@ function App() {
   const [statusMessage, setStatusMessage] = useState(
     'Desktop backend starting. Loading persisted AeroForge state.',
   )
-  const [settingsActionPending, setSettingsActionPending] = useState<
-    | null
-    | 'smart-charge'
-    | 'blue-light'
-    | 'boot-logo'
-    | 'refresh-rate'
-    | 'nvidia-telemetry'
-    | 'fan-calibration'
-    | 'fan-calibration-cancel'
-  >(null)
+  const { toasts, showToast, updateToast, dismissToast, dismissNewestToast } = useToasts()
+  const [settingsActionPending, setSettingsActionPending] =
+    useState<SettingsActionPending>(null)
+  const settingsActionPendingRef = useRef<SettingsActionPending>(null)
   const [glowTarget, setGlowTarget] = useState<string>('turbo')
   const [shellStatus, setShellStatus] = useState('Browser preview shell')
   const [serviceConnected, setServiceConnected] = useState(false)
   const serviceConnectedRef = useRef(false)
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null)
+  const [hardwareReadiness, setHardwareReadiness] =
+    useState<HardwareReadinessSnapshot | null>(null)
+  const autoServiceHealKeyRef = useRef<string | null>(null)
+  const maybeRequestBackgroundServiceHealRef = useRef<
+    (snapshot: HardwareReadinessSnapshot) => void
+  >(() => {})
+  const refreshHardwareReadinessRef = useRef<(force?: boolean) => Promise<void>>(async () => {})
   const [liveTelemetry, setLiveTelemetry] = useState<TelemetrySnapshot | null>(null)
+  const liveTelemetryRef = useRef<TelemetrySnapshot | null>(null)
   const [telemetrySourceLabel, setTelemetrySourceLabel] = useState('No telemetry')
   const [lastBackendPollAt, setLastBackendPollAt] = useState<string>('Waiting')
   const [lastBackendError, setLastBackendError] = useState<string | null>(null)
-  const [debugEvents, setDebugEvents] = useState<string[]>([])
-  const [performanceLogState, setPerformanceLogState] = useState<PerformanceLogState>({
-    path: null,
-    lastFlushAt: 'Waiting',
-    pendingCount: 0,
-    eventCount: 0,
-    lastError: null,
+  const {
+    events: debugEvents,
+    push: pushDebugEvent,
+    pushTransport: pushTransportDebugEvent,
+    pushHeartbeat: pushPollHeartbeat,
+    clear: clearDebugEvents,
+    reveal: revealDebugEvents,
+    snapshot: debugEventsSnapshot,
+  } = useDebugLog({
+    echoToConsole: () => diagnosticsEnabled(),
+    isVisible: () => activeTabRef.current === 'debug',
   })
-  const [frameStats, setFrameStats] = useState<FrameStats>({
-    averageMs: 0,
-    maxMs: 0,
-    fps: 0,
-    longFrameCount: 0,
-    sampleWindowMs: 0,
-    updatedAt: 'Waiting',
+  const {
+    state: performanceLogState,
+    queueEvent: queuePerformanceEvent,
+    flush: flushPerformanceLog,
+  } = usePerformanceLog({
+    enabled: () => isDesktopRuntime() && diagnosticsEnabled(),
+    canFlush: isDesktopRuntime,
+    activeTab: () => activeTabRef.current,
+    onError: (message) => pushDebugEventRef.current(message),
+  })
+  const frameStats = useFrameStats(isDevBuild() || activeTab === 'debug', {
+    onSample: (stats) => {
+      const activeFrameTab = activeTabRef.current
+      const activeFit =
+        activeFrameTab === 'home' || activeFrameTab === 'power' || activeFrameTab === 'fans'
+          ? stageFitSnapshotsRef.current[activeFrameTab]
+          : null
+      queuePerformanceEventRef.current('frame-sample', `frame sample ${activeFrameTab}`, {
+        ...stats,
+        windowWidth: window.innerWidth,
+        windowHeight: window.innerHeight,
+        activeTab: activeFrameTab,
+        stageFit: activeFit,
+      })
+    },
+    onSlowWindow: (stats) => {
+      pushDebugEventRef.current(
+        `frame sample: avg ${stats.averageMs.toFixed(1)} ms / max ${stats.maxMs.toFixed(1)} ms / ${Math.round(
+          stats.fps,
+        )} fps / ${stats.longFrameCount} long`,
+      )
+    },
   })
   const [homeScale, setHomeScale] = useState(1)
   const [homeScaledHeight, setHomeScaledHeight] = useState<number | null>(null)
@@ -1523,8 +811,8 @@ function App() {
   >({})
   const [runtimeEstimateCountdownSec, setRuntimeEstimateCountdownSec] = useState(0)
   const initializedPersistenceRef = useRef(false)
+  const stagedPersistenceTimerRef = useRef<number | null>(null)
   const activeTabRef = useRef(activeTab)
-  const debugEventsRef = useRef<string[]>([])
   const stageFitSignatureRef = useRef<Partial<Record<StageFitTarget, string>>>({})
   const stageFitSnapshotsRef = useRef<Partial<Record<StageFitTarget, StageFitSnapshot>>>({})
   const telemetrySnapshotRef = useRef<string | null>(null)
@@ -1533,13 +821,6 @@ function App() {
   const [liveControlSnapshot, setLiveControlSnapshot] =
     useState<LiveControlSnapshot | null>(null)
   const debugServiceStatusRef = useRef<string | null>(null)
-  const performanceLogSessionIdRef = useRef(`af-${Date.now().toString(36)}`)
-  const performanceLogQueueRef = useRef<PerformanceLogEvent[]>([])
-  const performanceLogFlushTimerRef = useRef<number | null>(null)
-  const performanceLogFlushInFlightRef = useRef(false)
-  const performanceLogEventCountRef = useRef(0)
-  const performanceLogPathRef = useRef<string | null>(null)
-  const performanceLogLastErrorRef = useRef<string | null>(null)
   const queuePerformanceEventRef = useRef<
     (eventType: string, detail: string, payload?: Record<string, unknown>) => void
   >(() => {})
@@ -1550,13 +831,30 @@ function App() {
   const persistStagedControlsRef = useRef<
     (overrides?: PersistControlOverrides) => Promise<void>
   >(async () => {})
+  const refreshCachedLiveControlsAfterApplyRef = useRef<
+    () => Promise<{ liveControls: LiveControlSnapshot | null; refreshMs: number }>
+  >(async () => ({ liveControls: null, refreshMs: 0 }))
   const finalizeCustomCurveEditRef = useRef<
     (nextCurves: CurveSet, options?: FinalizeCustomCurveOptions) => Promise<void>
   >(async () => {})
+  const handlePowerProfileRef = useRef<(profileId: PowerProfile['id']) => Promise<void>>(
+    async () => {},
+  )
+  const handleFanProfileRef = useRef<(profileId: FanProfile['id']) => Promise<void>>(
+    async () => {},
+  )
+  const presetImportInputRef = useRef<HTMLInputElement | null>(null)
+  const copyDiagnosticsToClipboardRef = useRef<() => Promise<void>>(async () => {})
+  const exportDiagnosticsFileRef = useRef<() => void>(() => {})
+  const exportSettingsBackupRef = useRef<() => void>(() => {})
+  const dismissNewestToastRef = useRef<() => void>(() => {})
+  const settingsImportInputRef = useRef<HTMLInputElement | null>(null)
+  const [shortcutsHelpOpen, setShortcutsHelpOpen] = useState(false)
+  const pushDebugEventRef = useRef<(message: string) => void>(() => {})
   const pushTransportDebugEventRef = useRef<(message: string) => void>(() => {})
   const pushPollHeartbeatEventRef = useRef<(message: string) => void>(() => {})
   const runUpdateCheckRef = useRef<
-    ((manual: boolean, channelOverride?: UpdateChannel) => Promise<UpdateStatus>) | null
+    ((manual: boolean, channelOverride?: UpdateChannel) => Promise<UpdateStatus | null>) | null
   >(null)
 
   const activePreset =
@@ -1568,6 +866,17 @@ function App() {
   const bootLogoPending = settingsActionPending === 'boot-logo'
   const refreshRatePending = settingsActionPending === 'refresh-rate'
   const nvidiaTelemetryPending = settingsActionPending === 'nvidia-telemetry'
+  const hardwareRepairPending = settingsActionPending === 'hardware-repair'
+  const hardwareStartPending = settingsActionPending === 'hardware-start'
+  const hardwareIssueVisible = hardwareReadiness !== null && !hardwareReadiness.ready
+  const hardwareIssueTitle = hardwareReadiness
+    ? buildHardwareReadinessTitle(hardwareReadiness)
+    : 'Hardware readiness unknown'
+  const hardwareIssueDetail = hardwareReadiness?.detail ?? 'Waiting for hardware diagnostics.'
+  const powerLayerStatuses = liveControlSnapshot?.lastPowerLayerStatuses ?? []
+  const fanLayerStatuses = liveControlSnapshot?.lastFanLayerStatuses ?? []
+  const powerHardwareApplyReady = serviceConnected && (hardwareReadiness?.ready ?? true)
+  const fanHardwareApplyReady = serviceConnected && (hardwareReadiness?.ready ?? true)
   const fanCalibrationPending = settingsActionPending === 'fan-calibration'
   const fanCalibrationCancelPending = settingsActionPending === 'fan-calibration-cancel'
   const fanSpeedCalibration = liveControlSnapshot?.fanSpeedCalibration
@@ -1657,9 +966,11 @@ function App() {
   const displayedCpuFanRpm = presentPositive(activeTelemetry?.cpuFanRpm ?? null)
   const displayedGpuFanRpm = presentPositive(activeTelemetry?.gpuFanRpm ?? null)
   const displayedCpuFanTargetPercent =
-    liveControlSnapshot?.currentCpuFanSpeedPercent ?? null
+    liveControlSnapshot?.currentCpuFanSpeedPercent ??
+    interpolateCurveTarget(activePreset.cpu, displayedCpuTemp)
   const displayedGpuFanTargetPercent =
-    liveControlSnapshot?.currentGpuFanSpeedPercent ?? null
+    liveControlSnapshot?.currentGpuFanSpeedPercent ??
+    interpolateCurveTarget(activePreset.gpu, displayedGpuTemp)
   const powerHeadline = currentPowerProfile.name
   const displayedCpuIdentity = buildHardwareIdentity(
     activeTelemetry?.cpuBrand,
@@ -1819,23 +1130,199 @@ function App() {
       })
     }
     if (activeTab === 'debug') {
-      setDebugEvents([...debugEventsRef.current])
+      revealDebugEvents()
     }
-  }, [activeTab])
+  }, [activeTab, revealDebugEvents])
 
   useEffect(() => {
     stageFitSnapshotsRef.current = stageFitSnapshots
   }, [stageFitSnapshots])
 
+  useEffect(() => {
+    settingsActionPendingRef.current = settingsActionPending
+  }, [settingsActionPending])
+
+  useEffect(() => {
+    liveTelemetryRef.current = liveTelemetry
+  }, [liveTelemetry])
+
+  useEffect(() => {
+    if (!autoPerformanceEnabled) {
+      return
+    }
+    scheduleAutoPerformanceEvaluationRef.current(false)
+  }, [
+    autoPerformanceEnabled,
+    liveTelemetry?.acPluggedIn,
+    liveTelemetry?.cpuUsagePercent,
+    liveTelemetry?.gpuUsagePercent,
+    liveTelemetry?.cpuTempC,
+    liveTelemetry?.gpuTempC,
+    liveTelemetry?.systemTempC,
+    ocTuningLocked,
+    nvidiaTelemetryEnabled,
+  ])
+
   function commitCustomCurves(next: CurveSet | ((current: CurveSet) => CurveSet)) {
-    setCustomCurves((current) => {
+    // Resolve against the ref, not inside the updater: pointerup reads the ref
+    // synchronously and React may defer the updater past it during a drag.
+    const resolved = typeof next === 'function' ? next(customCurvesRef.current) : next
+    const normalized = duplicateCurveSet(resolved)
+    customCurvesRef.current = normalized
+    setCustomCurves(normalized)
+  }
+
+  type SnapshotScope = 'power' | 'fanProfile' | 'fanCurves' | 'gpu' | 'bootLogo' | 'nvidiaTelemetry'
+
+  /**
+   * Apply only the fields a backend response is authoritative for. The backend
+   * builds every response from its last persisted snapshot, so applying the
+   * whole thing would revert any edit the user made elsewhere while the request
+   * was in flight (and the staged persist would then write that reversion).
+   */
+  function applyAuthoritativeSnapshot(controls: ControlSnapshot, scope: SnapshotScope) {
+    switch (scope) {
+      case 'power':
+        applyPowerControlSnapshot(controls, setActivePowerProfile, setCustomProcessorState)
+        setCustomPowerBase(controls.customPowerBase)
+        commitProcessorStateControlEnabled(controls.personalSettings.processorStateControlEnabled)
+        break
+      case 'fanProfile':
+        setActiveFanProfile(controls.activeFanProfile)
+        break
+      case 'fanCurves':
+        setActiveFanProfile(controls.activeFanProfile)
+        commitCustomCurves(fromBackendCurveSet(controls.fanCurves))
+        break
+      case 'gpu': {
+        // apply_gpu_tuning forces the power profile to Custom and persists it.
+        setActivePowerProfile(controls.activePowerProfile)
+        setGpuOverclock(fromBackendGpuTuningState(controls.gpuTuning))
+        const customSlot =
+          controls.ocPresets.find((preset) => preset.isCustom) ??
+          toBackendOcPreset(defaultCustomOcSlot)
+        setCustomOcSlot(fromBackendOcPreset(customSlot))
+        setActiveOcSlot(controls.activeOcSlot)
+        setOcApplyState(controls.ocApplyState)
+        setOcTuningLocked(controls.ocTuningLocked)
+        break
+      }
+      case 'bootLogo':
+        setSelectedBootArt(controls.personalSettings.selectedBootArt)
+        setCustomBootFilename(controls.personalSettings.customBootFilename)
+        break
+      case 'nvidiaTelemetry':
+        commitNvidiaTelemetryEnabled(controls.personalSettings.nvidiaTelemetryEnabled ?? false)
+        break
+    }
+  }
+
+  function commitFanPresets(next: FanControlPreset[] | ((current: FanControlPreset[]) => FanControlPreset[])) {
+    setFanPresets((current) => {
       const resolved =
-        typeof next === 'function' ? (next as (current: CurveSet) => CurveSet)(current) : next
-      const normalized = duplicateCurveSet(resolved)
-      customCurvesRef.current = normalized
-      return normalized
+        typeof next === 'function'
+          ? (next as (current: FanControlPreset[]) => FanControlPreset[])(current)
+          : next
+      fanPresetsRef.current = resolved
+      return resolved
     })
   }
+
+  function commitPowerPresets(
+    next: PowerControlPreset[] | ((current: PowerControlPreset[]) => PowerControlPreset[]),
+  ) {
+    setPowerPresets((current) => {
+      const resolved =
+        typeof next === 'function'
+          ? (next as (current: PowerControlPreset[]) => PowerControlPreset[])(current)
+          : next
+      powerPresetsRef.current = resolved
+      return resolved
+    })
+  }
+
+  function commitQuickPresets(
+    next: QuickControlPreset[] | ((current: QuickControlPreset[]) => QuickControlPreset[]),
+  ) {
+    setQuickPresets((current) => {
+      const resolved =
+        typeof next === 'function'
+          ? (next as (current: QuickControlPreset[]) => QuickControlPreset[])(current)
+          : next
+      quickPresetsRef.current = resolved
+      return resolved
+    })
+  }
+
+  function syncPresetCollections(controls: ControlSnapshot) {
+    commitFanPresets(controls.fanPresets ?? [])
+    commitPowerPresets(controls.powerPresets ?? [])
+    commitQuickPresets(controls.quickPresets ?? [])
+  }
+  syncPresetCollectionsRef.current = syncPresetCollections
+
+  function maybeRequestBackgroundServiceHeal(snapshot: HardwareReadinessSnapshot) {
+    if (snapshot.ready || !snapshot.service.installed || snapshot.service.running) {
+      return
+    }
+    if (settingsActionPendingRef.current !== null) {
+      return
+    }
+
+    const healKey = [
+      snapshot.service.name,
+      snapshot.service.startType ?? 'unknown',
+      snapshot.wmi.service.running ? 'wmi-running' : 'wmi-stopped',
+      snapshot.wmi.disabled ? 'wmi-disabled' : 'wmi-enabled',
+      snapshot.repairAvailable ? 'repair-available' : 'repair-missing',
+    ].join(':')
+    if (autoServiceHealKeyRef.current === healKey) {
+      return
+    }
+
+    autoServiceHealKeyRef.current = healKey
+    settingsActionPendingRef.current = 'hardware-start'
+    setSettingsActionPending('hardware-start')
+    setStatusMessage('Starting AeroForge service in the background...')
+    const toastId = showToast(
+      'info',
+      'Starting service',
+      'AeroForge is using the background healer so normal launch stays non-admin.',
+      0,
+    )
+
+    void requestServiceHeal()
+      .then((result) => {
+        setStatusMessage(result.detail)
+        updateToast(
+          toastId,
+          result.serviceRunning ? 'success' : result.requested ? 'warning' : 'error',
+          result.serviceRunning
+            ? 'Service started'
+            : result.requested
+              ? 'Still starting'
+              : 'Repair needed',
+          result.detail,
+        )
+        pushDebugEventRef.current(result.detail)
+
+        window.setTimeout(
+          () => void refreshHardwareReadiness(true),
+          result.serviceRunning ? 1000 : 5000,
+        )
+      })
+      .catch((error) => {
+        const detail = describeError(error)
+        setStatusMessage(`AeroForge service start failed: ${detail}`)
+        updateToast(toastId, 'error', 'Service start failed', detail)
+        pushDebugEventRef.current(`background service heal failed: ${detail}`)
+      })
+      .finally(() => {
+        settingsActionPendingRef.current = null
+        setSettingsActionPending((current) => (current === 'hardware-start' ? null : current))
+      })
+  }
+  maybeRequestBackgroundServiceHealRef.current = maybeRequestBackgroundServiceHeal
 
   function commitSmartChargingEnabled(enabled: boolean) {
     smartChargingEnabledRef.current = enabled
@@ -1869,6 +1356,48 @@ function App() {
     setAutoRefreshRateRestoreHz(restoreHz)
   }
 
+  function commitAutoPerformanceEnabled(enabled: boolean) {
+    autoPerformanceEnabledRef.current = enabled
+    setAutoPerformanceEnabled(enabled)
+    if (!enabled) {
+      autoPerformanceStickyModeRef.current = null
+      autoPerformanceLastKeyRef.current = null
+      setAutoPerformanceStatus(null)
+      setAutoPerformanceMode(null)
+    }
+  }
+
+  function applyControlsToUi(controls: ControlSnapshot) {
+    applyBackendControlSnapshot(
+      controls,
+      setActivePowerProfile,
+      setCustomProcessorState,
+      setCustomPowerBase,
+      setGpuOverclock,
+      setCustomOcSlot,
+      setActiveOcSlot,
+      setOcApplyState,
+      setOcTuningLocked,
+      setActiveFanProfile,
+      commitCustomCurves,
+      setFanSyncLockEnabled,
+      commitSmartChargingEnabled,
+      commitProcessorStateControlEnabled,
+      commitNvidiaTelemetryEnabled,
+      commitKeepUiPrewarmed,
+      setUsbPowerEnabled,
+      commitBlueLightFilterEnabled,
+      setSelectedBootArt,
+      setCustomBootFilename,
+      setUpdateChannel,
+      setCheckForUpdatesOnLaunch,
+      commitAutoRefreshRateSettings,
+      commitAutoPerformanceEnabled,
+      (loaded) => syncPresetCollectionsRef.current(loaded),
+    )
+  }
+  applyControlsToUiRef.current = applyControlsToUi
+
   function updateSerializedState<T>(
     ref: { current: string | null },
     value: T | null,
@@ -1900,17 +1429,32 @@ function App() {
       if (customPowerApplyTimerRef.current !== null) {
         window.clearTimeout(customPowerApplyTimerRef.current)
       }
+      if (stagedPersistenceTimerRef.current !== null) {
+        window.clearTimeout(stagedPersistenceTimerRef.current)
+      }
+      if (autoPerformanceTimerRef.current !== null) {
+        window.clearTimeout(autoPerformanceTimerRef.current)
+      }
     },
     [],
   )
 
   async function persistStagedControls(overrides?: PersistControlOverrides) {
+    if (!controlsBootstrappedRef.current) {
+      // UI state is still the built-in defaults; saving now would overwrite the
+      // user's presets and curves on disk with those defaults.
+      pushDebugEventRef.current('staged control persistence skipped: backend controls not loaded yet')
+      return
+    }
     const nextActivePowerProfile = overrides?.activePowerProfile ?? activePowerProfile
     const nextActiveFanProfile = overrides?.activeFanProfile ?? activeFanProfile
     const nextCustomProcessorState =
       overrides?.customProcessorState ?? customProcessorStateRef.current
     const nextCustomPowerBase = overrides?.customPowerBase ?? customPowerBaseRef.current
     const nextCustomCurves = overrides?.customCurves ?? customCurvesRef.current
+    const nextFanPresets = overrides?.fanPresets ?? fanPresetsRef.current
+    const nextPowerPresets = overrides?.powerPresets ?? powerPresetsRef.current
+    const nextQuickPresets = overrides?.quickPresets ?? quickPresetsRef.current
     const nextFanSyncLockEnabled = overrides?.fanSyncLockEnabled ?? fanSyncLockEnabled
     const nextSmartChargingEnabled =
       overrides?.smartChargingEnabled ?? smartChargingEnabledRef.current
@@ -1925,6 +1469,8 @@ function App() {
       autoRefreshRateOnBatteryEnabledRef.current
     const nextAutoRefreshRateRestoreHz =
       overrides?.autoRefreshRateRestoreHz ?? autoRefreshRateRestoreHzRef.current
+    const nextAutoPerformanceEnabled =
+      overrides?.autoPerformanceEnabled ?? autoPerformanceEnabledRef.current
     const nextBlueLightFilterEnabled =
       overrides?.blueLightFilterEnabled ?? blueLightFilterEnabledRef.current
     const nextSelectedBootArt = overrides?.selectedBootArt ?? selectedBootArt
@@ -1946,6 +1492,9 @@ function App() {
           ocApplyState,
           ocTuningLocked,
           customCurves: nextCustomCurves,
+          fanPresets: nextFanPresets,
+          powerPresets: nextPowerPresets,
+          quickPresets: nextQuickPresets,
           fanSyncLockEnabled: nextFanSyncLockEnabled,
           smartChargingEnabled: nextSmartChargingEnabled,
           processorStateControlEnabled: nextProcessorStateControlEnabled,
@@ -1953,6 +1502,7 @@ function App() {
           keepUiPrewarmed: nextKeepUiPrewarmed,
           autoRefreshRateOnBatteryEnabled: nextAutoRefreshRateOnBatteryEnabled,
           autoRefreshRateRestoreHz: nextAutoRefreshRateRestoreHz,
+          autoPerformanceEnabled: nextAutoPerformanceEnabled,
           usbPowerEnabled,
           blueLightFilterEnabled: nextBlueLightFilterEnabled,
           selectedBootArt: nextSelectedBootArt,
@@ -1967,24 +1517,59 @@ function App() {
   }
   persistStagedControlsRef.current = persistStagedControls
 
+  function scheduleStagedControlsPersist() {
+    if (stagedPersistenceTimerRef.current !== null) {
+      window.clearTimeout(stagedPersistenceTimerRef.current)
+    }
+
+    stagedPersistenceTimerRef.current = window.setTimeout(() => {
+      stagedPersistenceTimerRef.current = null
+      void persistStagedControlsRef.current()
+    }, 450)
+  }
+
+  function flushStagedControlsPersist() {
+    if (stagedPersistenceTimerRef.current !== null) {
+      window.clearTimeout(stagedPersistenceTimerRef.current)
+      stagedPersistenceTimerRef.current = null
+    }
+
+    void persistStagedControlsRef.current()
+  }
+
   useEffect(() => {
     if (!initializedPersistenceRef.current) {
       initializedPersistenceRef.current = true
       return
     }
 
-    void persistStagedControlsRef.current()
+    scheduleStagedControlsPersist()
   }, [
     activePowerProfile,
+    activeFanProfile,
     customProcessorState.min,
     customProcessorState.max,
     customPowerBase,
+    gpuOverclock.coreClock,
+    gpuOverclock.memoryClock,
+    gpuOverclock.powerLimit,
+    gpuOverclock.tempLimit,
+    gpuOverclock.voltageOffset,
+    activeOcSlot,
+    ocApplyState,
+    ocTuningLocked,
+    customCurves,
+    fanPresets,
+    powerPresets,
+    quickPresets,
+    fanSyncLockEnabled,
     smartChargingEnabled,
     processorStateControlEnabled,
     nvidiaTelemetryEnabled,
     keepUiPrewarmed,
     autoRefreshRateOnBatteryEnabled,
     autoRefreshRateRestoreHz,
+    autoPerformanceEnabled,
     usbPowerEnabled,
     blueLightFilterEnabled,
     selectedBootArt,
@@ -1992,6 +1577,140 @@ function App() {
     updateChannel,
     checkForUpdatesOnLaunch,
   ])
+
+  useEffect(() => {
+    function flushOnHideOrExit() {
+      if (document.visibilityState === 'hidden') {
+        flushStagedControlsPersist()
+      }
+    }
+
+    document.addEventListener('visibilitychange', flushOnHideOrExit)
+    window.addEventListener('pagehide', flushStagedControlsPersist)
+    window.addEventListener('beforeunload', flushStagedControlsPersist)
+
+    return () => {
+      document.removeEventListener('visibilitychange', flushOnHideOrExit)
+      window.removeEventListener('pagehide', flushStagedControlsPersist)
+      window.removeEventListener('beforeunload', flushStagedControlsPersist)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) {
+      return
+    }
+
+    let mounted = true
+    const unlisteners: Array<() => void> = []
+    // listen() resolves after cleanup on a fast unmount (StrictMode double-mount in dev);
+    // drop such a listener immediately instead of leaking it into a dead array.
+    const track = (unlisten: () => void) => {
+      if (mounted) {
+        unlisteners.push(unlisten)
+      } else {
+        unlisten()
+      }
+    }
+
+    async function wireTrayEvents() {
+      track(
+        await listen<TrayControlEventPayload>('tray-control-updated', (event) => {
+          if (!mounted) {
+            return
+          }
+
+          applyControlsToUiRef.current(event.payload.controls)
+          setStatusMessage(`${event.payload.action} applied from tray. ${event.payload.detail}`)
+          void refreshCachedLiveControlsAfterApplyRef.current().catch((error) => {
+            pushDebugEventRef.current(`tray refresh failed: ${describeError(error)}`)
+          })
+        }),
+      )
+
+      track(
+        await listen<TrayControlErrorPayload>('tray-control-error', (event) => {
+          if (!mounted) {
+            return
+          }
+
+          setStatusMessage(`${event.payload.action} failed from tray: ${event.payload.detail}`)
+          pushDebugEventRef.current(`tray action failed: ${event.payload.detail}`)
+        }),
+      )
+
+      track(
+        await listen('tray-window-will-hide', () => {
+          flushStagedControlsPersist()
+        }),
+      )
+    }
+
+    void wireTrayEvents().catch((error) => {
+      pushDebugEventRef.current(`tray event listener setup failed: ${describeError(error)}`)
+    })
+
+    return () => {
+      mounted = false
+      unlisteners.splice(0).forEach((unlisten) => unlisten())
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = parseControlShortcut(event)
+      if (!action) {
+        return
+      }
+
+      event.preventDefault()
+
+      switch (action.type) {
+        case 'tab':
+          setActiveTab(action.tab)
+          pushDebugEventRef.current(`keyboard shortcut opened ${action.tab} tab`)
+          break
+        case 'power':
+          void handlePowerProfileRef.current(action.profile)
+          pushDebugEventRef.current(`keyboard shortcut power ${action.profile}`)
+          break
+        case 'fan':
+          void handleFanProfileRef.current(action.profile)
+          pushDebugEventRef.current(`keyboard shortcut fan ${action.profile}`)
+          break
+        case 'copy-diagnostics':
+          void copyDiagnosticsToClipboardRef.current()
+          break
+        case 'export-diagnostics':
+          exportDiagnosticsFileRef.current()
+          break
+        case 'export-settings':
+          exportSettingsBackupRef.current()
+          break
+        case 'restore-balanced-auto':
+          void handlePowerProfileRef.current('balanced')
+          void handleFanProfileRef.current('auto')
+          showToast(
+            'info',
+            'Restoring Balanced / Auto',
+            'Keyboard shortcut requested Balanced power and Auto fans.',
+          )
+          break
+        case 'dismiss-toast':
+          dismissNewestToastRef.current()
+          break
+        case 'help':
+          setShortcutsHelpOpen((open) => !open)
+          break
+        default:
+          break
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- global shortcut binding; showToast is feedback-only
+  }, [])
 
   useEffect(() => {
     const resetStageFit = (
@@ -2081,8 +1800,8 @@ function App() {
         return
       }
 
-      const nextScale = Math.min(1, availableHeight / naturalHeight, availableWidth / naturalWidth)
-      const clampedScale = Number.isFinite(nextScale) ? Math.max(0.78, nextScale) : 1
+      const nextScale = Math.min(1, availableWidth / naturalWidth)
+      const clampedScale = Number.isFinite(nextScale) ? Math.max(0.92, nextScale) : 1
       const nextScaledHeight = naturalHeight * clampedScale
       const signature = [
         clampedScale.toFixed(3),
@@ -2114,7 +1833,7 @@ function App() {
           ...current,
           [activeStage.id]: snapshot,
         }))
-        pushDebugEvent(
+        pushDebugEventRef.current(
           `stage fit ${activeStage.id}: scale ${snapshot.scale.toFixed(3)}, height ${Math.round(
             snapshot.scaledHeight,
           )}px, natural ${Math.round(snapshot.naturalWidth)}x${Math.round(
@@ -2194,139 +1913,15 @@ function App() {
     }
   }, [activeTab])
 
-  function schedulePerformanceLogFlush() {
-    if (performanceLogFlushTimerRef.current !== null) {
-      return
-    }
-
-    performanceLogFlushTimerRef.current = window.setTimeout(() => {
-      performanceLogFlushTimerRef.current = null
-      void flushPerformanceLog()
-    }, PERFORMANCE_LOG_FLUSH_DELAY_MS)
+  function diagnosticsEnabled() {
+    return isDevBuild() || activeTabRef.current === 'debug'
   }
 
-  function queuePerformanceEvent(
-    eventType: string,
-    detail: string,
-    payload: Record<string, unknown> = {},
-  ) {
-    if (!isDesktopRuntime()) {
-      return
-    }
-
-    performanceLogQueueRef.current.push({
-      sessionId: performanceLogSessionIdRef.current,
-      eventType,
-      occurredAtUnixMs: Date.now(),
-      activeTab: activeTabRef.current,
-      detail,
-      payload: {
-        ...payload,
-        visibility: document.visibilityState,
-      },
-    })
-
-    performanceLogEventCountRef.current += 1
-
-    if (performanceLogQueueRef.current.length > PERFORMANCE_LOG_MAX_QUEUE) {
-      performanceLogQueueRef.current.splice(
-        0,
-        performanceLogQueueRef.current.length - PERFORMANCE_LOG_MAX_QUEUE,
-      )
-    }
-
-    if (performanceLogQueueRef.current.length >= PERFORMANCE_LOG_BATCH_SIZE) {
-      void flushPerformanceLog()
-    } else {
-      schedulePerformanceLogFlush()
-    }
-  }
-
-  async function flushPerformanceLog() {
-    if (!isDesktopRuntime() || performanceLogFlushInFlightRef.current) {
-      return
-    }
-
-    if (performanceLogFlushTimerRef.current !== null) {
-      window.clearTimeout(performanceLogFlushTimerRef.current)
-      performanceLogFlushTimerRef.current = null
-    }
-
-    const events = performanceLogQueueRef.current.splice(0)
-    if (events.length === 0) {
-      setPerformanceLogState((current) => ({
-        ...current,
-        pendingCount: 0,
-        eventCount: performanceLogEventCountRef.current,
-      }))
-      return
-    }
-
-    performanceLogFlushInFlightRef.current = true
-
-    try {
-      const path = await appendPerformanceLog(events)
-      performanceLogPathRef.current = path
-      performanceLogLastErrorRef.current = null
-      setPerformanceLogState({
-        path,
-        lastFlushAt: formatDebugClock(new Date()),
-        pendingCount: performanceLogQueueRef.current.length,
-        eventCount: performanceLogEventCountRef.current,
-        lastError: null,
-      })
-    } catch (error) {
-      const message = describeError(error)
-      performanceLogLastErrorRef.current = message
-      setPerformanceLogState({
-        path: performanceLogPathRef.current,
-        lastFlushAt: formatDebugClock(new Date()),
-        pendingCount: performanceLogQueueRef.current.length,
-        eventCount: performanceLogEventCountRef.current,
-        lastError: message,
-      })
-      pushDebugEvent(`performance log write failed: ${message}`)
-    } finally {
-      performanceLogFlushInFlightRef.current = false
-      if (performanceLogQueueRef.current.length > 0) {
-        schedulePerformanceLogFlush()
-      }
-    }
-  }
   queuePerformanceEventRef.current = queuePerformanceEvent
   flushPerformanceLogRef.current = flushPerformanceLog
 
-  function pushDebugEvent(message: string) {
-    const entry = `${formatDebugClock(new Date())} ${message}`
+  pushDebugEventRef.current = pushDebugEvent
 
-    console.debug(`[AeroForge debug] ${entry}`)
-
-    const next = [entry, ...debugEventsRef.current].slice(0, 8)
-    debugEventsRef.current = next
-
-    if (activeTabRef.current === 'debug') {
-      setDebugEvents(next)
-    }
-  }
-
-  function pushTransportDebugEvent(message: string) {
-    if (lastTransportDebugRef.current === message) {
-      return
-    }
-
-    lastTransportDebugRef.current = message
-    pushDebugEvent(message)
-  }
-
-  function pushPollHeartbeat(message: string) {
-    const now = Date.now()
-    if (now - lastPollHeartbeatRef.current < 5000) {
-      return
-    }
-
-    lastPollHeartbeatRef.current = now
-    pushDebugEvent(message)
-  }
   pushTransportDebugEventRef.current = pushTransportDebugEvent
   pushPollHeartbeatEventRef.current = pushPollHeartbeat
 
@@ -2338,23 +1933,60 @@ function App() {
     controlApplyInFlightRef.current = Math.max(0, controlApplyInFlightRef.current - 1)
   }
 
+  dismissNewestToastRef.current = dismissNewestToast
+
+  async function refreshHardwareReadiness(force = false) {
+    const now = Date.now()
+    if (!force && now - hardwareReadinessRefreshRef.current < HARDWARE_READINESS_REFRESH_MS) {
+      return
+    }
+
+    hardwareReadinessRefreshRef.current = now
+    try {
+      const snapshot = await getHardwareReadinessSnapshot()
+      setHardwareReadiness(snapshot)
+      maybeRequestBackgroundServiceHealRef.current(snapshot)
+      if (!snapshot.ready) {
+        pushTransportDebugEventRef.current(`hardware readiness: ${snapshot.detail}`)
+      }
+    } catch (error) {
+      pushTransportDebugEventRef.current(
+        `hardware readiness probe failed: ${describeError(error)}`,
+      )
+    }
+  }
+  refreshHardwareReadinessRef.current = refreshHardwareReadiness
+
+  // Bootstrap, the poll loop and post-apply refreshes all land the same three
+  // backend snapshots the same way; only setters and refs, so it never changes.
+  const applyBackendPollSnapshot = useCallback(
+    (
+      snapshot: Pick<BackendPollSnapshot, 'service' | 'telemetry' | 'liveControls'>,
+      polledAt: Date,
+    ) => {
+      const { service, telemetry, liveControls } = snapshot
+      setServiceConnected(service.connected)
+      setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
+      setLastBackendError(service.connected ? null : service.detail)
+      updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
+      updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+        liveControlSnapshotRef.current = next
+        setLiveControlSnapshot(next)
+      })
+      if (activeTabRef.current === 'debug') {
+        updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
+        setLastBackendPollAt(formatDebugClock(polledAt))
+      }
+    },
+    [],
+  )
+
   async function refreshCachedLiveControlsAfterApply() {
     const refreshStartedMs = performance.now()
 
     try {
       const snapshot = await getBackendPollSnapshot()
-      setServiceConnected(snapshot.service.connected)
-      setTelemetrySourceLabel(describeTelemetrySource(snapshot.service.connected, snapshot.telemetry))
-      setLastBackendError(snapshot.service.connected ? null : snapshot.service.detail)
-      updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
-      updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
-        liveControlSnapshotRef.current = next
-        setLiveControlSnapshot(next)
-      })
-      if (activeTabRef.current === 'debug') {
-        updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
-        setLastBackendPollAt(formatDebugClock(new Date()))
-      }
+      applyBackendPollSnapshot(snapshot, new Date())
 
       return {
         liveControls: snapshot.liveControls,
@@ -2368,6 +2000,7 @@ function App() {
       }
     }
   }
+  refreshCachedLiveControlsAfterApplyRef.current = refreshCachedLiveControlsAfterApply
 
   useEffect(() => {
     queuePerformanceEventRef.current('performance-log-started', 'performance logging started', {
@@ -2377,10 +2010,6 @@ function App() {
     })
 
     return () => {
-      if (performanceLogFlushTimerRef.current !== null) {
-        window.clearTimeout(performanceLogFlushTimerRef.current)
-        performanceLogFlushTimerRef.current = null
-      }
       void flushPerformanceLogRef.current()
     }
   }, [])
@@ -2431,7 +2060,7 @@ function App() {
     void syncAutoRefreshRateStateRef.current(autoRefreshRateOnBatteryEnabled, onBattery, false).catch(
       (error) => {
         autoRefreshRateSyncKeyRef.current = null
-        pushDebugEvent(`auto refresh-rate sync failed: ${describeError(error)}`)
+        pushDebugEventRef.current(`auto refresh-rate sync failed: ${describeError(error)}`)
       },
     )
   }, [autoRefreshRateOnBatteryEnabled, autoRefreshRateRestoreHz, displayedAcPluggedIn])
@@ -2453,26 +2082,22 @@ function App() {
     }
   }, [displayedAcPluggedIn, displayedBatteryLifeRemainingSec])
 
+  // Keyed on "counting or not" so the interval survives each tick instead of
+  // being torn down and recreated every second.
+  const runtimeEstimateCountingDown = runtimeEstimateCountdownSec > 0
   useEffect(() => {
-    if (runtimeEstimateCountdownSec <= 0) {
+    if (!runtimeEstimateCountingDown) {
       return
     }
 
     const timer = window.setInterval(() => {
-      setRuntimeEstimateCountdownSec((current) => {
-        if (current <= 1) {
-          window.clearInterval(timer)
-          return 0
-        }
-
-        return current - 1
-      })
+      setRuntimeEstimateCountdownSec((current) => Math.max(0, current - 1))
     }, 1000)
 
     return () => {
       window.clearInterval(timer)
     }
-  }, [runtimeEstimateCountdownSec])
+  }, [runtimeEstimateCountingDown])
 
   useEffect(() => {
     if (!draggingPoint) {
@@ -2554,102 +2179,6 @@ function App() {
   }, [customBootPreview])
 
   useEffect(() => {
-    let cancelled = false
-    let rafId = 0
-    let previousTimestamp = 0
-    let sampleStartedAt = 0
-    let frameCount = 0
-    let totalDeltaMs = 0
-    let maxDeltaMs = 0
-    let longFrameCount = 0
-    let lastLoggedWindowAt = 0
-
-    function step(timestamp: number) {
-      if (cancelled) {
-        return
-      }
-
-      if (previousTimestamp === 0) {
-        previousTimestamp = timestamp
-        sampleStartedAt = timestamp
-        rafId = window.requestAnimationFrame(step)
-        return
-      }
-
-      const deltaMs = timestamp - previousTimestamp
-      previousTimestamp = timestamp
-      frameCount += 1
-      totalDeltaMs += deltaMs
-      maxDeltaMs = Math.max(maxDeltaMs, deltaMs)
-
-      if (deltaMs >= PERFORMANCE_LOG_LONG_FRAME_MS) {
-        longFrameCount += 1
-      }
-
-      const sampleWindowMs = timestamp - sampleStartedAt
-
-      if (sampleWindowMs >= 1000) {
-        const averageMs = frameCount > 0 ? totalDeltaMs / frameCount : 0
-        const fps = averageMs > 0 ? 1000 / averageMs : 0
-        const updatedAt = formatDebugClock(new Date())
-
-        setFrameStats({
-          averageMs,
-          maxMs: maxDeltaMs,
-          fps,
-          longFrameCount,
-          sampleWindowMs,
-          updatedAt,
-        })
-
-        const activeFrameTab = activeTabRef.current
-        const activeFit =
-          activeFrameTab === 'home' || activeFrameTab === 'power' || activeFrameTab === 'fans'
-            ? stageFitSnapshotsRef.current[activeFrameTab]
-            : null
-        queuePerformanceEventRef.current('frame-sample', `frame sample ${activeFrameTab}`, {
-          averageMs,
-          maxMs: maxDeltaMs,
-          fps,
-          longFrameCount,
-          sampleWindowMs,
-          windowWidth: window.innerWidth,
-          windowHeight: window.innerHeight,
-          activeTab: activeFrameTab,
-          stageFit: activeFit,
-        })
-
-        if (
-          (maxDeltaMs >= 50 || longFrameCount >= 3 || averageMs >= 20) &&
-          timestamp - lastLoggedWindowAt >= 2000
-        ) {
-          pushDebugEvent(
-            `frame sample: avg ${averageMs.toFixed(1)} ms / max ${maxDeltaMs.toFixed(1)} ms / ${Math.round(
-              fps,
-            )} fps / ${longFrameCount} long`,
-          )
-          lastLoggedWindowAt = timestamp
-        }
-
-        sampleStartedAt = timestamp
-        frameCount = 0
-        totalDeltaMs = 0
-        maxDeltaMs = 0
-        longFrameCount = 0
-      }
-
-      rafId = window.requestAnimationFrame(step)
-    }
-
-    rafId = window.requestAnimationFrame(step)
-
-    return () => {
-      cancelled = true
-      window.cancelAnimationFrame(rafId)
-    }
-  }, [])
-
-  useEffect(() => {
     const tauriInternals = (
       window as Window & { __TAURI_INTERNALS__?: unknown }
     ).__TAURI_INTERNALS__
@@ -2677,56 +2206,22 @@ function App() {
         updaterMs = 0
         const runtime = bootstrap.shell
         const service = bootstrap.service
+        const readiness = bootstrap.hardwareReadiness
         const telemetry = bootstrap.telemetry
         const liveControls = bootstrap.liveControls
         liveControlsMs = 0
 
         if (!cancelled) {
           setBackendCapabilities(bootstrap.capabilities)
-          applyBackendControlSnapshot(
-            mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls),
-            setActivePowerProfile,
-            setCustomProcessorState,
-            setCustomPowerBase,
-            setGpuOverclock,
-            setCustomOcSlot,
-            setActiveOcSlot,
-            setOcApplyState,
-            setOcTuningLocked,
-            setActiveFanProfile,
-            commitCustomCurves,
-            setFanSyncLockEnabled,
-            commitSmartChargingEnabled,
-            commitProcessorStateControlEnabled,
-            commitNvidiaTelemetryEnabled,
-            commitKeepUiPrewarmed,
-            setUsbPowerEnabled,
-            commitBlueLightFilterEnabled,
-            setSelectedBootArt,
-            setCustomBootFilename,
-            setUpdateChannel,
-            setCheckForUpdatesOnLaunch,
-            commitAutoRefreshRateSettings,
-          )
+          controlsBootstrappedRef.current = true
+          applyControlsToUiRef.current(mergeControlsWithLiveSnapshot(bootstrap.controls, liveControls))
           setBackendVersion(runtime.backendVersion)
           setUpdateStatus(updater)
+          setHardwareReadiness(readiness)
+          maybeRequestBackgroundServiceHealRef.current(readiness)
+          hardwareReadinessRefreshRef.current = Date.now()
           setShellStatus(`${runtime.shell} v${runtime.backendVersion}`)
-          setServiceConnected(service.connected)
-          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
-          setLastBackendError(service.connected ? null : service.detail)
-          updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
-          updateSerializedState(
-            liveControlSnapshotStateRef,
-            liveControls,
-            (next) => {
-              liveControlSnapshotRef.current = next
-              setLiveControlSnapshot(next)
-            },
-          )
-          if (activeTabRef.current === 'debug') {
-            updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
-            setLastBackendPollAt(formatDebugClock(new Date()))
-          }
+          applyBackendPollSnapshot(bootstrap, new Date())
           setStatusMessage(
             `Desktop backend ${runtime.backendVersion} loaded. State ${
               persistence.initializedFromDisk ? 'restored from disk' : 'started from defaults'
@@ -2747,7 +2242,11 @@ function App() {
         )
         queuePerformanceEventRef.current(
           'backend-bootstrap',
-          service.connected ? 'bootstrap connected' : 'bootstrap fallback',
+          readiness.ready
+            ? service.connected
+              ? 'bootstrap connected'
+              : 'bootstrap fallback'
+            : 'bootstrap hardware blocked',
           {
             totalMs: performance.now() - bootstrapStartedAt,
             backendBootstrapMs,
@@ -2756,6 +2255,8 @@ function App() {
             liveControlsMs,
             serviceConnected: service.connected,
             workerCount: service.workerCount,
+            hardwareReady: readiness.ready,
+            hardwareDetail: readiness.detail,
             telemetryUsable: hasUsableTelemetry(telemetry),
           },
         )
@@ -2777,6 +2278,19 @@ function App() {
             setLastBackendPollAt(formatDebugClock(new Date()))
           }
           setStatusMessage(`Desktop bootstrap failed: ${message}`)
+          // Without the persisted controls every edit would be dropped for the
+          // whole session (persistence stays gated); try the cheap getter.
+          try {
+            const controls = await getControlSnapshot()
+            if (!cancelled) {
+              controlsBootstrappedRef.current = true
+              applyControlsToUiRef.current(controls)
+            }
+          } catch (fallbackError) {
+            pushTransportDebugEventRef.current(
+              `control snapshot fallback failed: ${describeError(fallbackError)}`,
+            )
+          }
         }
 
         pushTransportDebugEventRef.current(`bootstrap error: ${message}`)
@@ -2807,28 +2321,13 @@ function App() {
         backendCommandMs = performance.now() - backendCommandStartedMs
         const service = pollSnapshot.service
         const telemetry = pollSnapshot.telemetry
-        const liveControls = pollSnapshot.liveControls
         serviceMs = pollSnapshot.timings.serviceMs
         telemetryMs = pollSnapshot.timings.telemetryMs
         liveControlsMs = pollSnapshot.timings.liveControlsMs
 
         if (!cancelled) {
-          setServiceConnected(service.connected)
-          setTelemetrySourceLabel(describeTelemetrySource(service.connected, telemetry))
-          setLastBackendError(service.connected ? null : service.detail)
-          updateSerializedState(telemetrySnapshotRef, telemetry, setLiveTelemetry)
-          updateSerializedState(
-            liveControlSnapshotStateRef,
-            liveControls,
-            (next) => {
-              liveControlSnapshotRef.current = next
-              setLiveControlSnapshot(next)
-            },
-          )
-          if (activeTabRef.current === 'debug') {
-            updateSerializedState(debugServiceStatusRef, service, setServiceStatus)
-            setLastBackendPollAt(formatDebugClock(pollStartedAt))
-          }
+          applyBackendPollSnapshot(pollSnapshot, pollStartedAt)
+          void refreshHardwareReadinessRef.current()
         }
 
         if (service.connected) {
@@ -2896,8 +2395,12 @@ function App() {
     let pollTimer = 0
 
     function currentPollInterval() {
-      return document.visibilityState === 'hidden'
-        ? HIDDEN_BACKEND_POLL_INTERVAL_MS
+      if (document.visibilityState === 'hidden') {
+        return HIDDEN_BACKEND_POLL_INTERVAL_MS
+      }
+
+      return activeTabRef.current === 'personal' || activeTabRef.current === 'debug'
+        ? BACKEND_SECONDARY_POLL_INTERVAL_MS
         : BACKEND_POLL_INTERVAL_MS
     }
 
@@ -2936,14 +2439,14 @@ function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.clearTimeout(pollTimer)
     }
-  }, [])
+  }, [applyBackendPollSnapshot])
 
   useEffect(() => {
     if (autoUpdateCheckTriggeredRef.current) {
       return
     }
 
-    if (!checkForUpdatesOnLaunch) {
+    if (!checkForUpdatesOnLaunch || !isDesktopRuntime()) {
       return
     }
 
@@ -2953,19 +2456,391 @@ function App() {
 
   function pulseControl(target: string) {
     setGlowTarget(target)
-    window.clearTimeout((pulseControl as typeof pulseControl & { timer?: number }).timer)
-    ;(pulseControl as typeof pulseControl & { timer?: number }).timer = window.setTimeout(
-      () => setGlowTarget(''),
-      1200,
-    )
+    if (pulseTimerRef.current !== null) {
+      window.clearTimeout(pulseTimerRef.current)
+    }
+    pulseTimerRef.current = window.setTimeout(() => {
+      pulseTimerRef.current = null
+      setGlowTarget('')
+    }, 1200)
   }
 
-  async function handlePowerProfile(profileId: PowerProfile['id']) {
-    if (profileId === 'custom' && customPowerApplyTimerRef.current !== null) {
+  function buildCurrentDiagnosticsBundle(): DiagnosticsBundle {
+    return {
+      generatedAt: new Date().toISOString(),
+      appVersion: backendVersion,
+      shellStatus,
+      statusMessage,
+      serviceConnected,
+      serviceStatus,
+      hardwareReadiness,
+      capabilities: backendCapabilities,
+      activePowerProfile,
+      activeFanProfile,
+      processorState: customProcessorState,
+      customPowerBase,
+      processorStateControlEnabled,
+      smartChargingEnabled,
+      nvidiaTelemetryEnabled,
+      blueLightFilterEnabled,
+      telemetry: activeTelemetry,
+      liveControls: liveControlSnapshot,
+      lastBackendError,
+      lastBackendPollAt,
+      telemetrySourceLabel,
+      recentEvents: debugEventsSnapshot(),
+      frameStats,
+      performanceLogPath: performanceLogState.path,
+    }
+  }
+
+  async function copyDiagnosticsToClipboard() {
+    try {
+      const bundle = buildCurrentDiagnosticsBundle()
+      const text = formatDiagnosticsText(bundle)
+      await copyTextToClipboard(text)
+      pushDebugEvent('diagnostics copied to clipboard')
+      showToast('success', 'Diagnostics copied', 'A text report is ready to paste into Discord or a ticket.')
+    } catch (error) {
+      const detail = describeError(error)
+      pushDebugEvent(`diagnostics copy failed: ${detail}`)
+      showToast('error', 'Could not copy diagnostics', detail)
+    }
+  }
+
+  function exportDiagnosticsFile() {
+    try {
+      const bundle = buildCurrentDiagnosticsBundle()
+      downloadJsonFile(`AeroForge-Diagnostics-${filenameTimestamp()}.json`, bundle)
+      pushDebugEvent('diagnostics JSON exported')
+      showToast('success', 'Diagnostics exported', 'JSON diagnostic bundle saved.')
+    } catch (error) {
+      const detail = describeError(error)
+      pushDebugEvent(`diagnostics export failed: ${detail}`)
+      showToast('error', 'Could not export diagnostics', detail)
+    }
+  }
+  exportDiagnosticsFileRef.current = exportDiagnosticsFile
+
+  function exportPresetPack() {
+    try {
+      const pack = buildPresetPack({
+        appVersion: backendVersion,
+        fanPresets,
+        powerPresets,
+        quickPresets,
+      })
+      downloadJsonFile(`AeroForge-Presets-${filenameTimestamp()}.json`, pack)
+      showToast(
+        'success',
+        'Presets exported',
+        `${fanPresets.length} fan, ${powerPresets.length} power, ${quickPresets.length} combo.`,
+      )
+    } catch (error) {
+      showToast('error', 'Preset export failed', describeError(error))
+    }
+  }
+
+  function triggerPresetImport() {
+    presetImportInputRef.current?.click()
+  }
+
+  function exportSettingsBackup() {
+    try {
+      const controls = buildControlSnapshotForPersistence({
+        activePowerProfile,
+        activeFanProfile,
+        customProcessorState,
+        customPowerBase,
+        gpuOverclock,
+        ocProfileSlots,
+        activeOcSlot,
+        ocApplyState,
+        ocTuningLocked,
+        customCurves,
+        fanPresets,
+        powerPresets,
+        quickPresets,
+        fanSyncLockEnabled,
+        smartChargingEnabled,
+        processorStateControlEnabled,
+        nvidiaTelemetryEnabled,
+        keepUiPrewarmed,
+        autoRefreshRateOnBatteryEnabled,
+        autoRefreshRateRestoreHz,
+        autoPerformanceEnabled,
+        usbPowerEnabled,
+        blueLightFilterEnabled,
+        selectedBootArt,
+        customBootFilename,
+        updateChannel,
+        checkForUpdatesOnLaunch,
+      })
+      const payload = buildPortableSettings(controls, backendVersion)
+      downloadTextFile(
+        defaultSettingsExportFilename(backendVersion),
+        serializePortableSettings(payload),
+      )
+      showToast(
+        'success',
+        'Settings exported',
+        'Profiles, curves, presets, and personal settings were saved to a JSON backup.',
+      )
+      pushDebugEvent('portable settings exported')
+    } catch (error) {
+      showToast('error', 'Settings export failed', describeError(error))
+    }
+  }
+  exportSettingsBackupRef.current = exportSettingsBackup
+
+  function triggerSettingsImport() {
+    settingsImportInputRef.current?.click()
+  }
+
+  async function handleSettingsImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+
+    if (!controlsBootstrappedRef.current) {
+      // persistStagedControls silently skips saves until the backend controls
+      // are loaded, so importing now would look successful but never persist.
+      showToast('error', 'Settings import failed', 'AeroForge is still loading saved controls. Try again in a moment.')
+      return
+    }
+
+    try {
+      const raw = await file.text()
+      const parsed = parsePortableSettings(raw)
+      if (!parsed.ok) {
+        showToast('error', 'Settings import failed', parsed.error)
+        return
+      }
+
+      applyControlsToUi(parsed.payload.controls)
+
+      await persistStagedControlsRef.current({
+        activePowerProfile: parsed.payload.controls.activePowerProfile,
+        activeFanProfile: parsed.payload.controls.activeFanProfile,
+        customProcessorState: {
+          min: parsed.payload.controls.customProcessorState.minPercent,
+          max: parsed.payload.controls.customProcessorState.maxPercent,
+        },
+        customPowerBase: parsed.payload.controls.customPowerBase,
+        customCurves: fromBackendCurveSet(parsed.payload.controls.fanCurves),
+        fanPresets: parsed.payload.controls.fanPresets,
+        powerPresets: parsed.payload.controls.powerPresets,
+        quickPresets: parsed.payload.controls.quickPresets,
+        fanSyncLockEnabled: parsed.payload.controls.fanSyncLockEnabled,
+        smartChargingEnabled: parsed.payload.controls.personalSettings.smartChargingEnabled,
+        processorStateControlEnabled:
+          parsed.payload.controls.personalSettings.processorStateControlEnabled,
+        nvidiaTelemetryEnabled:
+          parsed.payload.controls.personalSettings.nvidiaTelemetryEnabled,
+        keepUiPrewarmed: parsed.payload.controls.personalSettings.keepUiPrewarmed ?? false,
+        autoRefreshRateOnBatteryEnabled:
+          parsed.payload.controls.personalSettings.autoRefreshRateOnBatteryEnabled,
+        autoRefreshRateRestoreHz:
+          parsed.payload.controls.personalSettings.autoRefreshRateRestoreHz,
+        autoPerformanceEnabled:
+          parsed.payload.controls.personalSettings.autoPerformanceEnabled ?? false,
+        blueLightFilterEnabled:
+          parsed.payload.controls.personalSettings.blueLightFilterEnabled,
+        selectedBootArt: parsed.payload.controls.personalSettings.selectedBootArt,
+        customBootFilename: parsed.payload.controls.personalSettings.customBootFilename,
+        updateChannel: parsed.payload.controls.personalSettings.updateChannel,
+        checkForUpdatesOnLaunch:
+          parsed.payload.controls.personalSettings.checkForUpdatesOnLaunch,
+      })
+
+      const warningSuffix = parsed.warnings.length > 0 ? ` ${parsed.warnings.join(' ')}` : ''
+      showToast(
+        'success',
+        'Settings restored',
+        parsed.payload.appVersion
+          ? `Imported backup from AeroForge ${parsed.payload.appVersion}. Re-apply power/fan modes if you want them live on hardware.${warningSuffix}`
+          : `Imported backup. Re-apply power/fan modes if you want them live on hardware.${warningSuffix}`,
+      )
+      pushDebugEvent('portable settings imported')
+    } catch (error) {
+      showToast('error', 'Settings import failed', describeError(error))
+    }
+  }
+
+  async function handlePresetImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+
+    try {
+      const raw = await file.text()
+      const { pack, warnings } = parsePresetPack(raw)
+      const mode =
+        fanPresets.length === 0 && powerPresets.length === 0 && quickPresets.length === 0
+          ? 'replace'
+          : window.confirm(
+              'Merge imported presets with your existing list?\n\nOK = merge (recommended)\nCancel = replace all presets',
+            )
+            ? 'merge'
+            : 'replace'
+      const merged = mergePresetPack(
+        {
+          fanPresets: fanPresetsRef.current,
+          powerPresets: powerPresetsRef.current,
+          quickPresets: quickPresetsRef.current,
+        },
+        pack,
+        mode,
+      )
+      commitFanPresets(merged.fanPresets)
+      commitPowerPresets(merged.powerPresets)
+      commitQuickPresets(merged.quickPresets)
+      await persistStagedControlsRef.current({
+        fanPresets: merged.fanPresets,
+        powerPresets: merged.powerPresets,
+        quickPresets: merged.quickPresets,
+      })
+      const warningSuffix = warnings.length > 0 ? ` ${warnings.join(' ')}` : ''
+      showToast(
+        'success',
+        mode === 'merge' ? 'Presets merged' : 'Presets replaced',
+        `Now ${merged.fanPresets.length} fan, ${merged.powerPresets.length} power, ${merged.quickPresets.length} combo.${warningSuffix}`,
+      )
+      pushDebugEvent(
+        `preset pack imported (${mode}): ${pack.fanPresets.length} fan / ${pack.powerPresets.length} power / ${pack.quickPresets.length} combo`,
+      )
+    } catch (error) {
+      const detail = describeError(error)
+      pushDebugEvent(`preset import failed: ${detail}`)
+      showToast('error', 'Preset import failed', detail)
+    }
+  }
+
+  async function handleAutoPerformanceToggle() {
+    if (settingsActionPending) {
+      return
+    }
+
+    const nextEnabled = !autoPerformanceEnabledRef.current
+    commitAutoPerformanceEnabled(nextEnabled)
+    setSettingsActionPending('auto-performance')
+    setStatusMessage(
+      nextEnabled
+        ? 'Automatic Performance armed. AeroForge will switch Quiet/Balanced/Performance/Turbo from AC, load, and thermals, and only apply NitroSense-matched GPU offsets when cool on AC.'
+        : 'Automatic Performance disabled. Your current power and GPU settings stay as last applied.',
+    )
+
+    try {
+      await persistStagedControlsRef.current({ autoPerformanceEnabled: nextEnabled })
+      if (nextEnabled) {
+        scheduleAutoPerformanceEvaluationRef.current(true)
+      }
+    } catch (error) {
+      commitAutoPerformanceEnabled(!nextEnabled)
+      setStatusMessage(`Automatic Performance toggle failed: ${describeError(error)}`)
+    } finally {
+      setSettingsActionPending((current) => (current === 'auto-performance' ? null : current))
+    }
+  }
+
+  function stockGpuTuningFromSlots(): GpuTuningState {
+    const stock =
+      ocProfileSlots.find((slot) => slot.id === 'daily')?.settings ?? defaultGpuOverclock
+    return { ...stock, coreClock: 0, memoryClock: 0, voltageOffset: 0 }
+  }
+
+  function gpuTuningForOcSlot(slotId: string): GpuTuningState {
+    const slot = ocProfileSlots.find((item) => item.id === slotId)
+    if (!slot) {
+      return { ...nitroSenseExtremeGpuOverclock }
+    }
+    return { ...slot.settings }
+  }
+
+  async function applyAutoPerformanceDecision(decision: AutoPerformanceDecision) {
+    if (autoPerformanceApplyInFlightRef.current || powerProfileApplyInFlightRef.current) {
+      return
+    }
+
+    const currentGpu = toBackendGpuTuningState(gpuOverclock)
+    if (
+      autoPerformanceAlreadyApplied(decision, {
+        powerProfileId: activePowerProfile,
+        ocSlotId: activeOcSlot,
+        coreClockMhz: currentGpu.coreClockMhz,
+        memoryClockMhz: currentGpu.memoryClockMhz,
+      })
+    ) {
+      autoPerformanceStickyModeRef.current = decision.mode
+      setAutoPerformanceMode(decision.mode)
+      setAutoPerformanceStatus(decision.reason)
+      return
+    }
+
+    const decisionKey = `${decision.powerProfileId}:${decision.ocSlotId}:${decision.wantsGpuOffsets}`
+    if (autoPerformanceLastKeyRef.current === decisionKey) {
+      return
+    }
+
+    autoPerformanceApplyInFlightRef.current = true
+    autoPerformanceLastKeyRef.current = decisionKey
+    autoPerformanceStickyModeRef.current = decision.mode
+    setAutoPerformanceMode(decision.mode)
+    setAutoPerformanceStatus(decision.reason)
+    setStatusMessage(`Automatic Performance: ${decision.reason}`)
+
+    try {
+      const currentCore = gpuOverclock.coreClock
+      const currentMem = gpuOverclock.memoryClock
+      const needsStockClocks =
+        !decision.wantsGpuOffsets && (currentCore !== 0 || currentMem !== 0)
+      const needsOffsetClocks =
+        decision.wantsGpuOffsets &&
+        (currentCore !== 100 ||
+          (currentMem !== 200 && currentMem !== 0) ||
+          activeOcSlot !== decision.ocSlotId)
+
+      if (needsOffsetClocks || needsStockClocks) {
+        const nextTuning = needsOffsetClocks
+          ? gpuTuningForOcSlot(decision.ocSlotId)
+          : stockGpuTuningFromSlots()
+        setGpuOverclock(nextTuning)
+        setActiveOcSlot(decision.ocSlotId)
+
+        if (serviceConnectedRef.current) {
+          const result = await applyGpuTuning(
+            toBackendGpuTuningState(nextTuning),
+            decision.ocSlotId,
+          )
+          applyAuthoritativeSnapshot(result.controls, 'gpu')
+        } else {
+          setOcApplyState('live')
+        }
+      }
+
+      // Re-apply the named power profile after GPU tuning so controls stay on
+      // Quiet/Balanced/Performance/Turbo instead of the Custom forced by GPU apply.
+      await handlePowerProfileWithoutDisablingAuto(decision.powerProfileId)
+    } catch (error) {
+      autoPerformanceLastKeyRef.current = null
+      setStatusMessage(`Automatic Performance apply failed: ${describeError(error)}`)
+      setAutoPerformanceStatus(`Apply failed: ${describeError(error)}`)
+    } finally {
+      autoPerformanceApplyInFlightRef.current = false
+    }
+  }
+
+  async function handlePowerProfileWithoutDisablingAuto(profileId: PowerProfile['id']) {
+    // Same as handlePowerProfile but keeps Automatic Performance armed.
+    if (customPowerApplyTimerRef.current !== null) {
       window.clearTimeout(customPowerApplyTimerRef.current)
       customPowerApplyTimerRef.current = null
-      customPowerApplyRevisionRef.current += 1
     }
+    customPowerApplyRevisionRef.current += 1
 
     const nextProcessorState = getProcessorStateForPowerProfile(
       profileId,
@@ -2979,24 +2854,15 @@ function App() {
     }
 
     const hasService = serviceConnectedRef.current
+    const hasPowerHardware = hasService && (hardwareReadiness?.ready ?? true)
     const processorPolicyEnabled = processorStateControlEnabledRef.current
 
     setActivePowerProfile(profileId)
-    setStatusMessage(
-      hasService
-        ? processorPolicyEnabled
-          ? `${profileName} profile apply requested.`
-          : `${profileName} profile apply requested. CPU min/max writes are off.`
-        : `${profileName} profile staged in the frontend preview.`,
-    )
     pulseControl(profileId)
-    queuePerformanceEvent('power-profile-select', profileId, {
-      serviceConnected: hasService,
-    })
 
-    if (!hasService) {
+    if (!hasPowerHardware) {
       await waitForNextPaint()
-      await persistStagedControls({
+      await persistStagedControlsRef.current({
         activePowerProfile: profileId,
         ...(profileId === 'custom' ? { customProcessorState: nextProcessorState } : {}),
       })
@@ -3005,7 +2871,161 @@ function App() {
 
     if (powerProfileApplyInFlightRef.current) {
       queuedPowerProfileRef.current = profileId
+      return
+    }
+
+    powerProfileApplyInFlightRef.current = true
+    beginControlApply()
+
+    try {
+      await waitForNextPaint()
+      const updatedControls = await applyPowerProfile(
+        profileId,
+        {
+          minPercent: nextProcessorState.min,
+          maxPercent: nextProcessorState.max,
+        },
+        profileId === 'custom' ? customPowerBaseRef.current : null,
+        processorPolicyEnabled,
+      )
+      const refreshed = await refreshCachedLiveControlsAfterApply()
+      const liveControls = refreshed.liveControls
+      const queuedProfile = queuedPowerProfileRef.current
+      const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
+
+      if (!resultSuperseded) {
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
+      }
+
+      if (!resultSuperseded) {
+        setStatusMessage(`Automatic Performance applied ${profileName}.`)
+      }
+    } catch (error) {
+      setStatusMessage(`Automatic Performance power apply failed: ${describeError(error)}`)
+    } finally {
+      powerProfileApplyInFlightRef.current = false
+      const queuedProfile = queuedPowerProfileRef.current
+      queuedPowerProfileRef.current = null
+      endControlApply()
+      if (queuedProfile !== null && queuedProfile !== profileId) {
+        void handlePowerProfileWithoutDisablingAuto(queuedProfile)
+      }
+    }
+  }
+
+  function scheduleAutoPerformanceEvaluation(immediate = false) {
+    if (autoPerformanceTimerRef.current !== null) {
+      window.clearTimeout(autoPerformanceTimerRef.current)
+      autoPerformanceTimerRef.current = null
+    }
+
+    const run = () => {
+      autoPerformanceTimerRef.current = null
+      if (!autoPerformanceEnabledRef.current) {
+        return
+      }
+
+      const telemetry = liveTelemetryRef.current
+      if (!telemetry) {
+        setAutoPerformanceStatus('Waiting for telemetry…')
+        return
+      }
+
+      const decision = decideAutoPerformance({
+        acPluggedIn: telemetry.acPluggedIn,
+        cpuUsagePercent: telemetry.cpuUsagePercent,
+        gpuUsagePercent: telemetry.gpuUsagePercent,
+        cpuTempC: telemetry.cpuTempC,
+        gpuTempC: telemetry.gpuTempC,
+        systemTempC: telemetry.systemTempC,
+        stickyMode: autoPerformanceStickyModeRef.current,
+        ocTuningLocked,
+        nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+      })
+
+      void applyAutoPerformanceDecision(decision)
+    }
+
+    if (immediate) {
+      run()
+      return
+    }
+
+    autoPerformanceTimerRef.current = window.setTimeout(run, 2500)
+  }
+  scheduleAutoPerformanceEvaluationRef.current = scheduleAutoPerformanceEvaluation
+
+  async function handlePowerProfile(profileId: PowerProfile['id']) {
+    // Manual profile selection always exits Automatic Performance so the user's
+    // choice is sticky until they re-enable Auto.
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
+    // A pending debounced Custom apply must not land after a different profile
+    // was chosen: it would snap the UI back to Custom and race the hardware write.
+    if (customPowerApplyTimerRef.current !== null) {
+      window.clearTimeout(customPowerApplyTimerRef.current)
+      customPowerApplyTimerRef.current = null
+    }
+    customPowerApplyRevisionRef.current += 1
+
+    const nextProcessorState = getProcessorStateForPowerProfile(
+      profileId,
+      customProcessorStateRef.current,
+    )
+    const profileName = powerProfiles.find((profile) => profile.id === profileId)?.name ?? 'Power'
+    const toastId = showToast('info', 'Applying power mode', `${profileName} requested.`, 0)
+
+    if (profileId === 'custom') {
+      customProcessorStateRef.current = nextProcessorState
+      setCustomProcessorState(nextProcessorState)
+    }
+
+    const hasService = serviceConnectedRef.current
+    const hasPowerHardware = hasService && (hardwareReadiness?.ready ?? true)
+    const processorPolicyEnabled = processorStateControlEnabledRef.current
+
+    setActivePowerProfile(profileId)
+    setStatusMessage(
+      hasPowerHardware
+        ? processorPolicyEnabled
+          ? `${profileName} profile apply requested.`
+          : `${profileName} profile apply requested. CPU min/max writes are off.`
+        : hardwareReadiness && !hardwareReadiness.ready
+          ? `${profileName} profile saved locally. Hardware power writes are blocked: ${hardwareReadiness.detail}`
+        : `${profileName} profile staged in the frontend preview.`,
+    )
+    pulseControl(profileId)
+    queuePerformanceEvent('power-profile-select', profileId, {
+      serviceConnected: hasService,
+      hardwareReady: hasPowerHardware,
+    })
+
+    if (!hasPowerHardware) {
+      await waitForNextPaint()
+      await persistStagedControlsRef.current({
+        activePowerProfile: profileId,
+        ...(profileId === 'custom' ? { customProcessorState: nextProcessorState } : {}),
+      })
+      updateToast(
+        toastId,
+        'warning',
+        'Power saved locally',
+        hasPowerHardware
+          ? `${profileName} is waiting for hardware availability.`
+          : hardwareReadiness && !hardwareReadiness.ready
+            ? hardwareReadiness.detail
+            : `${profileName} is staged in preview mode.`,
+      )
+      return
+    }
+
+    if (powerProfileApplyInFlightRef.current) {
+      queuedPowerProfileRef.current = profileId
       setStatusMessage(`${profileName} profile queued after the current hardware apply finishes.`)
+      updateToast(toastId, 'info', 'Power queued', `${profileName} will apply after the current request.`)
       queuePerformanceEvent('power-profile-apply-queued', profileId)
       await waitForNextPaint()
       return
@@ -3033,34 +3053,12 @@ function App() {
       )
       const refreshed = await refreshCachedLiveControlsAfterApply()
       const liveControls = refreshed.liveControls
+      const layerAttention = summarizeLayerAttention(liveControls?.lastPowerLayerStatuses)
       const queuedProfile = queuedPowerProfileRef.current
       const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
 
       if (!resultSuperseded) {
-        applyBackendControlSnapshot(
-          mergeControlsWithLiveSnapshot(updatedControls, liveControls),
-          setActivePowerProfile,
-          setCustomProcessorState,
-          setCustomPowerBase,
-          setGpuOverclock,
-          setCustomOcSlot,
-          setActiveOcSlot,
-          setOcApplyState,
-          setOcTuningLocked,
-          setActiveFanProfile,
-          commitCustomCurves,
-          setFanSyncLockEnabled,
-          commitSmartChargingEnabled,
-          commitProcessorStateControlEnabled,
-          commitNvidiaTelemetryEnabled,
-          commitKeepUiPrewarmed,
-          setUsbPowerEnabled,
-          commitBlueLightFilterEnabled,
-          setSelectedBootArt,
-          setCustomBootFilename,
-          setUpdateChannel,
-          setCheckForUpdatesOnLaunch,
-        )
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
       }
       queuePerformanceEvent('power-profile-apply-finished', profileId, {
         totalMs: performance.now() - applyStartedMs,
@@ -3070,9 +3068,25 @@ function App() {
       })
 
       if (!resultSuperseded) {
-        if (!processorPolicyEnabled) {
+        if (layerAttention) {
+          setStatusMessage(
+            `${profileName} profile applied with layer attention: ${layerAttention}.`,
+          )
+          updateToast(
+            toastId,
+            'warning',
+            'Power partially applied',
+            `${profileName}: ${layerAttention}`,
+          )
+        } else if (!processorPolicyEnabled) {
           setStatusMessage(
             `${profileName} profile applied through the AeroForge service. CPU min/max writes were skipped by Settings.`,
+          )
+          updateToast(
+            toastId,
+            'success',
+            'Power applied',
+            `${profileName} applied. CPU min/max writes were skipped by Settings.`,
           )
         } else {
           setStatusMessage(
@@ -3082,16 +3096,18 @@ function App() {
             : '.'
         }`,
           )
+          updateToast(toastId, 'success', 'Power applied', `${profileName} applied.`)
         }
+      } else {
+        updateToast(toastId, 'info', 'Power superseded', `${profileName} was replaced by a newer request.`)
       }
     } catch (error) {
       queuePerformanceEvent('power-profile-apply-failed', profileId, {
         totalMs: performance.now() - applyStartedMs,
         error: describeError(error),
       })
-      setStatusMessage(
-        `Power profile apply failed: ${error instanceof Error ? error.message : String(error)}`,
-      )
+      setStatusMessage(`Power profile apply failed: ${describeError(error)}`)
+      updateToast(toastId, 'error', 'Power failed', describeError(error))
     } finally {
       powerProfileApplyInFlightRef.current = false
       const queuedProfile = queuedPowerProfileRef.current
@@ -3111,8 +3127,12 @@ function App() {
     nextBase: CustomPowerBaseId,
     reason: string,
   ) {
-    if (!serviceConnectedRef.current) {
-      setStatusMessage(`${reason} in the preview.`)
+    if (!powerHardwareApplyReady) {
+      setStatusMessage(
+        hardwareReadiness && !hardwareReadiness.ready
+          ? `${reason}. Saved locally because hardware power writes are blocked: ${hardwareReadiness.detail}`
+          : `${reason} in the preview.`,
+      )
       return
     }
 
@@ -3139,7 +3159,7 @@ function App() {
     nextProcessorState: { min: number; max: number },
     nextBase: CustomPowerBaseId,
   ) {
-    if (!serviceConnectedRef.current) {
+    if (!powerHardwareApplyReady) {
       return
     }
 
@@ -3161,35 +3181,17 @@ function App() {
         return
       }
 
-      applyBackendControlSnapshot(
-        mergeControlsWithLiveSnapshot(updatedControls, liveControls),
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      liveControlSnapshotRef.current = liveControls
-      setLiveControlSnapshot(liveControls)
+      applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(updatedControls, liveControls), 'power')
+      updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+        liveControlSnapshotRef.current = next
+        setLiveControlSnapshot(next)
+      })
 
+      const layerAttention = summarizeLayerAttention(liveControls?.lastPowerLayerStatuses)
       setStatusMessage(
-        !processorPolicyEnabled
+        layerAttention
+          ? `Custom power policy applied with layer attention: ${layerAttention}.`
+          : !processorPolicyEnabled
           ? 'Custom power policy applied. CPU min/max writes were skipped by Settings.'
           : liveControls?.processorStateReadback
           ? `Custom processor state applied and verified as AC ${liveControls.processorStateReadback.ac.minPercent}/${liveControls.processorStateReadback.ac.maxPercent} \u2022 DC ${liveControls.processorStateReadback.dc.minPercent}/${liveControls.processorStateReadback.dc.maxPercent}.`
@@ -3206,14 +3208,19 @@ function App() {
 
   async function handleFanProfile(profileId: FanProfile['id']) {
     const profileName = fanProfiles.find((profile) => profile.id === profileId)?.name ?? 'Fan'
-    let hasService = serviceConnectedRef.current
+    const hasService = serviceConnectedRef.current
+    const hasFanHardware = hasService && (hardwareReadiness?.ready ?? true)
     const previousFanProfile =
       liveControlSnapshotRef.current?.activeFanProfile ?? activeFanProfile
+    const toastId = showToast('info', 'Applying fan mode', `${profileName} requested.`, 0)
 
+    setActiveFanProfile(profileId)
     setStatusMessage(
-      hasService
+      hasFanHardware
         ? `${profileName} fan mode apply requested.`
-        : `${profileName} fan mode staged in the frontend preview.`,
+        : hardwareReadiness && !hardwareReadiness.ready
+          ? `${profileName} fan mode saved locally. Hardware fan writes are blocked: ${hardwareReadiness.detail}`
+          : `${profileName} fan mode staged in the frontend preview.`,
     )
     pulseControl(profileId)
     queuePerformanceEvent('fan-profile-select', profileId, {
@@ -3221,49 +3228,36 @@ function App() {
     })
 
     if (!hasService) {
-      const reconnectStartedMs = performance.now()
-
-      try {
-        const snapshot = await getBackendPollSnapshot()
-        hasService = snapshot.service.connected
-        serviceConnectedRef.current = snapshot.service.connected
-        setServiceConnected(snapshot.service.connected)
-        setTelemetrySourceLabel(describeTelemetrySource(snapshot.service.connected, snapshot.telemetry))
-        setLastBackendError(snapshot.service.connected ? null : snapshot.service.detail)
-        updateSerializedState(telemetrySnapshotRef, snapshot.telemetry, setLiveTelemetry)
-        updateSerializedState(liveControlSnapshotStateRef, snapshot.liveControls, (next) => {
-          liveControlSnapshotRef.current = next
-          setLiveControlSnapshot(next)
+      void requestServiceHeal()
+        .then((result) => {
+          pushDebugEventRef.current(result.detail)
+          if (result.requested || result.serviceRunning) {
+            window.setTimeout(() => void refreshHardwareReadiness(true), 2500)
+          }
         })
-        if (activeTabRef.current === 'debug') {
-          updateSerializedState(debugServiceStatusRef, snapshot.service, setServiceStatus)
-          setLastBackendPollAt(formatDebugClock(new Date()))
-        }
-        queuePerformanceEvent('fan-profile-service-recheck', profileId, {
-          reconnectMs: performance.now() - reconnectStartedMs,
-          serviceConnected: snapshot.service.connected,
-          workerCount: snapshot.service.workerCount,
+        .catch((error) => {
+          pushDebugEventRef.current(`background service heal failed: ${describeError(error)}`)
         })
-        if (hasService) {
-          setStatusMessage(`${profileName} fan mode apply requested after service reconnect.`)
-        }
-      } catch (error) {
-        queuePerformanceEvent('fan-profile-service-recheck-failed', profileId, {
-          reconnectMs: performance.now() - reconnectStartedMs,
-          error: describeError(error),
-        })
-      }
     }
 
-    if (!hasService) {
+    if (!hasFanHardware) {
       await waitForNextPaint()
-      await persistStagedControls({ activeFanProfile: profileId })
+      await persistStagedControlsRef.current({ activeFanProfile: profileId })
+      updateToast(
+        toastId,
+        'warning',
+        'Fan saved locally',
+        hardwareReadiness && !hardwareReadiness.ready
+          ? hardwareReadiness.detail
+          : `${profileName} will apply when the service is available.`,
+      )
       return
     }
 
     if (fanProfileApplyInFlightRef.current) {
       queuedFanProfileRef.current = profileId
       setStatusMessage(`${profileName} fan mode queued after the current hardware apply finishes.`)
+      updateToast(toastId, 'info', 'Fan queued', `${profileName} will apply after the current request.`)
       queuePerformanceEvent('fan-profile-apply-queued', profileId)
       await waitForNextPaint()
       return
@@ -3287,34 +3281,12 @@ function App() {
       )
       const refreshed = await refreshCachedLiveControlsAfterApply()
       const liveControls = refreshed.liveControls
+      const layerAttention = summarizeLayerAttention(liveControls?.lastFanLayerStatuses)
       const queuedProfile = queuedFanProfileRef.current
       const resultSuperseded = queuedProfile !== null && queuedProfile !== profileId
 
       if (!resultSuperseded) {
-        applyBackendControlSnapshot(
-        mergeControlsWithLiveSnapshot(result.controls, liveControls),
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+        applyAuthoritativeSnapshot(mergeControlsWithLiveSnapshot(result.controls, liveControls), 'fanProfile')
       }
       queuePerformanceEvent('fan-profile-apply-finished', profileId, {
         totalMs: performance.now() - applyStartedMs,
@@ -3323,7 +3295,19 @@ function App() {
         queuedProfile,
       })
       if (!resultSuperseded) {
-        setStatusMessage(result.detail)
+        setStatusMessage(
+          layerAttention
+            ? `${profileName} fan mode applied with layer attention: ${layerAttention}.`
+            : result.detail,
+        )
+        updateToast(
+          toastId,
+          layerAttention ? 'warning' : 'success',
+          layerAttention ? 'Fan partially applied' : 'Fan applied',
+          layerAttention ? `${profileName}: ${layerAttention}` : `${profileName} applied.`,
+        )
+      } else {
+        updateToast(toastId, 'info', 'Fan superseded', `${profileName} was replaced by a newer request.`)
       }
     } catch (error) {
       setActiveFanProfile(previousFanProfile)
@@ -3332,6 +3316,7 @@ function App() {
         error: describeError(error),
       })
       setStatusMessage(`Fan profile apply failed: ${describeError(error)}`)
+      updateToast(toastId, 'error', 'Fan failed', describeError(error))
     } finally {
       fanProfileApplyInFlightRef.current = false
       const queuedProfile = queuedFanProfileRef.current
@@ -3346,36 +3331,268 @@ function App() {
     }
   }
 
+  function makePresetId(prefix: string) {
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  function askPresetName(label: string, fallback: string) {
+    const name = window.prompt(label, fallback)?.trim()
+    return name && name.length > 0 ? name.slice(0, 48) : null
+  }
+
+  function saveCurrentFanPreset() {
+    const currentFanName =
+      fanProfiles.find((profile) => profile.id === activeFanProfile)?.name ?? 'Fan'
+    const name = askPresetName('Name this fan preset', `${currentFanName} preset`)
+    if (!name) {
+      return
+    }
+
+    const preset: FanControlPreset = {
+      id: makePresetId('fan'),
+      name,
+      profileId: activeFanProfile,
+      curves: toBackendCurveSet(customCurvesRef.current),
+    }
+    const nextFanPresets = [...fanPresetsRef.current, preset]
+    commitFanPresets(nextFanPresets)
+    void persistStagedControlsRef.current({ fanPresets: nextFanPresets })
+    showToast('success', 'Fan preset saved', name)
+  }
+
+  function saveCurrentPowerPreset() {
+    const currentPowerName =
+      powerProfiles.find((profile) => profile.id === activePowerProfile)?.name ?? 'Power'
+    const name = askPresetName('Name this power preset', `${currentPowerName} preset`)
+    if (!name) {
+      return
+    }
+
+    const preset: PowerControlPreset = {
+      id: makePresetId('power'),
+      name,
+      profileId: activePowerProfile,
+      customBase: customPowerBaseRef.current,
+      processorState: {
+        minPercent: customProcessorStateRef.current.min,
+        maxPercent: customProcessorStateRef.current.max,
+      },
+    }
+    const nextPowerPresets = [...powerPresetsRef.current, preset]
+    commitPowerPresets(nextPowerPresets)
+    void persistStagedControlsRef.current({ powerPresets: nextPowerPresets })
+    showToast('success', 'Power preset saved', name)
+  }
+
+  function saveCurrentQuickPreset() {
+    const name = askPresetName('Name this quick preset', 'My quick preset')
+    if (!name) {
+      return
+    }
+
+    const fanPreset: FanControlPreset = {
+      id: makePresetId('fan'),
+      name: `${name} fan`,
+      profileId: activeFanProfile,
+      curves: toBackendCurveSet(customCurvesRef.current),
+    }
+    const powerPreset: PowerControlPreset = {
+      id: makePresetId('power'),
+      name: `${name} power`,
+      profileId: activePowerProfile,
+      customBase: customPowerBaseRef.current,
+      processorState: {
+        minPercent: customProcessorStateRef.current.min,
+        maxPercent: customProcessorStateRef.current.max,
+      },
+    }
+    const quickPreset: QuickControlPreset = {
+      id: makePresetId('quick'),
+      name,
+      fanPresetId: fanPreset.id,
+      powerPresetId: powerPreset.id,
+    }
+    const nextFanPresets = [...fanPresetsRef.current, fanPreset]
+    const nextPowerPresets = [...powerPresetsRef.current, powerPreset]
+    const nextQuickPresets = [...quickPresetsRef.current, quickPreset]
+    commitFanPresets(nextFanPresets)
+    commitPowerPresets(nextPowerPresets)
+    commitQuickPresets(nextQuickPresets)
+    void persistStagedControlsRef.current({
+      fanPresets: nextFanPresets,
+      powerPresets: nextPowerPresets,
+      quickPresets: nextQuickPresets,
+    })
+    showToast('success', 'Quick preset saved', name)
+  }
+
+  function renamePreset(collection: 'fan' | 'power' | 'quick', id: string) {
+    const presets =
+      collection === 'fan'
+        ? fanPresetsRef.current
+        : collection === 'power'
+          ? powerPresetsRef.current
+          : quickPresetsRef.current
+    const preset = presets.find((item) => item.id === id)
+    if (!preset) {
+      return
+    }
+
+    const name = askPresetName('Rename preset', preset.name)
+    if (!name) {
+      return
+    }
+
+    if (collection === 'fan') {
+      const next = fanPresetsRef.current.map((item) =>
+        item.id === id ? { ...item, name } : item,
+      )
+      commitFanPresets(next)
+      void persistStagedControlsRef.current({ fanPresets: next })
+    } else if (collection === 'power') {
+      const next = powerPresetsRef.current.map((item) =>
+        item.id === id ? { ...item, name } : item,
+      )
+      commitPowerPresets(next)
+      void persistStagedControlsRef.current({ powerPresets: next })
+    } else {
+      const next = quickPresetsRef.current.map((item) =>
+        item.id === id ? { ...item, name } : item,
+      )
+      commitQuickPresets(next)
+      void persistStagedControlsRef.current({ quickPresets: next })
+    }
+    showToast('success', 'Preset renamed', name)
+  }
+
+  function duplicatePreset(collection: 'fan' | 'power' | 'quick', id: string) {
+    if (collection === 'fan') {
+      const preset = fanPresetsRef.current.find((item) => item.id === id)
+      if (!preset) {
+        return
+      }
+      const next = [
+        ...fanPresetsRef.current,
+        { ...preset, id: makePresetId('fan'), name: `${preset.name} copy` },
+      ]
+      commitFanPresets(next)
+      void persistStagedControlsRef.current({ fanPresets: next })
+      showToast('success', 'Fan preset duplicated', preset.name)
+    } else if (collection === 'power') {
+      const preset = powerPresetsRef.current.find((item) => item.id === id)
+      if (!preset) {
+        return
+      }
+      const next = [
+        ...powerPresetsRef.current,
+        { ...preset, id: makePresetId('power'), name: `${preset.name} copy` },
+      ]
+      commitPowerPresets(next)
+      void persistStagedControlsRef.current({ powerPresets: next })
+      showToast('success', 'Power preset duplicated', preset.name)
+    } else {
+      const preset = quickPresetsRef.current.find((item) => item.id === id)
+      if (!preset) {
+        return
+      }
+      const next = [
+        ...quickPresetsRef.current,
+        { ...preset, id: makePresetId('quick'), name: `${preset.name} copy` },
+      ]
+      commitQuickPresets(next)
+      void persistStagedControlsRef.current({ quickPresets: next })
+      showToast('success', 'Quick preset duplicated', preset.name)
+    }
+  }
+
+  function deletePreset(collection: 'fan' | 'power' | 'quick', id: string) {
+    if (collection === 'fan') {
+      const nextFanPresets = fanPresetsRef.current.filter((preset) => preset.id !== id)
+      const nextQuickPresets = quickPresetsRef.current
+        .map((preset) =>
+          preset.fanPresetId === id ? { ...preset, fanPresetId: null } : preset,
+        )
+        .filter((preset) => preset.fanPresetId || preset.powerPresetId)
+      commitFanPresets(nextFanPresets)
+      commitQuickPresets(nextQuickPresets)
+      void persistStagedControlsRef.current({
+        fanPresets: nextFanPresets,
+        quickPresets: nextQuickPresets,
+      })
+    } else if (collection === 'power') {
+      const nextPowerPresets = powerPresetsRef.current.filter((preset) => preset.id !== id)
+      const nextQuickPresets = quickPresetsRef.current
+        .map((preset) =>
+          preset.powerPresetId === id ? { ...preset, powerPresetId: null } : preset,
+        )
+        .filter((preset) => preset.fanPresetId || preset.powerPresetId)
+      commitPowerPresets(nextPowerPresets)
+      commitQuickPresets(nextQuickPresets)
+      void persistStagedControlsRef.current({
+        powerPresets: nextPowerPresets,
+        quickPresets: nextQuickPresets,
+      })
+    } else {
+      const nextQuickPresets = quickPresetsRef.current.filter((preset) => preset.id !== id)
+      commitQuickPresets(nextQuickPresets)
+      void persistStagedControlsRef.current({ quickPresets: nextQuickPresets })
+    }
+    showToast('success', 'Preset deleted', 'Preset list updated.')
+  }
+
+  function applyFanPreset(preset: FanControlPreset) {
+    const curves = fromBackendCurveSet(preset.curves)
+    commitCustomCurves(curves)
+    if (preset.profileId === 'custom') {
+      void finalizeCustomCurveEditRef.current(curves, {
+        activateCustom: true,
+        statusMessage: `${preset.name} fan preset loaded.`,
+      })
+    } else {
+      void persistStagedControlsRef.current({ customCurves: curves })
+      void handleFanProfile(preset.profileId)
+    }
+    showToast('info', 'Fan preset applying', preset.name)
+  }
+
+  function applyPowerPreset(preset: PowerControlPreset) {
+    const nextProcessorState = {
+      min: preset.processorState.minPercent,
+      max: preset.processorState.maxPercent,
+    }
+    customProcessorStateRef.current = nextProcessorState
+    customPowerBaseRef.current = preset.customBase
+    setCustomProcessorState(nextProcessorState)
+    setCustomPowerBase(preset.customBase)
+    void persistStagedControlsRef.current({
+      customProcessorState: nextProcessorState,
+      customPowerBase: preset.customBase,
+    })
+    void handlePowerProfile(preset.profileId)
+    showToast('info', 'Power preset applying', preset.name)
+  }
+
+  function applyQuickPreset(preset: QuickControlPreset) {
+    const powerPreset = powerPresetsRef.current.find((item) => item.id === preset.powerPresetId)
+    const fanPreset = fanPresetsRef.current.find((item) => item.id === preset.fanPresetId)
+    if (powerPreset) {
+      applyPowerPreset(powerPreset)
+    }
+    if (fanPreset) {
+      applyFanPreset(fanPreset)
+    }
+    showToast('info', 'Quick preset applying', preset.name)
+  }
+
   async function applyCustomCurvesToService(nextCurves: CurveSet) {
     const result = await applyCustomFanCurves(toBackendCurveSet(nextCurves))
     const liveControls = await getLiveControlSnapshot().catch(() => null)
 
-    applyBackendControlSnapshot(
-      result.controls,
-      setActivePowerProfile,
-      setCustomProcessorState,
-      setCustomPowerBase,
-      setGpuOverclock,
-      setCustomOcSlot,
-      setActiveOcSlot,
-      setOcApplyState,
-      setOcTuningLocked,
-      setActiveFanProfile,
-      commitCustomCurves,
-      setFanSyncLockEnabled,
-      commitSmartChargingEnabled,
-      commitProcessorStateControlEnabled,
-      commitNvidiaTelemetryEnabled,
-      commitKeepUiPrewarmed,
-      setUsbPowerEnabled,
-      commitBlueLightFilterEnabled,
-      setSelectedBootArt,
-      setCustomBootFilename,
-      setUpdateChannel,
-      setCheckForUpdatesOnLaunch,
-    )
-    liveControlSnapshotRef.current = liveControls
-    setLiveControlSnapshot(liveControls)
+    applyAuthoritativeSnapshot(result.controls, 'fanCurves')
+    updateSerializedState(liveControlSnapshotStateRef, liveControls, (next) => {
+      liveControlSnapshotRef.current = next
+      setLiveControlSnapshot(next)
+    })
     return result.detail
   }
 
@@ -3385,23 +3602,25 @@ function App() {
   ) {
     const nextActiveFanProfile = options?.activateCustom ? 'custom' : activeFanProfile
     const nextFanSyncLockEnabled = options?.fanSyncLockState ?? fanSyncLockEnabled
-    const shouldPreviewCustom = options?.activateCustom && !serviceConnected
+    const shouldPreviewCustom = options?.activateCustom && !fanHardwareApplyReady
 
     if (shouldPreviewCustom) {
       setActiveFanProfile('custom')
       pulseControl('custom')
     }
 
-    await persistStagedControls({
+    await persistStagedControlsRef.current({
       activeFanProfile: nextActiveFanProfile,
       customCurves: nextCurves,
       fanSyncLockEnabled: nextFanSyncLockEnabled,
     })
 
-    if (!serviceConnected) {
+    if (!fanHardwareApplyReady) {
       setStatusMessage(
         options?.statusMessage ??
-          'Custom fan curves saved to the preview. Connect the AeroForge service to apply them on hardware.',
+          (hardwareReadiness && !hardwareReadiness.ready
+            ? `Custom fan curves saved locally. Hardware fan writes are blocked: ${hardwareReadiness.detail}`
+            : 'Custom fan curves saved to the preview. Connect the AeroForge service to apply them on hardware.'),
       )
       return
     }
@@ -3421,6 +3640,9 @@ function App() {
     }
   }
   finalizeCustomCurveEditRef.current = finalizeCustomCurveEdit
+  handlePowerProfileRef.current = handlePowerProfile
+  handleFanProfileRef.current = handleFanProfile
+  copyDiagnosticsToClipboardRef.current = copyDiagnosticsToClipboard
 
   function cloneToCustom() {
     const nextCurves = fanSyncLockEnabled
@@ -3431,6 +3653,19 @@ function App() {
       activateCustom: true,
       statusMessage: 'Copied the active preset into Custom.',
     })
+  }
+
+  function applyFanCurveTemplate(template: FanCurveTemplate) {
+    const nextCurves = fanSyncLockEnabled
+      ? mirrorCurveSetFromTarget(template.curves, 'cpu')
+      : duplicateCurveSet(template.curves)
+    commitCustomCurves(nextCurves)
+    pulseControl('custom')
+    void finalizeCustomCurveEdit(nextCurves, {
+      activateCustom: true,
+      statusMessage: `Loaded the ${template.name} curve template into Custom.`,
+    })
+    showToast('success', `${template.name} curve loaded`, template.summary)
   }
 
   function resetCustomCurve() {
@@ -3463,7 +3698,7 @@ function App() {
 
     if (!nextEnabled) {
       setStatusMessage('Sync Lock disabled. CPU and GPU curves can diverge again.')
-      void persistStagedControls({ fanSyncLockEnabled: false })
+      void persistStagedControlsRef.current({ fanSyncLockEnabled: false })
       return
     }
 
@@ -3496,46 +3731,10 @@ function App() {
     setCustomBootFilename(buildJpegBootLogoName(file.name))
     setSelectedBootArt('custom')
     pulseControl('boot-upload')
-
-    setSettingsActionPending('boot-logo')
     setStatusMessage('Preparing and applying the boot-logo image...')
-
     try {
-      const prepared = await prepareBootLogoUpload(file)
-      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, 'custom')
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      await persistStagedControls({
-        selectedBootArt: 'custom',
-        customBootFilename: prepared.fileName,
-      })
-      setStatusMessage(result.detail)
-    } catch (error) {
-      setStatusMessage(`Boot-logo apply failed: ${describeError(error)}`)
+      await applyPreparedBootLogo('custom', () => prepareBootLogoUpload(file))
     } finally {
-      setSettingsActionPending((current) => (current === 'boot-logo' ? null : current))
       event.target.value = ''
     }
   }
@@ -3548,42 +3747,22 @@ function App() {
 
     setSelectedBootArt(art.id)
     pulseControl('boot-upload')
-    setSettingsActionPending('boot-logo')
     setStatusMessage(`Preparing ${art.name} for boot-logo apply...`)
+    await applyPreparedBootLogo(art.id as BootArtId, () => preparePresetBootLogo(art))
+  }
 
+  // Upload and preset artwork differ only in how the image is prepared.
+  async function applyPreparedBootLogo(
+    artId: BootArtId,
+    prepare: () => Promise<PreparedBootLogo>,
+  ) {
+    setSettingsActionPending('boot-logo')
     try {
-      const prepared = await preparePresetBootLogo(art)
-      const result = await applyBootLogo(
-        prepared.fileName,
-        prepared.imageBase64,
-        art.id as BootArtId,
-      )
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
-      await persistStagedControls({
-        selectedBootArt: art.id,
+      const prepared = await prepare()
+      const result = await applyBootLogo(prepared.fileName, prepared.imageBase64, artId)
+      applyAuthoritativeSnapshot(result.controls, 'bootLogo')
+      await persistStagedControlsRef.current({
+        selectedBootArt: artId,
         customBootFilename: prepared.fileName,
       })
       setStatusMessage(result.detail)
@@ -3625,14 +3804,17 @@ function App() {
     }
   }
 
+  const quietAutoThermalWarningActive = liveControlSnapshot?.quietAutoThermalWarning?.active ?? false
+  const quietAutoThermalWarningSensor = liveControlSnapshot?.quietAutoThermalWarning?.sensor ?? null
+  const quietAutoThermalWarningTempC = liveControlSnapshot?.quietAutoThermalWarning?.tempC ?? null
+
   useEffect(() => {
-    const warning = liveControlSnapshot?.quietAutoThermalWarning ?? null
-    if (!warning?.active || warning.tempC == null) {
+    if (!quietAutoThermalWarningActive || quietAutoThermalWarningTempC == null) {
       quietAutoThermalNotificationKeyRef.current = null
       return
     }
 
-    const sensorLabel = warning.sensor?.trim() || 'CPU'
+    const sensorLabel = quietAutoThermalWarningSensor?.trim() || 'CPU'
     const notificationKey = `${sensorLabel}:quiet-auto-hot`
     if (
       !isDesktopRuntime() ||
@@ -3642,17 +3824,14 @@ function App() {
     }
 
     quietAutoThermalNotificationKeyRef.current = notificationKey
-    void showThermalWarningNotification(sensorLabel, warning.tempC).catch((error) => {
-      quietAutoThermalNotificationKeyRef.current = null
+    // Keep the key on failure: notification errors are usually persistent (disabled in
+    // Windows), and resetting would retry on every temperature tick while the warning holds.
+    void showThermalWarningNotification(sensorLabel, quietAutoThermalWarningTempC).catch((error) => {
       pushTransportDebugEventRef.current(
         `windows thermal warning notification failed: ${describeError(error)}`,
       )
     })
-  }, [
-    liveControlSnapshot?.quietAutoThermalWarning?.active,
-    liveControlSnapshot?.quietAutoThermalWarning?.sensor,
-    liveControlSnapshot?.quietAutoThermalWarning?.tempC,
-  ])
+  }, [quietAutoThermalWarningActive, quietAutoThermalWarningSensor, quietAutoThermalWarningTempC])
 
   async function runUpdateCheck(manual: boolean, channelOverride?: UpdateChannel) {
     setUpdateActionPending('check')
@@ -3668,11 +3847,13 @@ function App() {
       }
       return status
     } catch (error) {
+      // The failure is surfaced through the status line; callers fire-and-forget,
+      // so rethrowing here would only produce an unhandled rejection.
       const message = describeError(error)
       const detail = `Update check failed: ${message}`
       setUpdateActionMessage(detail)
       setStatusMessage(detail)
-      throw error
+      return null
     } finally {
       setUpdateActionPending(null)
     }
@@ -3754,7 +3935,7 @@ function App() {
 
     try {
       const result = await applyBlueLightFilter(nextEnabled)
-      await persistStagedControls({ blueLightFilterEnabled: nextEnabled })
+      await persistStagedControlsRef.current({ blueLightFilterEnabled: nextEnabled })
       setStatusMessage(result.detail)
     } catch (error) {
       commitBlueLightFilterEnabled(previousEnabled)
@@ -3819,7 +4000,7 @@ function App() {
 
     try {
       const result = await applySmartCharging(nextEnabled)
-      await persistStagedControls({ smartChargingEnabled: nextEnabled })
+      await persistStagedControlsRef.current({ smartChargingEnabled: nextEnabled })
       setStatusMessage(result.detail)
       pulseControl('charge-toggle')
     } catch (error) {
@@ -3840,7 +4021,7 @@ function App() {
     }
 
     commitProcessorStateControlEnabled(nextEnabled)
-    await persistStagedControls({ processorStateControlEnabled: nextEnabled })
+    await persistStagedControlsRef.current({ processorStateControlEnabled: nextEnabled })
     setStatusMessage(
       nextEnabled
         ? 'CPU min/max writes enabled. Power modes can update Windows processor policy again.'
@@ -3866,30 +4047,7 @@ function App() {
 
     try {
       const result = await setNvidiaTelemetryEnabled(nextEnabled)
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+      applyAuthoritativeSnapshot(result.controls, 'nvidiaTelemetry')
       setStatusMessage(result.detail)
     } catch (error) {
       commitNvidiaTelemetryEnabled(previousEnabled)
@@ -3899,15 +4057,93 @@ function App() {
     }
   }
 
+  async function handleHardwareRepair() {
+    if (settingsActionPending || hardwareReadiness?.repairAvailable === false) {
+      return
+    }
+
+    setSettingsActionPending('hardware-repair')
+    setStatusMessage('Launching AeroForge hardware repair. Approve the Windows prompt to continue.')
+    const toastId = showToast(
+      'info',
+      'Repair starting',
+      'Approve the Windows administrator prompt once.',
+      0,
+    )
+    queuePerformanceEvent('hardware-repair-launch', hardwareReadiness?.detail ?? 'unknown')
+
+    try {
+      const result = await repairHardwarePrerequisites()
+      setStatusMessage(result.detail)
+      updateToast(
+        toastId,
+        result.launched ? 'success' : 'error',
+        result.launched ? 'Repair launched' : 'Repair unavailable',
+        result.detail,
+      )
+      pushDebugEvent(result.detail)
+      await refreshHardwareReadiness(true)
+      if (result.launched) {
+        window.setTimeout(() => {
+          void refreshHardwareReadiness(true)
+        }, 5000)
+      }
+    } catch (error) {
+      setStatusMessage(`Hardware repair launch failed: ${describeError(error)}`)
+      updateToast(toastId, 'error', 'Repair failed', describeError(error))
+    } finally {
+      setSettingsActionPending((current) => (current === 'hardware-repair' ? null : current))
+    }
+  }
+
+  async function handleHardwareServiceStart() {
+    if (settingsActionPending || !hardwareReadiness?.service.installed) {
+      return
+    }
+
+    setSettingsActionPending('hardware-start')
+    setStatusMessage('Starting AeroForge service in the background...')
+    const toastId = showToast(
+      'info',
+      'Starting service',
+      'AeroForge is asking the background healer to start hardware control.',
+      0,
+    )
+    queuePerformanceEvent('hardware-service-start', hardwareReadiness?.detail ?? 'unknown')
+
+    try {
+      const result = await requestServiceHeal()
+      setStatusMessage(result.detail)
+      updateToast(
+        toastId,
+        result.serviceRunning ? 'success' : result.requested ? 'warning' : 'error',
+        result.serviceRunning ? 'Service started' : result.requested ? 'Still starting' : 'Start blocked',
+        result.detail,
+      )
+      pushDebugEvent(result.detail)
+      await refreshHardwareReadiness(true)
+      if (result.requested && !result.serviceRunning) {
+        window.setTimeout(() => {
+          void refreshHardwareReadiness(true)
+        }, 5000)
+      }
+    } catch (error) {
+      setStatusMessage(`AeroForge service start failed: ${describeError(error)}`)
+      updateToast(toastId, 'error', 'Service start failed', describeError(error))
+    } finally {
+      setSettingsActionPending((current) => (current === 'hardware-start' ? null : current))
+    }
+  }
+
   async function handleKeepUiPrewarmedToggle() {
     const nextEnabled = !keepUiPrewarmedRef.current
 
     commitKeepUiPrewarmed(nextEnabled)
-    await persistStagedControls({ keepUiPrewarmed: nextEnabled })
+    await persistStagedControlsRef.current({ keepUiPrewarmed: nextEnabled })
     setStatusMessage(
       nextEnabled
-        ? 'AeroForge will keep a hidden UI instance available after close. RAM usage will increase while this is enabled.'
-        : 'AeroForge UI prewarm disabled. Closing the window will fully exit the UI.',
+        ? 'AeroForge will relaunch a hidden UI instance after a tray Exit. RAM usage will increase while this is enabled.'
+        : 'AeroForge UI prewarm disabled. Closing the window still hides to the tray; after a tray Exit the next open cold-starts.',
     )
   }
 
@@ -3925,6 +4161,7 @@ function App() {
         setStatusMessage(result.status)
       } catch (error) {
         setStatusMessage(`Fan speed calibration cancel failed: ${describeError(error)}`)
+        showToast('error', 'Calibration cancel failed', describeError(error))
       } finally {
         setSettingsActionPending((current) =>
           current === 'fan-calibration-cancel' ? null : current,
@@ -3942,6 +4179,7 @@ function App() {
       setStatusMessage(result.status)
     } catch (error) {
       setStatusMessage(`Fan speed calibration failed to start: ${describeError(error)}`)
+      showToast('error', 'Calibration failed to start', describeError(error))
     } finally {
       setSettingsActionPending((current) => (current === 'fan-calibration' ? null : current))
     }
@@ -3969,7 +4207,7 @@ function App() {
     setCustomProcessorState(nextState)
 
     setActivePowerProfile('custom')
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       activePowerProfile: 'custom',
       customProcessorState: nextState,
     })
@@ -3989,7 +4227,7 @@ function App() {
     customPowerBaseRef.current = nextBase
     setCustomPowerBase(nextBase)
     setActivePowerProfile('custom')
-    void persistStagedControls({
+    void persistStagedControlsRef.current({
       activePowerProfile: 'custom',
       customPowerBase: nextBase,
     })
@@ -4023,6 +4261,11 @@ function App() {
       return
     }
 
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
     setActivePowerProfile('custom')
     setActiveOcSlot(slot.id)
     setGpuOverclock({ ...slot.settings })
@@ -4048,30 +4291,7 @@ function App() {
         activeOcSlot,
       )
 
-      applyBackendControlSnapshot(
-        result.controls,
-        setActivePowerProfile,
-        setCustomProcessorState,
-        setCustomPowerBase,
-        setGpuOverclock,
-        setCustomOcSlot,
-        setActiveOcSlot,
-        setOcApplyState,
-        setOcTuningLocked,
-        setActiveFanProfile,
-        commitCustomCurves,
-        setFanSyncLockEnabled,
-        commitSmartChargingEnabled,
-        commitProcessorStateControlEnabled,
-        commitNvidiaTelemetryEnabled,
-        commitKeepUiPrewarmed,
-        setUsbPowerEnabled,
-        commitBlueLightFilterEnabled,
-        setSelectedBootArt,
-        setCustomBootFilename,
-        setUpdateChannel,
-        setCheckForUpdatesOnLaunch,
-      )
+      applyAuthoritativeSnapshot(result.controls, 'gpu')
 
       setStatusMessage(result.detail)
     } catch (error) {
@@ -4092,6 +4312,9 @@ function App() {
     pulseControl(savedCustomSlot.id)
 
     try {
+      if (!controlsBootstrappedRef.current) {
+        throw new Error('Saved settings have not loaded yet. Try again in a moment.')
+      }
       await saveControlSnapshot(
         buildControlSnapshotForPersistence({
           activePowerProfile: 'custom',
@@ -4104,6 +4327,9 @@ function App() {
           ocApplyState: 'staged',
           ocTuningLocked,
           customCurves: customCurvesRef.current,
+          fanPresets: fanPresetsRef.current,
+          powerPresets: powerPresetsRef.current,
+          quickPresets: quickPresetsRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
@@ -4111,6 +4337,7 @@ function App() {
           keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
+          autoPerformanceEnabled: autoPerformanceEnabledRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -4139,6 +4366,9 @@ function App() {
     )
 
     try {
+      if (!controlsBootstrappedRef.current) {
+        throw new Error('Saved settings have not loaded yet. Try again in a moment.')
+      }
       await saveControlSnapshot(
         buildControlSnapshotForPersistence({
           activePowerProfile,
@@ -4151,6 +4381,9 @@ function App() {
           ocApplyState,
           ocTuningLocked: nextLocked,
           customCurves: customCurvesRef.current,
+          fanPresets: fanPresetsRef.current,
+          powerPresets: powerPresetsRef.current,
+          quickPresets: quickPresetsRef.current,
           fanSyncLockEnabled,
           smartChargingEnabled: smartChargingEnabledRef.current,
           processorStateControlEnabled: processorStateControlEnabledRef.current,
@@ -4158,6 +4391,7 @@ function App() {
           keepUiPrewarmed: keepUiPrewarmedRef.current,
           autoRefreshRateOnBatteryEnabled: autoRefreshRateOnBatteryEnabledRef.current,
           autoRefreshRateRestoreHz: autoRefreshRateRestoreHzRef.current,
+          autoPerformanceEnabled: autoPerformanceEnabledRef.current,
           usbPowerEnabled,
           blueLightFilterEnabled: blueLightFilterEnabledRef.current,
           selectedBootArt,
@@ -4177,10 +4411,122 @@ function App() {
     setActiveOcSlot('daily')
     setGpuOverclock({ ...defaultGpuOverclock })
     setOcApplyState('staged')
+    setAutoGpuFinderResult(null)
     setStatusMessage(
       'GPU overclocking and voltage controls restored to the AeroForge daily baseline.',
     )
     pulseControl('daily')
+  }
+
+  function nitrosenseMemoryOffsetFromSlots(): number {
+    const extreme = ocProfileSlots.find((slot) => slot.id === 'arena' || slot.id === 'creator')
+    return extreme?.settings.memoryClock ?? 200
+  }
+
+  function runAutoGpuFinder(): AutoGpuFinderResult {
+    const result = findBestGpuOverclock({
+      acPluggedIn: displayedAcPluggedIn,
+      gpuTempC: displayedGpuTemp,
+      cpuTempC: displayedCpuTemp,
+      systemTempC: displayedSystemTemp,
+      gpuName: activeTelemetry?.gpuName ?? displayedGpuIdentity,
+      nvidiaTelemetryEnabled: nvidiaTelemetryEnabledRef.current,
+      ocTuningLocked,
+      nitrosenseMemoryOffsetMhz: nitrosenseMemoryOffsetFromSlots(),
+    })
+    setAutoGpuFinderResult(result)
+    return result
+  }
+
+  function handleFindBestGpuOverclock() {
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
+    const result = runAutoGpuFinder()
+    setGpuOverclock({
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    })
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setOcApplyState('staged')
+    setStatusMessage(`Auto GPU Overclocking: ${result.summary}`)
+    pulseControl('auto-gpu-find')
+  }
+
+  async function handleApplyAutoGpuRecommendation() {
+    const result = autoGpuFinderResult ?? runAutoGpuFinder()
+    if (!result.canApply) {
+      setStatusMessage(result.blockedReason ?? result.summary)
+      showToast('warning', 'Auto GPU Overclocking blocked', result.blockedReason ?? result.summary)
+      return
+    }
+
+    if (autoPerformanceEnabledRef.current) {
+      commitAutoPerformanceEnabled(false)
+      void persistStagedControlsRef.current({ autoPerformanceEnabled: false })
+    }
+
+    const nextTuning: GpuTuningState = {
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    }
+    setGpuOverclock(nextTuning)
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setAutoGpuFinderPending(true)
+    pulseControl('auto-gpu-apply')
+
+    try {
+      if (!serviceConnected) {
+        setOcApplyState('live')
+        setStatusMessage(
+          `Staged ${result.tierLabel} (${result.offsets.coreClockMhz >= 0 ? '+' : ''}${result.offsets.coreClockMhz} / ${result.offsets.memoryClockMhz >= 0 ? '+' : ''}${result.offsets.memoryClockMhz} MHz) in preview. Connect the AeroForge service to apply on hardware, then follow the instructions below.`,
+        )
+        showToast('info', 'Auto GPU settings staged', result.tierLabel)
+        return
+      }
+
+      const applied = await applyGpuTuning(
+        toBackendGpuTuningState(nextTuning),
+        result.suggestedOcSlotId,
+      )
+      applyAuthoritativeSnapshot(applied.controls, 'gpu')
+      setStatusMessage(`Auto GPU Overclocking applied ${result.tierLabel}. ${result.summary}`)
+      showToast('success', 'Auto GPU Overclocking applied', result.tierLabel)
+    } catch (error) {
+      setStatusMessage(`Auto GPU Overclocking apply failed: ${describeError(error)}`)
+      showToast('error', 'Auto GPU Overclocking failed', describeError(error))
+    } finally {
+      setAutoGpuFinderPending(false)
+    }
+  }
+
+  function handleAutoGpuStepDown() {
+    const current = autoGpuFinderResult?.tierId ?? 'nitrosense'
+    const nextTier = stepDownGpuOverclockTier(current)
+    const result = resultForTier(
+      nextTier,
+      { nitrosenseMemoryOffsetMhz: nitrosenseMemoryOffsetFromSlots() },
+      `Stepped down to ${nextTier === 'stock' ? 'Stock' : 'Mild'} after instability. Retest, then Save To Custom if stable.`,
+    )
+    setAutoGpuFinderResult(result)
+    setGpuOverclock({
+      ...gpuOverclock,
+      coreClock: result.offsets.coreClockMhz,
+      memoryClock: result.offsets.memoryClockMhz,
+      voltageOffset: 0,
+    })
+    setActiveOcSlot(result.suggestedOcSlotId)
+    setActivePowerProfile('custom')
+    setOcApplyState('staged')
+    setStatusMessage(result.summary)
   }
 
   const activeStageFitSnapshot =
@@ -4218,8 +4564,59 @@ function App() {
                 {tab.label}
               </button>
             ))}
+            <button
+              type="button"
+              className="topbar__shortcut-hint"
+              title="Keyboard shortcuts (?)"
+              aria-label="Show keyboard shortcuts"
+              onClick={() => setShortcutsHelpOpen(true)}
+            >
+              ?
+            </button>
           </nav>
         </header>
+
+        {hardwareIssueVisible && hardwareReadiness && (
+          <HardwareReadinessBanner
+            title={hardwareIssueTitle}
+            detail={hardwareIssueDetail}
+            readiness={hardwareReadiness}
+            repairPending={hardwareRepairPending}
+            startPending={hardwareStartPending}
+            onRepair={() => void handleHardwareRepair()}
+            onStartService={() => void handleHardwareServiceStart()}
+          />
+        )}
+
+        {(activeTab === 'home' || activeTab === 'power' || activeTab === 'fans') && (
+          <>
+            <PresetPanel
+              fanPresets={fanPresets}
+              powerPresets={powerPresets}
+              quickPresets={quickPresets}
+              onSaveFan={saveCurrentFanPreset}
+              onSavePower={saveCurrentPowerPreset}
+              onSaveQuick={saveCurrentQuickPreset}
+              onApplyFan={applyFanPreset}
+              onApplyPower={applyPowerPreset}
+              onApplyQuick={applyQuickPreset}
+              onRename={renamePreset}
+              onDuplicate={duplicatePreset}
+              onDelete={deletePreset}
+              onExport={exportPresetPack}
+              onImport={triggerPresetImport}
+            />
+            <input
+              ref={presetImportInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="visually-hidden"
+              onChange={(event) => void handlePresetImportFile(event)}
+              aria-hidden
+              tabIndex={-1}
+            />
+          </>
+        )}
 
         {activeTab === 'home' && (
           <div
@@ -4433,6 +4830,8 @@ function App() {
                 <button className="is-active">Fan Control</button>
               </div>
 
+              <LayerStatusStrip statuses={fanLayerStatuses} emptyLabel="No fan apply has run yet." />
+
               <div className="fan-mode__frame">
                 <div className="fan-mode__header">
                   <span className="eyebrow">Fan Control</span>
@@ -4456,6 +4855,12 @@ function App() {
 
                 {activeFanProfile === 'custom' ? (
                   <>
+                    <CurveTemplateBar
+                      templates={FAN_CURVE_TEMPLATES}
+                      disabled={settingsActionPending !== null}
+                      onApply={applyFanCurveTemplate}
+                    />
+
                     <div className="fan-custom-grid">
                       <FanCurvePanel
                         title="GPU curve"
@@ -4523,7 +4928,7 @@ function App() {
                         Reset custom
                       </button>
                       <span>
-                        Custom mode stores edits immediately and refreshes the curve-derived fan target every 1 second.
+                        Custom mode stores edits immediately and refreshes hardware only when the curve target changes or a safety refresh is due.
                       </span>
                     </div>
                   </>
@@ -4619,9 +5024,43 @@ function App() {
                 <button className="is-active">Mode</button>
               </div>
 
+              <LayerStatusStrip
+                statuses={powerLayerStatuses}
+                emptyLabel="No power apply has run yet."
+              />
+
+              <div className="power-auto-panel">
+                <div>
+                  <strong>Automatic Performance</strong>
+                  <p>
+                    {autoPerformanceEnabled
+                      ? autoPerformanceStatus ??
+                        'Watching AC power, load, and thermals. GPU offsets stay within NitroSense-matched +100/+200 MHz and never run on battery.'
+                      : 'Opt-in auto mode switches Quiet → Turbo from AC, load, and thermals. GPU clock offsets only apply on AC when cool, using the same NitroSense Performance/Turbo presets — never voltage or raised power limits.'}
+                  </p>
+                </div>
+                <button
+                  className={`toggle ${autoPerformanceEnabled ? 'is-on' : ''}`}
+                  disabled={settingsActionPending !== null}
+                  onClick={() => void handleAutoPerformanceToggle()}
+                  aria-pressed={autoPerformanceEnabled}
+                  type="button"
+                >
+                  <span />
+                </button>
+              </div>
+
               <div className="power-mode__frame">
                 <div className="power-mode__header">
-                  <span className="eyebrow">{formatPowerSource(displayedAcPluggedIn)}</span>
+                  <span className="eyebrow">
+                    {autoPerformanceEnabled
+                      ? `Auto · ${
+                          autoPerformanceMode
+                            ? autoPerformanceModeLabel(autoPerformanceMode)
+                            : 'arming'
+                        } · ${formatPowerSource(displayedAcPluggedIn)}`
+                      : formatPowerSource(displayedAcPluggedIn)}
+                  </span>
                 </div>
 
                 <div className="power-mode__profiles">
@@ -4742,6 +5181,74 @@ function App() {
                         <span>
                           Core and memory offsets apply live through the NVIDIA path on this GPU.
                         </span>
+                      </div>
+
+                      <div className="power-oc-auto">
+                        <div className="power-oc-auto__copy">
+                          <span className="eyebrow">Auto GPU Overclocking</span>
+                          <strong>
+                            {autoGpuFinderResult
+                              ? `${autoGpuFinderResult.tierLabel} · core ${
+                                  autoGpuFinderResult.offsets.coreClockMhz >= 0 ? '+' : ''
+                                }${autoGpuFinderResult.offsets.coreClockMhz} / mem ${
+                                  autoGpuFinderResult.offsets.memoryClockMhz >= 0 ? '+' : ''
+                                }${autoGpuFinderResult.offsets.memoryClockMhz} MHz`
+                              : 'Find the best safe offsets for this laptop'}
+                          </strong>
+                          <p>
+                            {autoGpuFinderResult?.summary ??
+                              'Reads AC power, thermals, and telemetry, then picks Stock, Mild (+50/+100), or NitroSense Extreme (+100/+200) with verification steps. Never writes voltage or raised power limits.'}
+                          </p>
+                        </div>
+                        <div className="power-oc-auto__actions">
+                          <button
+                            className={`button button--primary ${
+                              glowTarget === 'auto-gpu-find' ? 'is-pulsing' : ''
+                            }`}
+                            type="button"
+                            disabled={ocTuningLocked || autoGpuFinderPending}
+                            onClick={handleFindBestGpuOverclock}
+                          >
+                            Find Best Settings
+                          </button>
+                          <button
+                            className={`button ${
+                              glowTarget === 'auto-gpu-apply' ? 'is-pulsing' : ''
+                            }`}
+                            type="button"
+                            disabled={
+                              ocTuningLocked ||
+                              autoGpuFinderPending ||
+                              (autoGpuFinderResult != null && !autoGpuFinderResult.canApply)
+                            }
+                            onClick={() => void handleApplyAutoGpuRecommendation()}
+                          >
+                            {autoGpuFinderPending ? 'Applying…' : 'Apply Recommendation'}
+                          </button>
+                          <button
+                            className="button button--ghost"
+                            type="button"
+                            disabled={
+                              ocTuningLocked ||
+                              autoGpuFinderPending ||
+                              autoGpuFinderResult == null ||
+                              autoGpuFinderResult.tierId === 'stock'
+                            }
+                            onClick={handleAutoGpuStepDown}
+                          >
+                            Unstable — Step Down
+                          </button>
+                        </div>
+                        {autoGpuFinderResult && (
+                          <ol className="power-oc-auto__instructions">
+                            {autoGpuFinderResult.instructions.map((step) => (
+                              <li key={step}>{step}</li>
+                            ))}
+                          </ol>
+                        )}
+                        {autoGpuFinderResult?.blockedReason && (
+                          <p className="power-oc-auto__blocked">{autoGpuFinderResult.blockedReason}</p>
+                        )}
                       </div>
 
                       <div className="power-oc-topline">
@@ -4963,9 +5470,9 @@ function App() {
                                 {updateStatus.stagedAssetName}
                                 {updateStatus.stagedSha256
                                   ? ` - SHA256 ${updateStatus.stagedSha256.slice(0, 16)}...${
-                                      updateStatus.canInstallUpdate
-                                        ? ''
-                                        : ' - not installable for the current release.'
+                                      updateStatus.stagedSha256Verified
+                                        ? ' verified.'
+                                        : ' not verified by release metadata.'
                                     }`
                                   : updateStatus.canInstallUpdate
                                     ? ' - ready for install.'
@@ -5143,6 +5650,28 @@ function App() {
 
                         <div className="personal-setting-block">
                           <div>
+                            <strong>Automatic Performance</strong>
+                            <p>
+                              {autoPerformanceEnabled
+                                ? autoPerformanceStatus ??
+                                  'Armed: switches Quiet/Balanced/Performance/Turbo from AC, load, and thermals; NitroSense GPU offsets only when cool on AC.'
+                                : 'Opt-in. Never overclocks on battery, never writes voltage/power%/temp limits, and backs off above 85°C.'}
+                            </p>
+                          </div>
+
+                          <button
+                            className={`toggle ${autoPerformanceEnabled ? 'is-on' : ''}`}
+                            disabled={settingsActionPending !== null}
+                            onClick={() => void handleAutoPerformanceToggle()}
+                            aria-pressed={autoPerformanceEnabled}
+                            type="button"
+                          >
+                            <span />
+                          </button>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
                             <strong>Auto 60 Hz on Battery</strong>
                             <p>
                               {refreshRatePending
@@ -5272,13 +5801,15 @@ function App() {
                           </div>
                         </div>
 
+                        <AppRulesPanel powerOptions={powerProfiles} fanOptions={fanProfiles} />
+
                         <div className="personal-setting-block">
                           <div>
                             <strong>Keep AeroForge Prewarmed</strong>
                             <p>
                               {keepUiPrewarmed
-                                ? 'AeroForge keeps a hidden UI instance available after close so the next open is faster.'
-                                : 'AeroForge exits when the window closes. Opening it later will cold-start the UI.'}
+                                ? 'AeroForge relaunches a hidden UI instance after a tray Exit so the next open is faster.'
+                                : 'Closing the window hides AeroForge to the tray. After a tray Exit, the next open will cold-start the UI.'}
                             </p>
                             <small>Warning: this increases RAM usage while enabled.</small>
                           </div>
@@ -5327,7 +5858,7 @@ function App() {
                         </div>
                       </div>
                     </section>
-                  ) : (
+                  ) : activePersonalSection === 'boot' ? (
                     <section className="personal-frame personal-frame--disabled" aria-disabled="true">
                       <div className="personal-frame__header">
                         <span className="eyebrow">System Boot Effect</span>
@@ -5428,7 +5959,71 @@ function App() {
                         </div>
                       </div>
                     </section>
-                  )}
+                  ) : activePersonalSection === 'backup' ? (
+                    <section className="personal-frame">
+                      <div className="personal-frame__header">
+                        <span className="eyebrow">Backup & Restore</span>
+                      </div>
+
+                      <div className="personal-frame__body">
+                        <div className="settings-note">
+                          <div>
+                            <span className="eyebrow">Portable settings</span>
+                            <strong>Export your full AeroForge control profile</strong>
+                            <p>
+                              Saves power and fan modes, custom curves, presets, GPU tuning slots,
+                              and personal toggles as JSON. Does not include update tokens or service
+                              secrets. After import, re-apply power/fan modes to push them live to
+                              hardware.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>Export settings backup</strong>
+                            <p>
+                              Download a portable JSON snapshot of the current staged desktop state.
+                            </p>
+                          </div>
+                          <button
+                            className="button"
+                            type="button"
+                            onClick={exportSettingsBackup}
+                          >
+                            Export Backup
+                          </button>
+                        </div>
+
+                        <div className="personal-setting-block">
+                          <div>
+                            <strong>Import settings backup</strong>
+                            <p>
+                              Replace local staged settings from a previously exported AeroForge
+                              settings file.
+                            </p>
+                          </div>
+                          <button
+                            className="button button--ghost"
+                            type="button"
+                            onClick={triggerSettingsImport}
+                          >
+                            Import Backup
+                          </button>
+                        </div>
+
+                        <input
+                          ref={settingsImportInputRef}
+                          type="file"
+                          accept="application/json,.json"
+                          className="visually-hidden"
+                          onChange={(event) => void handleSettingsImportFile(event)}
+                          aria-hidden
+                          tabIndex={-1}
+                        />
+                      </div>
+                    </section>
+                  ) : null}
                 </div>
               </div>
             </section>
@@ -5441,7 +6036,27 @@ function App() {
                   <span className="eyebrow">Debug</span>
                   <h2>Backend Diagnostics</h2>
                 </div>
+                <div className="debug-workspace__actions">
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => void copyDiagnosticsToClipboard()}
+                  >
+                    Copy Report
+                  </button>
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={exportDiagnosticsFile}
+                  >
+                    Export JSON
+                  </button>
+                  <button type="button" className="button button--ghost" onClick={clearDebugEvents}>
+                    Clear Log
+                  </button>
+                </div>
               </div>
+              <p className="debug-shortcut-hint">{KEYBOARD_SHORTCUT_HINT}</p>
 
               <div className="debug-status-grid">
                 <div className="debug-card">
@@ -5566,9 +6181,11 @@ function App() {
                   </div>
 
                   <ul>
-                    {debugEvents.map((event) => (
-                      <li key={event}>{event}</li>
-                    ))}
+                    {debugEvents.length === 0 ? (
+                      <li>No recent debug events yet. Switch profiles or wait for a backend poll.</li>
+                    ) : (
+                      debugEvents.map((event) => <li key={event.id}>{event.text}</li>)
+                    )}
                   </ul>
                 </div>
               </section>
@@ -5576,422 +6193,13 @@ function App() {
           )}
         </div>
       </main>
-    </div>
-  )
-}
-
-type MetricCardProps = {
-  label: string
-  value: string
-  detail: string
-}
-
-function MetricCard({ label, value, detail }: MetricCardProps) {
-  return (
-    <div className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </div>
-  )
-}
-
-type HomeFanReadoutCardProps = {
-  label: string
-  value: number | null
-  detail: string
-}
-
-function HomeFanReadoutCard({ label, value, detail }: HomeFanReadoutCardProps) {
-  return (
-    <div className="home-fan-card">
-      <div className="home-fan-card__visual" aria-hidden="true">
-        <div className="home-fan-card__hub" />
-      </div>
-      <div className="home-fan-card__copy">
-        <span className="eyebrow">{label}</span>
-        <strong>{value == null ? 'Offline' : formatTelemetryValue(value)}</strong>
-        <small>{value == null ? '' : 'RPM'}</small>
-        <p>{detail}</p>
-      </div>
-    </div>
-  )
-}
-
-type HomeTemperatureDialProps = {
-  label: string
-  identity?: string
-  value: number | null
-  details?: Array<{
-    label: string
-    value: number | null
-    suffix?: string
-    displayValue?: string
-  }>
-}
-
-function HomeTemperatureDial({
-  label,
-  identity,
-  value,
-  details = [],
-}: HomeTemperatureDialProps) {
-  const dialSize = 132
-  const dialStroke = 16
-  const dialRadius = (dialSize - dialStroke) / 2
-  const safeValue = value == null ? 0 : clamp(value, 0, 100)
-  const greenLength = clamp(safeValue, 0, 50)
-  const orangeLength = clamp(safeValue - 50, 0, 20)
-  const redLength = clamp(safeValue - 70, 0, 30)
-
-  return (
-    <div className={`home-temp-card ${details.length > 0 ? 'home-temp-card--detailed' : ''}`}>
-      <div className="home-temp-card__heading">
-        <span className="eyebrow">{label}</span>
-        {identity && <strong>{identity}</strong>}
-      </div>
-      <div className="home-temp-card__visual">
-        <svg
-          className="home-temp-card__ring"
-          viewBox={`0 0 ${dialSize} ${dialSize}`}
-          aria-hidden="true"
-        >
-          <circle
-            className="home-temp-card__track"
-            cx={dialSize / 2}
-            cy={dialSize / 2}
-            r={dialRadius}
-            pathLength="100"
-          />
-          <circle
-            className="home-temp-card__segment home-temp-card__segment--green"
-            cx={dialSize / 2}
-            cy={dialSize / 2}
-            r={dialRadius}
-            pathLength="100"
-            style={{
-              strokeDasharray: `${greenLength} ${100 - greenLength}`,
-              strokeDashoffset: '0',
-            }}
-          />
-          <circle
-            className="home-temp-card__segment home-temp-card__segment--orange"
-            cx={dialSize / 2}
-            cy={dialSize / 2}
-            r={dialRadius}
-            pathLength="100"
-            style={{
-              strokeDasharray: `${orangeLength} ${100 - orangeLength}`,
-              strokeDashoffset: '-50',
-            }}
-          />
-          <circle
-            className="home-temp-card__segment home-temp-card__segment--red"
-            cx={dialSize / 2}
-            cy={dialSize / 2}
-            r={dialRadius}
-            pathLength="100"
-            style={{
-              strokeDasharray: `${redLength} ${100 - redLength}`,
-              strokeDashoffset: '-70',
-            }}
-          />
-        </svg>
-        <div className="home-temp-card__content">
-          <strong>
-            {formatTelemetryValue(value)}
-            {value == null ? '' : <span className="home-temp-card__unit"> C</span>}
-          </strong>
-        </div>
-      </div>
-      {details.length > 0 && (
-        <div className="home-temp-card__details">
-          {details.map((detail) => (
-            <div className="home-temp-card__detail-row" key={detail.label}>
-              <span>{detail.label}</span>
-              <strong>
-                {detail.displayValue ?? formatTelemetryValue(detail.value)}
-                {detail.displayValue != null || detail.value == null ? '' : detail.suffix ?? ''}
-              </strong>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-type BootSplashPreviewProps = {
-  art: BootArt
-  compact?: boolean
-}
-
-function BootSplashPreview({ art, compact = false }: BootSplashPreviewProps) {
-  return (
-    <div
-      className={`branding-preview__placeholder boot-splash ${art.palette} boot-splash--${art.layout} ${
-        compact ? 'is-compact' : ''
-      }`}
-    >
-      <div className="boot-splash__glow" />
-      <img className="boot-splash__mark" src={aeroforgeMark} alt="" aria-hidden="true" />
-      <div className="boot-splash__copy">
-        <strong>{art.headline}</strong>
-        <span>{art.subline}</span>
-      </div>
-    </div>
-  )
-}
-
-type ProcessorStateControlProps = {
-  label: string
-  min?: number
-  value: number
-  onChange: (value: number) => void
-}
-
-function ProcessorStateControl({
-  label,
-  min = 5,
-  value,
-  onChange,
-}: ProcessorStateControlProps) {
-  return (
-    <label className="power-setting">
-      <div className="power-setting__header">
-        <span>{label}</span>
-        <strong>{value}%</strong>
-      </div>
-
-      <input
-        className="power-setting__slider"
-        type="range"
-        min={min}
-        max="100"
-        step="1"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <ShortcutsOverlay
+        open={shortcutsHelpOpen}
+        entries={KEYBOARD_SHORTCUT_ENTRIES}
+        onClose={() => setShortcutsHelpOpen(false)}
       />
-
-      <input
-        className="power-setting__input"
-        type="number"
-        min={min}
-        max="100"
-        step="1"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </label>
-  )
-}
-
-type OverclockSliderProps = {
-  label: string
-  unit: string
-  value: number
-  min: number
-  max: number
-  step: number
-  disabled?: boolean
-  statusLabel?: string
-  note?: string
-  onChange: (value: number) => void
-}
-
-function OverclockSlider({
-  label,
-  unit,
-  value,
-  min,
-  max,
-  step,
-  disabled = false,
-  statusLabel,
-  note,
-  onChange,
-}: OverclockSliderProps) {
-  return (
-    <label className={`power-setting ${disabled ? 'is-disabled' : ''}`}>
-      <div className="power-setting__header">
-        <div className="power-setting__title">
-          <span>{label}</span>
-          {statusLabel && <em className="power-setting__badge">{statusLabel}</em>}
-        </div>
-        <strong>
-          {value > 0 && unit !== 'C' ? '+' : ''}
-          {value}
-          {unit}
-        </strong>
-      </div>
-
-      <input
-        className="power-setting__slider"
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-
-      <input
-        className="power-setting__input"
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-
-      {note && <small className="power-setting__note">{note}</small>}
-    </label>
-  )
-}
-
-type FanCurvePanelProps = {
-  title: string
-  target: CurveTarget
-  points: CurvePoint[]
-  editable: boolean
-  chartRef: (node: SVGSVGElement | null) => void
-  onPointDown: (index: number) => void
-  syncLockEnabled: boolean
-  onSyncLockToggle: () => void
-  onSecondaryAction: () => void
-  secondaryLabel: string
-}
-
-function FanCurvePanel({
-  title,
-  target,
-  points,
-  editable,
-  chartRef,
-  onPointDown,
-  syncLockEnabled,
-  onSyncLockToggle,
-  onSecondaryAction,
-  secondaryLabel,
-}: FanCurvePanelProps) {
-  return (
-    <section className="fan-curve-card">
-      <div className="fan-curve-card__header">
-        <h3>{title}</h3>
-        <span>{target.toUpperCase()} thermal zone</span>
-      </div>
-
-      <div className="fan-curve-card__chart-wrap">
-        <svg
-          ref={chartRef}
-          className={`curve-chart ${editable ? 'is-editable' : ''}`}
-          viewBox={`0 0 ${chartWidth} ${chartHeight}`}
-          aria-label={`${target.toUpperCase()} fan curve editor`}
-        >
-          {[speedMin, 25, 50, 75, 100].map((speed) => {
-            const y =
-              chartHeight -
-              chartPadding -
-              ((speed - speedMin) / (speedMax - speedMin)) * (chartHeight - chartPadding * 2)
-
-            return (
-              <g key={`${target}-speed-${speed}`}>
-                <line
-                  className="curve-chart__grid"
-                  x1={chartPadding}
-                  x2={chartWidth - chartPadding}
-                  y1={y}
-                  y2={y}
-                />
-              </g>
-            )
-          })}
-
-          {[30, 45, 60, 75, 90].map((temp) => {
-            const x =
-              chartPadding +
-              ((temp - tempMin) / (tempMax - tempMin)) * (chartWidth - chartPadding * 2)
-
-            return (
-              <g key={`${target}-temp-${temp}`}>
-                <line
-                  className="curve-chart__grid curve-chart__grid--vertical"
-                  x1={x}
-                  x2={x}
-                  y1={chartPadding}
-                  y2={chartHeight - chartPadding}
-                />
-              </g>
-            )
-          })}
-
-          <path className="curve-chart__glow" d={buildCurvePath(points)} />
-          <path className="curve-chart__path" d={buildCurvePath(points)} />
-
-          {points.map((point, index) => {
-            const { x, y } = pointToChart(point)
-            return (
-              <g key={`${target}-${index}`}>
-                <circle className="curve-chart__halo" cx={x} cy={y} r="14" />
-                <circle
-                  className="curve-chart__point"
-                  cx={x}
-                  cy={y}
-                  r="8"
-                  onPointerDown={(event) => {
-                    if (!editable) {
-                      return
-                    }
-                    event.preventDefault()
-                    event.currentTarget.setPointerCapture(event.pointerId)
-                    onPointDown(index)
-                  }}
-                />
-              </g>
-            )
-          })}
-        </svg>
-
-        <div className="fan-curve-card__axis-note fan-curve-card__axis-note--left">
-          fan %
-        </div>
-        <div className="fan-curve-card__axis-note fan-curve-card__axis-note--right">
-          temp C
-        </div>
-        <div className="fan-curve-card__axis-note fan-curve-card__axis-note--bottom-left">
-          30C
-        </div>
-        <div className="fan-curve-card__axis-note fan-curve-card__axis-note--bottom-right">
-          90C
-        </div>
-      </div>
-
-      <div className="fan-curve-card__points">
-        {points.map((point, index) => (
-          <div className="fan-curve-chip" key={`${target}-chip-${index}`}>
-            <span>P{index + 1}</span>
-            <strong>{point.temp}C</strong>
-            <strong>{point.speed}%</strong>
-          </div>
-        ))}
-      </div>
-
-      <div className="fan-curve-actions">
-        <button
-          className={`button button--toggle ${syncLockEnabled ? 'is-active' : ''}`}
-          onClick={onSyncLockToggle}
-          aria-pressed={syncLockEnabled}
-        >
-          Sync Lock
-        </button>
-        <button className="button" onClick={onSecondaryAction}>
-          {secondaryLabel}
-        </button>
-      </div>
-    </section>
+    </div>
   )
 }
 

@@ -1,3 +1,4 @@
+use crate::DynError;
 use crate::{
     paths::{write_log_line, ServicePaths},
     workers::unix_timestamp,
@@ -11,7 +12,7 @@ use super::{
 pub fn apply_gpu_tuning(
     paths: &ServicePaths,
     request: ApplyGpuTuningRequest,
-) -> Result<AppliedGpuTuningSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<AppliedGpuTuningSnapshot, DynError> {
     let tuning = sanitize_gpu_tuning(request.tuning);
 
     write_log_line(

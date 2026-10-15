@@ -1,5 +1,4 @@
 use std::{
-    os::windows::process::CommandExt,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -10,11 +9,11 @@ use super::{
 };
 use crate::paths::ServicePaths;
 use crate::workers::control::acer_wmi;
+use crate::DynError;
 
 static FIRMWARE_SENSOR_CACHE: OnceLock<Arc<Mutex<FirmwareSensorCache>>> = OnceLock::new();
 // made by faxcon
 static THERMAL_ZONE_CACHE: OnceLock<Arc<Mutex<ThermalZoneCache>>> = OnceLock::new();
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct ThermalZoneCache {
     last_refresh: Option<Instant>,
@@ -67,7 +66,7 @@ fn read_thermal_zone_temp_c(paths: &ServicePaths) -> Option<u8> {
         &cache,
         std::time::Duration::from_secs(30),
         |state| state.last_refresh().is_none(),
-        || query_windows_thermal_zone_temp_c(),
+        query_windows_thermal_zone_temp_c,
         |state, result| {
             if let Ok(value) = result {
                 state.value = *value;
@@ -149,8 +148,7 @@ pub fn read_firmware_sensors(paths: &ServicePaths) -> FirmwareSensorSnapshot {
     snapshot
 }
 
-fn query_firmware_sensor_snapshot(
-) -> Result<FirmwareSensorSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+fn query_firmware_sensor_snapshot() -> Result<FirmwareSensorSnapshot, DynError> {
     if let Ok(acer) = acer_wmi::read_firmware_sensor_snapshot() {
         return Ok(FirmwareSensorSnapshot {
             thermal_zone_temp_c: None,
@@ -180,8 +178,7 @@ fn query_firmware_sensor_snapshot(
     })
 }
 
-fn query_windows_thermal_zone_temp_c(
-) -> Result<Option<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn query_windows_thermal_zone_temp_c() -> Result<Option<u8>, DynError> {
     let script = r#"
 $thermalZone = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1
 $result = [ordered]@{
@@ -193,10 +190,7 @@ if ($thermalZone -and $thermalZone.CurrentTemperature) {
 $result | ConvertTo-Json -Compress
 "#;
 
-    let output = std::process::Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-Command", script])
-        .output()?;
+    let output = crate::paths::powershell_command(script).output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
