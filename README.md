@@ -1,5 +1,7 @@
 # AeroForge Control
 
+> **Maintenance status:** AeroForge is no longer actively maintained. Updates and fixes are expected very rarely.
+
 ## Bug Reports And Feedback
 
 If AeroForge breaks, behaves oddly, or you want to report a bug or leave feedback, go here first:
